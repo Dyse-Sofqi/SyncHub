@@ -34,6 +34,15 @@ export default defineConfig([
                 },
                 tsconfigRootDir: import.meta.dirname,
             },
+            /**
+             * 桌面端的 Obsidian 插件跑在带 Node 的进程里，`process` 是能用的。
+             *
+             * 不声明的话 `no-undef` 会给它一条警告（`src` 里另外两条同类噪音是
+             * `Buffer` / `require`，同样属于「规则没跟上运行环境」，一直留着）。
+             * 这条不影响 `lint:review`（社区审核那套），只是让 `pnpm lint` 的基线
+             * 数字干净一点 —— 基线是用来发现**新**问题的，不该被已知噪音占位。
+             */
+            globals: { process: "readonly" },
         },
     },
 ]);

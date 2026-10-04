@@ -15,6 +15,7 @@ import {
     markRemoteOnlyForced,
     pruneState,
     recordSynced,
+    renameEntry,
     saveState,
     type ImageSyncState,
     type SyncedEntry,
@@ -55,6 +56,17 @@ import type {
  *
  * 于是这个模块**从不删本地文件**，`run()` 里不可逆的操作只剩「覆盖」，
  * 而覆盖的是有备份的那一侧。
+ *
+ * ## 改名必须被**告知**（2026-10-01）
+ *
+ * 这套系统的身份就是 **vault 路径**（对象键 = 前缀 + 路径，状态清单也按路径存）。
+ * 所以改名在同步看来是「旧路径没了 + 新路径出现了」，而镜像规则会各按自己的
+ * 解释处理：新路径当新增**重传**、旧路径当「云端有、本地没有」**下载回来** ——
+ * 库里出现两批同样的图片，且因为两边重新对上了而不会自愈（用户报的就是这个）。
+ *
+ * 于是多了一条入口：本地改名 → `renameRemoteBackup()` 把**记录**与**云端那一份**
+ * 一起搬到新路径（记录先搬、旧路径留墓碑，云端用服务端 COPY）。两条来源共用它：
+ * 图片管理面板的改名，以及 `vault.on("rename")`（含文件夹改名）。
  *
  * ## 与 git 同步的关系
  *
@@ -123,8 +135,26 @@ export function pathFromKey(key: string, prefix: string): string | undefined {
     return path.length > 0 ? path : undefined;
 }
 
+/**
+ * 同一次改名被**两条来源**各报一次时的合并窗口（毫秒）。
+ *
+ * 面板改名走的是「`fileManager.renameFile`（这一步会让 Obsidian 发出 `rename`
+ * 事件）+ 自己再调一次 `renameRemoteBackup`」，所以同一次改名的两条路几乎同时
+ * 到达。去重让云端只搬一次（否则第二次 COPY 的源键已经没了，会白报一个错）。
+ *
+ * 5 秒远大于两条路之间的间隔，又短到不会把「改名 A→B，再改回 A→B」这种
+ * 极端操作吞掉（真发生也只是云端少搬一次，下一轮同步会补齐）。
+ */
+const MOVE_DEDUPE_MS = 5_000;
+
 export class ImageSyncService {
     private running = false;
+
+    /** 改名搬运的串行队列：队尾 promise（见 `renameRemoteBackup`）。 */
+    private moveTail: Promise<unknown> = Promise.resolve();
+
+    /** 刚受理过的改名（`from\u0000to` → 时刻）。见 `MOVE_DEDUPE_MS`。 */
+    private readonly recentMoves = new Map<string, number>();
 
     constructor(private readonly deps: ImageSyncDeps) {}
 
@@ -224,30 +254,123 @@ export class ImageSyncService {
     }
 
     /**
-     * 云端的一份从旧路径搬到新路径 —— 本地重命名之后调用。
+     * 本地改名之后：把这一份的**身份**（状态记录）与云端那一份一起搬到新路径。
      *
-     * 顺序是「先删旧键、再传新键」：反过来会在一瞬间出现两份，而删除旧键
-     * 失败时至少新键是好的（用户看得见新名字的那一份在云端）。旧键不存在时
-     * S3 的 DELETE 也是成功的（幂等），所以不需要先探测。
+     * ## 两条来源共用它
      *
-     * 失败不抛错 —— 与 `syncPath` 同一个理由：它挂在一次用户交互后面，
-     * 抛出去只会让调用方半路中断。
+     * 1. **图片管理面板**的改名（单张 / 批量）—— 面板在 `renameFile` 之后调它；
+     * 2. **库里的改名事件**（`vault.on("rename")`，含**文件夹改名** —— Obsidian 会
+     *    为文件夹里的每个文件各发一次）—— 由模块转发过来。
+     *
+     * 同一次改名两条路都会来（事件在 `renameFile` 里就发了），所以这里按
+     * `from→to` **去重**（`recentMoves`），并且**串行**执行：一次文件夹改名可能
+     * 是几百张图，几百个并发请求会把桶打疼（R2 对突发并发也不友好）。
+     *
+     * ## 顺序：先记账，再搬云端
+     *
+     * 记账（`renameEntry` + 旧路径留墓碑）是纯本地的，而它**单独就能挡住**
+     * 「旧那份被下载回来」——那正是 2026-10-01 报的重复问题。云端那一步失败
+     * （甚至压根没跑）也不影响这个结论：新路径的记录还在，下一轮同步看到
+     * 「本地有、云端没有」会把它补上去（那条路是无条件上传）。
+     *
+     * ## 云端用服务端 COPY，不再重传
+     *
+     * 原来是「删旧键 + 从本地重传新键」：内容实打实走一遍上传带宽。改用
+     * `copyObject` 之后内容不过本地 —— 文件夹改名时省下的是整批图片的流量。
+     *
+     * ## 总开关关掉时只记账
+     *
+     * 与 `noteDeleted` 同一个边界：关掉总开关 = 「别在背后动我的图片」，
+     * 所以一个请求都不发。但**记录照搬** —— 那是我们自己的账本，不动用户的
+     * 图片；而少了这一步，用户下次打开开关的第一轮就会同时重传新路径、
+     * 又把旧路径下载回来（就是那个重复问题）。
+     *
+     * 这条判据对**两条来源一视同仁**（面板改名也一样）。不能一条听开关、
+     * 一条不听：同一次改名会从两条路各来一次，而结果是「谁先到听谁的」——
+     * 那会变成一个看调度顺序的随机行为。
+     *
+     * 失败不抛错 —— 与 `syncPath` 同一个理由：它挂在一次用户交互（改名）
+     * 后面，抛出去只会让调用方半路中断。
+     *
+     * @returns 是否**受理**了（重复调用也算受理，见去重）。
      */
     async renameRemoteBackup(from: string, to: string): Promise<boolean> {
-        if (this.configProblem()) return false;
+        const key = `${from}\u0000${to}`;
+        const now = Date.now();
+        for (const [seen, at] of this.recentMoves) {
+            if (now - at > MOVE_DEDUPE_MS) this.recentMoves.delete(seen);
+        }
+        // 面板与事件是**同一次**改名：谁先到谁做，后到的直接返回。
+        if (this.recentMoves.has(key)) return true;
+        this.recentMoves.set(key, now);
 
-        const folders = normalizeFolders(this.getImageSettings().folders);
-        if (!isInsideFolders(to, folders)) return false;
+        return this.enqueueMove(() => this.moveRemoteBackup(from, to));
+    }
+
+    /** 串行执行一次改名搬运。见 `renameRemoteBackup`。 */
+    private enqueueMove<T>(run: () => Promise<T>): Promise<T> {
+        const task = this.moveTail.then(run, run);
+        this.moveTail = task.catch(() => {});
+        return task;
+    }
+
+    /** `renameRemoteBackup` 的实际动作（已去重、已排队）。 */
+    private async moveRemoteBackup(from: string, to: string): Promise<boolean> {
+        const settings = this.getImageSettings();
+        const folders = normalizeFolders(settings.folders);
+        const insideTarget = isInsideFolders(to, folders);
+
+        // ── 1) 记账（纯本地；先做，绝不能因为云端失败而漏掉）──
+        const state = loadState(this.deps.app);
+        if (insideTarget) {
+            // 记录搬到新路径，并在旧路径立墓碑（见 `renameEntry` 的说明）。
+            renameEntry(state, from, to);
+        } else {
+            // 搬到受管范围之外：新路径不再由我们记账（它已经不归我们管），
+            // 但旧路径**必须**立墓碑 —— 否则云端那一份会被当成「云端新增」
+            // 下载回来，于是受管文件夹里凭空多出一份用户已经搬走的东西。
+            markRemoteOnly(state, from);
+        }
+        saveState(this.deps.app, state);
+
+        // ── 2) 云端（服务端 COPY；源不存在是一个正常结论）──
+        if (!insideTarget || !settings.enabled) return false;
+        if (this.configProblem()) return false;
 
         try {
             const client = this.createClient();
+            const copied = await client.copyObject(client.keyFor(from), client.keyFor(to));
+            // 云端本来就没有这一份（从没传过 / 清单丢过）：没什么可搬的。
+            if (!copied) return false;
+
+            // 用**新对象**的 ETag 记一次新路径：ETag 是云端给的事实，比沿用
+            // 旧记录可靠（旧对象可能是别处上传的多段对象，COPY 之后会变）。
+            const file = this.deps.app.vault.getAbstractFileByPath(to);
+            if (file instanceof TFile) {
+                const latest = loadState(this.deps.app);
+                recordSynced(
+                    latest,
+                    to,
+                    { size: file.stat.size, mtime: file.stat.mtime },
+                    copied.etag ?? latest.entries[to]?.etag ?? ""
+                );
+                // 清单里原本没有旧路径这条记录时补一条墓碑：**下一步可能失败**
+                // （删旧键失败、或者进程正好在这里退出），而只要旧键还在，
+                // 就必须挡住「下载回来」。
+                if (!latest.entries[from]) {
+                    markRemoteOnlyForced(latest, from, {
+                        size: file.stat.size,
+                        etag: copied.etag ?? "",
+                    });
+                }
+                saveState(this.deps.app, latest);
+            }
+
+            // 新键就位之后再删旧键。**删失败不算整体失败**：新键已经好了，
+            // 而旧路径的墓碑挡住了回下载 —— 云端的最终状态是对的，
+            // 只是可能多留一个旧副本（`deleteObject` 自己把 404 当成功）。
             await client.deleteObject(client.keyFor(from));
-
-            const state = loadState(this.deps.app);
-            forget(state, from);
-            saveState(this.deps.app, state);
-
-            return await this.syncPath(to);
+            return true;
         } catch (error) {
             this.deps.notifier.reportError(error, this.deps.getT().images.notice.renameFailed);
             return false;

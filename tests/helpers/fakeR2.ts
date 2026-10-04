@@ -215,6 +215,48 @@ export function createFakeR2(): FakeR2 {
         return { status: 200, headers: { etag: `"${etag}"` } };
     }
 
+    /**
+     * `x-amz-copy-source`（`/桶/键`，键按段编码）→ 对象键。
+     *
+     * 与 `parseRequest` 拆 URL 一样**逐段解码**：整串解码会把键里真正的 `/`
+     * 与编码的 `%2F` 混起来。
+     */
+    function parseCopySource(value: string): string {
+        const segments = value.replace(/^\/+/, "").split("/");
+        // 第一段是桶名。
+        return segments.slice(1).map(decodeURIComponent).join("/");
+    }
+
+    /**
+     * 服务端 COPY。
+     *
+     * 与真实 S3/R2 同构的两点：源不存在时是 **404**，ETag 在**响应体**里
+     * （`<CopyObjectResult>`，不是响应头）。ETag 沿用源对象的 —— 单段 PUT 的
+     * ETag 就是内容的 MD5，拷贝同样的内容不会变，而这正是「改名之后不该
+     * 判成远端变了」的前提。
+     */
+    function copyResponse(request: RecordedRequest): HandlerResponse {
+        const source = request.headers["x-amz-copy-source"];
+        if (!source) return { status: 400, text: "<Error><Code>InvalidRequest</Code></Error>" };
+
+        const object = objects.get(parseCopySource(source));
+        if (!object) return { status: 404, text: "<Error><Code>NoSuchKey</Code></Error>" };
+
+        objects.set(request.key, {
+            size: object.size,
+            etag: object.etag,
+            lastModified: Date.now(),
+            body: object.body,
+        });
+
+        return {
+            status: 200,
+            text:
+                '<?xml version="1.0" encoding="UTF-8"?>' +
+                `<CopyObjectResult><ETag>${escapeXml(`"${object.etag}"`)}</ETag></CopyObjectResult>`,
+        };
+    }
+
     function getResponse(request: RecordedRequest): HandlerResponse {
         const object = objects.get(request.key);
         if (!object) return { status: 404, text: "<Error><Code>NoSuchKey</Code></Error>" };
@@ -263,6 +305,10 @@ export function createFakeR2(): FakeR2 {
 
         if (recorded.method === "GET" && "list-type" in recorded.query) {
             return listResponse(recorded);
+        }
+        // COPY 也是 PUT，靠 `x-amz-copy-source` 区分（与 S3 一致）。
+        if (recorded.method === "PUT" && recorded.headers["x-amz-copy-source"]) {
+            return copyResponse(recorded);
         }
         if (recorded.method === "PUT") return putResponse(recorded);
         if (recorded.method === "GET") return getResponse(recorded);

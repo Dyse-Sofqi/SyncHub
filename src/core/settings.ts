@@ -8,7 +8,7 @@ import {
     type TrackedKind,
 } from "../features/installer/types";
 import { normalizeFolders } from "../features/images/imageScan";
-import type { LanguageSetting } from "./i18n";
+import { DEFAULT_SELF_SOURCE } from "../features/installer/selfUpdate";
 import { isValidPluginId } from "./pluginId";
 import { isValidThemeName } from "./themeName";
 
@@ -20,7 +20,7 @@ import { isValidThemeName } from "./themeName";
  * 这样 `data.json` 可以安全地随仓库同步到多设备而令牌不跟着走。
  */
 
-export const SETTINGS_VERSION = 6;
+export const SETTINGS_VERSION = 8;
 
 export interface InstallerSettings {
     enabled: boolean;
@@ -57,15 +57,24 @@ export interface InstallerSettings {
      */
     pendingRestartVersion: string;
     /**
-     * **自身更新来源**（空串 = 官方仓库 `github.com/Dyse-Sofqi/SyncHub`）。
+     * **自身更新来源**（默认 = Gitee 镜像 `gitee.com/sofqi/SyncHub`）。
      *
-     * 为什么允许指定：`github.com` 在本机会被**时段性阻断**，而 Gitee 镜像能直连。
-     * 没有这个字段时，想从镜像更新自己只能绕道「添加插件仓库」把自己加进跟踪列表 ——
-     * 而那条路会 `reloadPlugin`（disable → enable **正在运行的自己**），
-     * 见 `selfUpdate.ts` 开头那段说明。给一个显式入口是在**降低**风险，不是增加。
+     * 为什么默认走镜像：`github.com` 在目标用户的网络里是**时段性阻断**的，而
+     * Gitee 镜像能直连。默认走官方的话，「检查更新」这个动作本身就经常失败，
+     * 而失败的样子只是「一直报错」—— 用户得自己去翻设置页才知道有个来源可以填。
+     *
+     * 为什么允许改：镜像可能落后于官方。填
+     * `https://github.com/Dyse-Sofqi/SyncHub` 就回到官方。
+     *
+     * **镜像连不上会自动回退到官方仓库，并提示一次**（见 `selfRepoAttempts`）：
+     * Gitee 的匿名接口配额很低，没填令牌时被限流是常事，那条路不该是死路。
+     * 回退**一定说出来** —— 悄悄换来源正是这个模块一直避免的。
+     *
+     * **空串 = 用默认**（也就是镜像），不是「用官方」。这一条同时把老 `data.json`
+     * 里那个空值收敛到新默认上 —— 见 `normalizeSettings` 里的说明。
      *
      * 它**不是**「镜像发现」那套（那套只提议、要用户确认、每次都要探测）：
-     * 这是用户写下的**固定来源**，填一次就一直用它，不再探测。
+     * 这是写死的**固定来源**，填一次就一直用它，不再探测。
      *
      * 校验照旧：远端 manifest 的 `id` 必须是 `ob-sync`，否则拒绝写盘 ——
      * 所以地址填错不会把别的插件覆盖掉。
@@ -103,8 +112,13 @@ export interface InstallerSettings {
 
 export interface SyncSettings {
     /**
-     * 总开关。**由 `SyncModule` 的装配读走**（注入 `Automatics`），
-     * 关掉后后台自动动作全部停表。
+     * 「定时同步」的开关 —— 它**唯一**的作用就是让下面那条定时器跑或不跑。
+     *
+     * 由 `SyncModule` 的装配读走（注入 `Automatics`）。
+     *
+     * 2026-10-02 之前它叫「启用笔记同步」，而那个名字比职责大：命令面板里的
+     * 同步命令从来不受它影响（那是用户当下主动发起的），它管的只有定时器。
+     * 现在它就叫「定时同步」，与周期同处一行。
      *
      * 这一行是给下一个人的提醒：这个字段曾经**只被写、从没被读过** ——
      * 设置页有开关、`data.json` 里存着值、README 也列着它，但代码里没有
@@ -116,16 +130,25 @@ export interface SyncSettings {
      */
     enabled: boolean;
     /**
-     * 自动提交**并同步**间隔（分钟）。0 表示关闭。
+     * 定时同步的周期（分钟）。到点执行的是**完整链路** `提交 → 拉取 → 推送`。
      *
-     * 名字里的「并同步」是有信息量的：到点执行的是完整链路
-     * `提交 → 拉取 → 推送`，而不是只提交。所以 `autoPushMinutes` /
-     * `autoPullMinutes` 设为 0 **不会**阻止推送与拉取 —— 它们只是
-     * 在此之上额外多加的定时器。
+     * ## 为什么只有一个数字（2026-10-02 由三个合成）
+     *
+     * 原先有三个：`autoCommitMinutes` / `autoPushMinutes` / `autoPullMinutes`。
+     * 而主间隔跑到点执行的**本来就是完整链路**，另外两个只是在它之上额外加的
+     * 单动作定时器 —— 在绝大多数配置下都是多余的，却要求用户先读懂
+     * 「推送/拉取间隔设为 0 也会随主间隔一起发生」才敢动它们。
+     *
+     * 代价说清楚：**「只拉取」「只推送」这两种定时配置没有了**（手动按钮仍可用）。
+     * 换掉它们换来的是「一个数字 = 整条同步」。
+     *
+     * ## 这里没有「0 = 关闭」
+     *
+     * 开与关只由 `enabled` 表达，这个数字纯是周期，`normalizeSettings` 把它钳在
+     * 1–1440。留一个「0 = 关闭」在周期里，就是同一个 off 的第二种说法 ——
+     * 那正是这次要消掉的东西。
      */
-    autoCommitMinutes: number;
-    autoPushMinutes: number;
-    autoPullMinutes: number;
+    intervalMinutes: number;
     commitMessage: string;
     /** 拉取整合策略：merge（默认）/ rebase / reset（本地以远端为准）。 */
     syncStrategy: "merge" | "rebase" | "reset";
@@ -215,7 +238,28 @@ export interface ImageSyncSettings {
      * 没生效，所以设置页的描述里要写清楚。
      */
     deleteRemotePolicy: "ask" | "always" | "never";
-    /** 自动同步间隔（分钟）。0 = 关闭。 */
+    /**
+     * 「按周期同步」的开关。**与 `autoSyncMinutes` 分开是两个字段，不是冗余**：
+     * 周期里的数字**没有「0 = 关闭」的含义**，否则那个 0 既要表达「不按周期跑」
+     * 又要表达「每 0 分钟」，而用户看到的就是一个不知道该填什么的空档。
+     *
+     * 2026-10-02 从「`autoSyncMinutes === 0` 即关闭」拆出来（v7 → v8）。拆的直接
+     * 起因是用户问「最小值设成 5 是不是更合适」—— 而 0 一旦被禁，就得把默认周期
+     * 改成非 0；`images.enabled` 默认又是 **true**，那等于让每个新用户开箱就
+     * 「每 5 分钟跑一轮整库比对」。有了这个字段，默认周期可以是 10 而定时器仍然
+     * 是关的。
+     *
+     * 注意它**不是**这一页的总开关：`enabled` 管的是「允不允许在背后动云端」
+     * （启动那一轮、改名换键、删除处置），这个只管「要不要按周期跑」。
+     */
+    autoSyncEnabled: boolean;
+    /**
+     * 按周期的间隔（分钟），只在 `autoSyncEnabled` 为真时有意义。
+     *
+     * 范围 **5–1440**，默认 10。下限 5 的理由与 `compressQuality` 的下限 10 同源：
+     * 每 1 分钟跑一轮整库比对（ListObjects + 逐文件算 hash，还会真的上传下载）
+     * 没有意义，而用户多半是手滑拖到底。
+     */
     autoSyncMinutes: number;
     /** 裁剪 / 压缩弹窗里的默认质量（10–100）。png 用不到，界面会灰掉它。 */
     compressQuality: number;
@@ -227,7 +271,18 @@ export interface ImageSyncSettings {
 
 export interface ObsyncSettings {
     version: number;
-    language: LanguageSetting;
+    /**
+     * **没有「界面语言」这个设置**（2026-10-01 移除）。
+     *
+     * 它曾经是 `language: "auto" | "zh-cn" | "en"`，而三态里只有 `auto` 真正
+     * 跟得上 Obsidian：选另外两个之后，用户把 Obsidian 切成别的语言，插件界面
+     * 还是老语言 —— 看起来像坏了，而原因藏在设置页的一个下拉里。
+     * 现在一律跟随 Obsidian（见 `core/i18n/index.ts` 的 `getTranslations`）。
+     *
+     * 老 `data.json` 里残留的 `language` 不需要迁移代码：`mergeWithDefaults`
+     * 只保留**默认值里存在**的键，于是它自己就没了。版本号也因此不跳 ——
+     * 没有要执行的迁移（下一次真正的迁移再从 7 开始）。
+     */
     showNotices: boolean;
     debugLogging: boolean;
     /**
@@ -254,7 +309,6 @@ export interface ObsyncSettings {
 
 export const DEFAULT_SETTINGS: ObsyncSettings = {
     version: SETTINGS_VERSION,
-    language: "auto",
     showNotices: true,
     debugLogging: false,
     // 默认与既有行为一致（一直是全宽）—— 加开关不该悄悄改变任何人的界面。
@@ -272,17 +326,30 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
         discoverGiteeMirrors: false,
         lastUpdateCheckAt: 0,
         pendingRestartVersion: "",
-        selfUpdateSource: "",
+        selfUpdateSource: DEFAULT_SELF_SOURCE,
         tracked: [],
         availableUpdates: {},
         mirrorSuggestions: {},
     },
     sync: {
-        enabled: true,
-        autoCommitMinutes: 0,
-        autoPushMinutes: 0,
-        autoPullMinutes: 0,
-        commitMessage: "vault backup: {{date}}",
+        // 默认**关**。定时同步会真的提交并推送到远端 —— 与图片那条
+        // `autoSyncMinutes` 同一条理由：不该在用户没要求时自己跑起来。
+        // 旧数据里存着的 `true` 由 v6 → v7 迁移按它当时的**实际行为**
+        // 处理，见 `migrateV6ToV7`。
+        enabled: false,
+        // 拨开「定时同步」时的周期。10 分钟是「备份/同步一个笔记库」的常见粒度：
+        // 比它密会让 git 一直在为半成品写提交，比它疏则会让人以为没生效。
+        intervalMinutes: 10,
+        // 提交信息模板。默认带上文件数（2026-10-02 用户要求），因为翻提交历史时
+        // 「这一次动了多少」是第一个想知道的，而模板里不写就没有别的地方能看出来。
+        //
+        // 注意 **`{{numFiles}}` 只是个数字**，不区分单复数 —— 只动一个文件时这条
+        // 默认值读作 `(1 files)`。要更准就自己在模板里写 `file(s)`，或者干脆删掉
+        // 括号那段（`commitMessage.test.ts` 钉的是变量的展开，不管语法）。
+        //
+        // 改这个默认值**不会**动到已有用户的 `data.json`：`mergeWithDefaults` 里存着
+        // 的值优先，所以老用户仍是旧模板（那是他们自己的设置，不该被默认值改写）。
+        commitMessage: "vault backup: {{date}} ({{numFiles}} files)",
         // merge 是 git 的默认行为，对普通用户最不容易丢数据；
         // rebase/reset 交给明确知道自己要什么的用户。
         syncStrategy: "merge",
@@ -293,8 +360,8 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
         // 而配好之后还要求用户再找一个开关才生效，是多余的一步。
         enabled: true,
         // 仓库根目录（= 整个库）。写成 `.` 而不是归一后的空串：这一份是给人看的
-        // 默认值，`normalizeSettings` 会把它归一成 `[""]`，界面显示时再由
-        // `formatFolderPath` 变回 `.`（见 imageScan.ts）。
+        // 默认值，`normalizeSettings` 会把它归一成 `[""]`（见 imageScan.ts）；
+        // 设置页把空串那一项显示成「仓库根目录（整个库）」，不会显示成一个空行。
         // 曾经这里是 `[]`（一个都不预设），理由是「猜错的代价是动了不该动的文件」；
         // 但删除早已不是同步流程的一部分（删本地时会问一句），而默认空值意味着
         // 每个新用户都要先想清楚填什么才能用 —— 对「库即仓库」这个目标场景是白工。
@@ -312,7 +379,10 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
         // 回到本地了（见 ImageSyncSettings.deleteRemotePolicy 的说明）。
         deleteRemotePolicy: "ask",
         // 默认关闭：图片同步会真的读写文件与网络，不该在用户没要求时自己跑起来。
-        autoSyncMinutes: 0,
+        // 周期另给一个默认值 10（下限 5）—— 上一个开关关着时它不起作用，
+        // 而用户打开开关的那一刻就该看到一个合理的数字，而不是 0。
+        autoSyncEnabled: false,
+        autoSyncMinutes: 10,
         compressQuality: 82,
         compressMaxEdge: 1600,
         compressFormat: "keep",
@@ -340,6 +410,13 @@ function readRawImages(loaded: unknown): Record<string, unknown> | undefined {
     if (!isPlainObject(loaded)) return undefined;
     const images = loaded.images;
     return isPlainObject(images) ? images : undefined;
+}
+
+/** 读磁盘数据里的 `sync` 原文（同上：v6 → v7 要读已经删掉的三个间隔）。 */
+function readRawSync(loaded: unknown): Record<string, unknown> | undefined {
+    if (!isPlainObject(loaded)) return undefined;
+    const sync = loaded.sync;
+    return isPlainObject(sync) ? sync : undefined;
 }
 
 /**
@@ -412,6 +489,7 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
     // 迁移还要读**已经删掉的**字段（见 migrateV4ToV5），而 `mergeWithDefaults`
     // 只保留默认值里存在的键 —— 所以原始那一份也要留着。
     const loadedImages = readRawImages(loaded);
+    const loadedSync = readRawSync(loaded);
 
     const merged = mergeWithDefaults(
         DEFAULT_SETTINGS as unknown as Record<string, unknown>,
@@ -443,6 +521,16 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
         migrateV5ToV6(merged.images, loadedImages);
     }
 
+    // v6 → v7：三个自动间隔合成一个「定时同步」周期。见 migrateV6ToV7。
+    if (loadedVersion < 7) {
+        migrateV6ToV7(merged.sync, loadedSync);
+    }
+
+    // v7 → v8：「按周期同步」的开关从「间隔为 0」拆成独立字段。见 migrateV7ToV8。
+    if (loadedVersion < 8) {
+        migrateV7ToV8(merged.images, loadedImages);
+    }
+
     // 数值范围钳制 —— data.json 是用户可以手改的。
     merged.installer.autoCheckDelaySeconds = clamp(
         merged.installer.autoCheckDelaySeconds,
@@ -455,12 +543,26 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
     if (typeof merged.installer.pendingRestartVersion !== "string") {
         merged.installer.pendingRestartVersion = "";
     }
-    if (typeof merged.installer.selfUpdateSource !== "string") {
-        merged.installer.selfUpdateSource = "";
+    // 「自身更新来源」：类型不对或**空白**都收敛到默认（Gitee 镜像）。
+    //
+    // 空值这一条同时是一次**对老数据的迁移**：这个字段当年默认是空串、而空串
+    // 表示「官方仓库」，所以已经装过插件的人的 `data.json` 里存着的正是空串。
+    // 不收敛的话，「默认改走镜像」对他们**一个都不生效**。这里刻意不写版本化迁移
+    // —— 「空 = 用默认」本来就是一个每次读都该成立的归一化规则，而它顺带把老数据
+    // 修好了；下次保存时那个空串就变成默认地址落盘。
+    if (
+        typeof merged.installer.selfUpdateSource !== "string" ||
+        merged.installer.selfUpdateSource.trim() === ""
+    ) {
+        merged.installer.selfUpdateSource = DEFAULT_SELF_SOURCE;
     }
-    merged.sync.autoCommitMinutes = clamp(merged.sync.autoCommitMinutes, 0, 24 * 60);
-    merged.sync.autoPushMinutes = clamp(merged.sync.autoPushMinutes, 0, 24 * 60);
-    merged.sync.autoPullMinutes = clamp(merged.sync.autoPullMinutes, 0, 24 * 60);
+    // 定时同步的周期：0 / 负数 / 非数字都收敛到默认 —— 新模型里「关」由
+    // `enabled` 表达，周期里没有 0 的含义（见 `SyncSettings.intervalMinutes`），
+    // 落进一个 0 只会变成「开着却永不触发」的假状态。
+    if (!(merged.sync.intervalMinutes >= 1)) {
+        merged.sync.intervalMinutes = DEFAULT_SETTINGS.sync.intervalMinutes;
+    }
+    merged.sync.intervalMinutes = clamp(merged.sync.intervalMinutes, 1, 24 * 60);
 
     if (!["merge", "rebase", "reset"].includes(merged.sync.syncStrategy)) {
         merged.sync.syncStrategy = "merge";
@@ -502,7 +604,17 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
     if (!["keep", "jpeg", "webp", "png"].includes(images.compressFormat)) {
         images.compressFormat = "keep";
     }
-    images.autoSyncMinutes = clamp(images.autoSyncMinutes, 0, 24 * 60);
+    // 「按周期同步」的周期：下限 **5**。理由与下面 `compressQuality` 的下限 10 同源：
+    // 每 1 分钟跑一轮整库比对（ListObjects + 逐文件算 hash，还会真的上传下载）没有
+    // 意义，而用户多半是手滑拖到底。
+    //
+    // 0 / 负数 / 非数字收敛到**默认值**而不是钳到 5 —— 5 分钟一轮比默认值更激进，
+    // 不该是「填错」的结果。新模型里「关」由 `autoSyncEnabled` 表达，
+    // 这个数字里没有 0 的含义。
+    if (!(images.autoSyncMinutes >= 5)) {
+        images.autoSyncMinutes = DEFAULT_SETTINGS.images.autoSyncMinutes;
+    }
+    images.autoSyncMinutes = clamp(images.autoSyncMinutes, 5, 24 * 60);
     // 下限 10 而不是 1：质量 1 的 jpeg 基本不可看，而用户多半是手滑拖到底。
     images.compressQuality = clamp(images.compressQuality, 10, 100);
     // 上限 20000 像素：再大也不是「压缩」，且画布在部分设备上会直接失败。
@@ -652,6 +764,79 @@ function migrateV5ToV6(
 
     const previous = loaded?.askDeleteRemote;
     if (typeof previous === "boolean") images.deleteRemotePolicy = previous ? "ask" : "never";
+}
+
+/**
+ * v6 → v7：三个自动间隔（提交 / 推送 / 拉取）合成一个「定时同步」周期。
+ *
+ * ## 为什么不是「取三个里最小的那个非零值」
+ *
+ * 主间隔（`autoCommitMinutes`）跑到点执行的本就是**完整链路**
+ * `提交 → 拉取 → 推送`，另外两个只是在它之上额外加的单动作定时器。
+ * 取最小值会**改变语义**：一台刻意配成「只拉取」（主间隔 0、拉取 30）的设备，
+ * 迁移后会开始提交并推送 —— 而那正是它当初避开的动作。
+ *
+ * ## 三条分支
+ *
+ * - **主间隔 > 0**：它本来就是「每 N 分钟整条同步一次」，原样接过来，开关照旧；
+ * - **主间隔 = 0**（三个都是 0，或压根没配过）：周期留在默认值，
+ *   而开关**一律置回关**。老模型里「开着 + 全 0」的实际行为是什么都不做；
+ *   新模型里一旦开着就会每 N 分钟提交并推送 —— 迁移**不能**替用户把它变成后者。
+ *   实测本机两个库都是这一档（三个间隔全是 0），所以这一步同时是
+ *   「升级后不会自己跑起来」的保证；
+ * - **v7 数据**（已经有 `intervalMinutes`）：一个字段都不碰，旧字段只是残留
+ *   —— `data.json` 会随笔记仓库同步，两台设备版本不一致时就会这样。
+ *
+ * 与 v4 → v5、v5 → v6 同一条理由：必须在 sanitize 之前、从**原始数据**里读旧字段
+ * （`mergeWithDefaults` 只保留默认值里存在的键，三个旧字段在 `merged.sync` 上
+ * 已经看不到了）。
+ */
+function migrateV6ToV7(sync: SyncSettings, loaded: Record<string, unknown> | undefined): void {
+    if (loaded?.intervalMinutes !== undefined) return;
+
+    const previous = loaded?.autoCommitMinutes;
+    if (typeof previous === "number" && previous > 0) {
+        sync.intervalMinutes = previous;
+        return;
+    }
+
+    sync.enabled = false;
+}
+
+/**
+ * v7 → v8：「按周期同步」的开关从「间隔为 0」拆成独立字段。
+ *
+ * 起因是用户问「把最小值设成 5 是不是更合适」。0 那一条下限一旦收紧，就得有个
+ * 别的东西表达「不按周期跑」—— 否则只能把默认周期改成非 0，而 `images.enabled`
+ * 默认是 `true`，那等于让每个新用户（以及所有存量库）开箱就「每 5 分钟跑一轮
+ * 整库比对」。所以周期与开关分成两个字段：周期取下限 5，开关单独表达关。
+ *
+ * 两条分支：
+ *
+ * - **旧周期 > 0**：那本来就是「每 N 分钟跑一轮」，原样接过来，开关置为开；
+ * - **旧周期 = 0**（默认，绝大多数）：开关置为**关**，周期留在默认值。
+ *   这一条同时是「升级后不会自己跑起来」的保证 —— 存量库里 `autoSyncMinutes`
+ *   是 0 的占绝大多数（实测本机两个库都是 0）。
+ *
+ * v8 数据（已经有 `autoSyncEnabled`）一个字段都不碰，旧值只是残留 ——
+ * `data.json` 会随笔记仓库同步，两台设备版本不一致时就会这样。
+ *
+ * 与 v4→v5、v5→v6、v6→v7 同一条理由：必须在 sanitize 之前、从**原始数据**里读。
+ */
+function migrateV7ToV8(
+    images: ImageSyncSettings,
+    loaded: Record<string, unknown> | undefined
+): void {
+    if (typeof loaded?.autoSyncEnabled === "boolean") return;
+
+    const previous = loaded?.autoSyncMinutes;
+    if (typeof previous === "number" && previous > 0) {
+        images.autoSyncEnabled = true;
+        images.autoSyncMinutes = previous;
+        return;
+    }
+
+    images.autoSyncEnabled = false;
 }
 
 /**

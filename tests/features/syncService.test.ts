@@ -25,6 +25,10 @@ class FakeGit implements GitManager {
     staged: string[] = [];
     unstaged: string[] = [];
     untracked: string[] = [];
+    /** 已被 git 跟踪的路径（`untrack` 把它们摘掉，但工作区文件保留）。 */
+    tracked: string[] = [];
+    /** 其中哪些在索引里是嵌套仓库（gitlink，模式 160000）。 */
+    nestedRepos: string[] = [];
     conflicted: string[] = [];
     ahead = 0;
     /** 落后远端的提交数（`isFullyInSync` 也看它 —— 落后就不是「一致」）。 */
@@ -76,6 +80,28 @@ class FakeGit implements GitManager {
     async unstage(paths: string[]): Promise<void> {
         this.calls.push(`unstage:${paths.join(",")}`);
         this.staged = this.staged.filter((path) => !paths.includes(path));
+    }
+    /**
+     * 「停止跟踪」（`git rm -r --cached`）。
+     *
+     * 替身按真实语义记账：这些路径从**已跟踪**里消失，但**本地文件还在**
+     * （`untracked` 里能看见它们）—— 这正是「摘索引、不动工作区」那条性质，
+     * 也正是 `.gitignore` 之后还必须走这一步的原因。
+     */
+    async untrack(paths: string[]): Promise<void> {
+        this.calls.push(`untrack:${paths.join(",")}`);
+        this.staged = this.staged.filter((path) => !paths.includes(path));
+        this.tracked = this.tracked.filter((path) => !paths.includes(path));
+    }
+    /** `git ls-files` —— 「按扩展名忽略图片」靠它找已跟踪的图片。 */
+    async listTracked(): Promise<string[]> {
+        this.calls.push("listTracked");
+        return [...this.tracked];
+    }
+    /** 这批路径里哪些是嵌套仓库（gitlink）—— 面板靠它把这类行换一套呈现。 */
+    async nestedRepoPaths(paths: string[]): Promise<string[]> {
+        this.calls.push(`nestedRepoPaths:${paths.join(",")}`);
+        return paths.filter((path) => this.nestedRepos.includes(path));
     }
     async commit(message: string): Promise<boolean> {
         this.calls.push(`commit:${message}`);
@@ -762,6 +788,33 @@ describe("视图的逐文件操作", () => {
 
         expect(git.calls).toContain("stage:a.md");
     });
+
+    /**
+     * 「让 git 不再跟踪图片」的那一步（`git rm -r --cached`）。
+     *
+     * 为什么它也必须走队列：它写的是 **git 索引**，而索引是全局状态 —— 和自动提交
+     * 定时器并发写索引是真实会发生的（与 `stageFiles` 同一个理由）。
+     */
+    it("停止跟踪走队列，并刷新状态", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        await service.untrackPaths(["attachments"]);
+
+        expect(git.calls).toContain("untrack:attachments");
+        expect(git.calls.filter((call) => call === "status").length).toBeGreaterThan(0);
+    });
+
+    it("停止跟踪的路径为空时是空操作（不碰 git）", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        await service.untrackPaths([]);
+
+        expect(git.calls).toEqual([]);
+    });
 });
 
 /**
@@ -1161,6 +1214,96 @@ describe("状态订阅（仓库同步视图）", () => {
         });
 
         await expect(service.refresh()).resolves.toBeDefined();
+    });
+});
+
+/**
+ * 状态读取的去重（2026-10-01）。
+ *
+ * 起因是真机症状「侧边栏挂着仓库同步面板时界面特别卡」：`git status` 是这一层
+ * 最贵的一步（实测 Plugin-Test 库上 300 ms，一次面板重绘合计 754 ms / 10 个
+ * git 子进程），而**同一瞬间好几处都想要状态** —— 启动时三处、一次动作里两处。
+ * 那些重复的读取纯属白烧，所以 `refresh()` 现在做单飞 + 短 TTL（见
+ * `STATUS_TTL_MS`），而任何动过仓库的动作都会让缓存立刻失效。
+ */
+describe("状态读取的去重", () => {
+    const statusCalls = (git: FakeGit): number =>
+        git.calls.filter((call) => call === "status").length;
+
+    it("刚读过就复用：第二次 refresh 不再跑一次 git status，也不再通知订阅者", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+        let notified = 0;
+        service.onStatusChange(() => (notified += 1));
+
+        await service.refresh();
+        await service.refresh();
+
+        expect(statusCalls(git)).toBe(1);
+        // 命中缓存时不再 `publish`：订阅者拿到的就是这份状态对象，
+        // 再推一次只会让界面白重绘一遍（那正是要省的）。
+        expect(notified).toBe(1);
+    });
+
+    it("正在读的时候第二次调用复用同一次读取（不会同时开两个 git 进程）", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+        let release!: () => void;
+        git.waitBeforeStatus = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+
+        const first = service.refresh();
+        const second = service.refresh();
+
+        // 只靠 TTL 是不够的：两次调用都还没写回缓存，会一起冲进 git.status()
+        expect(statusCalls(git)).toBe(1);
+
+        release();
+        await expect(first).resolves.toBeDefined();
+        await expect(second).resolves.toBeDefined();
+        // 两次拿到的是同一次读取的结论
+        expect(await first).toBe(await second);
+    });
+
+    it("动过仓库之后立刻重读：暂存完不会还显示「未暂存」", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+        git.unstaged = ["a.md"];
+        const seen: Array<RepoStatus | undefined> = [];
+        service.onStatusChange((status) => seen.push(status));
+
+        await service.refresh(); // 1 次 status（缓存从此有效）
+        expect(statusCalls(git)).toBe(1);
+
+        // 动作 → `enqueue` 让缓存作废 → 收尾那次刷新必须是真读
+        await service.stageFiles(["a.md"]);
+
+        expect(statusCalls(git)).toBe(2);
+        const latest = seen.at(-1);
+        expect(latest?.staged.map((change) => change.path)).toEqual(["a.md"]);
+        expect(latest?.unstaged).toHaveLength(0);
+    });
+
+    it("不是仓库这个结论也会被复用（不会因为结果是 undefined 就反复重读）", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+        git.repo = false;
+
+        await expect(service.refresh()).resolves.toBeUndefined();
+        await expect(service.refresh()).resolves.toBeUndefined();
+
+        expect(statusCalls(git)).toBe(1);
+    });
+
+    it("force 跳过缓存：改远端地址、手动「刷新」这类入口必须真读一次", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+
+        await service.refresh();
+        await service.refresh({ force: true });
+
+        expect(statusCalls(git)).toBe(2);
     });
 });
 

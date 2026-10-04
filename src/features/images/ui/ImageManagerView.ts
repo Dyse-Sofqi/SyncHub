@@ -83,6 +83,13 @@ export class ImageManagerView extends ItemView {
     private filter: ImageFilter = { ...EMPTY_IMAGE_FILTER };
     private sort: ImageSort = "path";
     private readonly selected = new Set<string>();
+    /**
+     * 上一次**单击**落点 —— shift+点击按它算范围（见 `selectRange`）。
+     *
+     * `undefined` = 还没有落点（面板刚打开 / 落点那一行没了）。它不像
+     * `selected` 那样是一个「结果」，而只是范围选择的起点，所以不画出来。
+     */
+    private anchor: string | undefined;
     private busy = false;
 
     private statsEl!: HTMLElement;
@@ -162,11 +169,13 @@ export class ImageManagerView extends ItemView {
         this.busy = false;
 
         // 选中的路径可能已经不存在了（上一次操作删掉了它）—— 清掉，否则
-        // 按钮上的计数会包含幽灵条目。
+        // 按钮上的计数会包含幽灵条目。锚点同理：留着它下一次 shift+点击会
+        // 落到一段对不上的范围上（`selectRange` 自己也会兜底，但早清更准）。
         const alive = new Set(this.library.records.map((record) => record.path));
         for (const path of [...this.selected]) {
             if (!alive.has(path)) this.selected.delete(path);
         }
+        if (this.anchor !== undefined && !alive.has(this.anchor)) this.anchor = undefined;
 
         this.renderStats();
         this.renderList();
@@ -178,6 +187,16 @@ export class ImageManagerView extends ItemView {
             applyImageFilter(this.library.records, this.filter),
             this.sort
         );
+    }
+
+    /**
+     * 列表里**真正画出来**的那些行（筛选 + 排序之后，再按 `MAX_ROWS` 截断）。
+     *
+     * 与 `renderList` 必须是同一个口径：范围选择只能落在用户看得见的行上，
+     * 否则「选中一段」会顺手选中一屏之外的东西，而用户根本不知道它们被选上了。
+     */
+    private renderedRecords(): ImageRecord[] {
+        return this.visibleRecords().slice(0, MAX_ROWS);
     }
 
     // ── 渲染 ──────────────────────────────────────────────────────────────
@@ -330,7 +349,8 @@ export class ImageManagerView extends ItemView {
 
     private renderList(): void {
         const t = this.t.images.manager;
-        const records = this.visibleRecords();
+        const visible = this.visibleRecords();
+        const rows = visible.slice(0, MAX_ROWS);
 
         this.listEl.empty();
 
@@ -338,12 +358,12 @@ export class ImageManagerView extends ItemView {
             this.listEl.createDiv({ cls: "obsync-image-empty", text: t.loading });
             return;
         }
-        if (records.length === 0) {
+        if (visible.length === 0) {
             this.listEl.createDiv({
                 cls: "obsync-image-empty",
                 text: isFilterActive(this.filter) ? t.emptyFiltered : t.empty,
             });
-            this.renderSelectionBar(records);
+            this.renderSelectionBar(visible);
             return;
         }
 
@@ -359,18 +379,18 @@ export class ImageManagerView extends ItemView {
         head.createEl("th", { cls: "obsync-image-cell-actions" });
 
         const body = table.createEl("tbody");
-        for (const record of records.slice(0, MAX_ROWS)) {
+        for (const record of rows) {
             this.renderRow(body, record);
         }
 
-        if (records.length > MAX_ROWS) {
+        if (visible.length > MAX_ROWS) {
             this.listEl.createDiv({
                 cls: "obsync-image-note-warn",
-                text: t.capped(records.length - MAX_ROWS),
+                text: t.capped(visible.length - MAX_ROWS),
             });
         }
 
-        this.renderSelectionBar(records);
+        this.renderSelectionBar(visible);
     }
 
     private renderRow(body: HTMLElement, record: ImageRecord): void {
@@ -439,21 +459,89 @@ export class ImageManagerView extends ItemView {
         renameButton.setAttribute("aria-label", t.renameThis);
         renameButton.addEventListener("click", () => this.openRenameFile(record.path));
 
-        const toggle = (): void => {
-            if (this.selected.has(record.path)) this.selected.delete(record.path);
-            else this.selected.add(record.path);
-            checkbox.checked = this.selected.has(record.path);
-            row.toggleClass("obsync-image-row-selected", checkbox.checked);
-            this.refresh();
-        };
-        checkbox.addEventListener("change", toggle);
+        checkbox.addEventListener("change", () => this.toggleRow(record.path));
+        // 勾选框自己也要认 shift：它是「选中一段」时最自然的落点，而它上面的
+        // click 会把这一格自己勾上（change 事件随之而来）。`preventDefault()`
+        // 取消那次切换，交给 `selectRange` 统一算 —— 否则会出现「先单选一下、
+        // 再把一段选上」的两步效果。
+        checkbox.addEventListener("click", (event) => {
+            if (!event.shiftKey) return;
+            event.preventDefault();
+            this.selectRange(record.path);
+        });
         // 点行任意处也能勾选（勾选框自己不重复触发）。**按钮要排除** —— 这一行里
         // 现在有两颗：缩略图（放大看）与铅笔（改名）。点它们顺带把这一行勾上，
         // 而用户根本没打算选中它。
         row.addEventListener("click", (event) => {
             if ((event.target as HTMLElement).closest("input, button")) return;
-            toggle();
+            if (event.shiftKey) this.selectRange(record.path);
+            else this.toggleRow(record.path);
         });
+    }
+
+    /**
+     * 勾选 / 取消勾选一行（单击的语义），并把锚点挪到它。
+     *
+     * 没有 `toggle` 那个闭包了：选择集变了之后整张表都会重画（`refresh()`），
+     * 直接改复选框与行上的类只是白改 —— 重画出来的那些才是用户看到的。
+     */
+    private toggleRow(path: string): void {
+        if (this.selected.has(path)) this.selected.delete(path);
+        else this.selected.add(path);
+        this.anchor = path;
+        this.refresh();
+    }
+
+    /**
+     * shift+点击：选中**锚点**到这一行之间的整段。
+     *
+     * ## 为什么是「替换」而不是「并集」
+     *
+     * 与文件管理器一致（资源管理器、VS Code 都是替换）。这个面板尤其需要它：
+     * 底部那排按钮里有**删除**，而并集语义下「选中的只会越来越多」——
+     * 连点两次 shift 会把两段都留下，多选出来的东西正好是不可逆操作的对象。
+     * 替换语义下范围是**可预期**的：从哪儿到哪儿，计数就在旁边写着。
+     *
+     * ## 锚点不动
+     *
+     * 范围算完之后锚点**保持原样**，于是再 shift+点一下更远的行就得到一段更长的、
+     * 仍然从同一起点算起的范围（来回拉锯都成立）。这一点是「shift 能微调范围」的
+     * 全部依据。
+     *
+     * ## 锚点不在当前列表里时退化成「只选这一行」
+     *
+     * 筛选变了、锚点被删了、或者换了排序之后它可能已经不在列表里，这时
+     * 「从哪儿到哪儿」根本算不出来。退化成**一段长度为一的范围**（只选这一行、
+     * 并把锚点落在它上面）有两个好处：计数与屏幕上看到的一致，而且紧接着再
+     * shift+点一下就能正常拉开一段。挑一个猜出来的起点或按「普通单击」去
+     * *切换*（那会把远处那些看不见的选择留在集合里），都会让用户对不上账。
+     */
+    private selectRange(path: string): void {
+        const records = this.renderedRecords();
+        const from = this.anchor === undefined
+            ? -1
+            : records.findIndex((record) => record.path === this.anchor);
+        const to = records.findIndex((record) => record.path === path);
+
+        if (from < 0 || to < 0) {
+            this.selectOnly(path);
+            return;
+        }
+
+        const [start, end] = from <= to ? [from, to] : [to, from];
+        this.selected.clear();
+        for (const record of records.slice(start, end + 1)) {
+            this.selected.add(record.path);
+        }
+        this.refresh();
+    }
+
+    /** 把选择集换成「只有这一个」，并把锚点落在它上面（见 `selectRange` 的退化分支）。 */
+    private selectOnly(path: string): void {
+        this.selected.clear();
+        this.selected.add(path);
+        this.anchor = path;
+        this.refresh();
     }
 
     private renderSelectionBar(records: ImageRecord[]): void {
@@ -479,6 +567,25 @@ export class ImageManagerView extends ItemView {
             cls: "obsync-image-count",
             text: t.shown(records.length, this.library?.records.length ?? 0),
         });
+        // shift+点击是个**看不出来**的手势，所以要说一句 —— 没有它这个功能
+        // 等于不存在（用户不会去猜）。
+        this.selectEl.createSpan({ cls: "obsync-image-count", text: t.selectRangeHint });
+
+        // 「重新扫描」放在这一条上，而不是底部那排批量动作里。两个理由：
+        // 1. **它和选中集无关** —— 底部那排按钮的可用性完全由「选中了几个」决定
+        //    （见 `refresh()`），混进去就得为它开一个例外，而例外最容易失守；
+        // 2. 它在列表正上方、始终可见（表格自己滚，这一条不滚），而底部那排
+        //    要滚过三百行才够得着 —— 一个「重新看一眼」的按钮不该这么远。
+        const rescan = this.selectEl.createEl("button", {
+            cls: "obsync-image-rescan",
+            text: t.refreshList,
+        });
+        rescan.setAttribute("aria-label", t.refreshHint);
+        rescan.title = t.refreshHint;
+        // 扫的那几秒里它点了也不会发生任何事（`reload()` 自己会挡）—— 灰掉
+        // 比「点了没反应」诚实。
+        rescan.disabled = this.busy;
+        rescan.addEventListener("click", () => void this.reload());
     }
 
     private renderActions(): void {

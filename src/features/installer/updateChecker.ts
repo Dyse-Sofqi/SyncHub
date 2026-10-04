@@ -6,7 +6,7 @@ import type { HostKind, RepoRef } from "../../host/types";
 import type { DownloadSource } from "./downloadSource";
 import type { InstallerService } from "./installerService";
 import { parseThemeManifest } from "./manifest";
-import { SELF_REPO } from "./selfUpdate";
+import { selfRepoAttempts, selfSourceLabel } from "./selfUpdate";
 import {
     itemRepoRef,
     MANIFEST_FILE,
@@ -123,8 +123,43 @@ export class UpdateChecker {
      * 比较用**运行中**的版本：待重启期间磁盘上已经躺着更新的一份，
      * 拿磁盘那份去比会得到「已是最新」，而用户此刻跑的还不是它 ——
      * 那个状态由待重启标记单独表达，不混进检查结果。
+     *
+     * ## 来源会**依次尝试**（2026-10-01）
+     *
+     * 设置里那个来源（默认 Gitee 镜像）**报错**时改用官方仓库重试一次，并把
+     * 「回退过」这件事留在结果里（`fellBackFrom`）—— 提示条会提示一次，设置页的
+     * 状态行也会一直写着它。与 `updateSelf` 用同一个 `selfRepoAttempts`。
+     *
+     * 「远端没有更新的 release」**不算失败**（`error` 为空），因此不会触发回退：
+     * 镜像就是权威来源，它说没有新版本就是没有 —— 否则每次检查都要打两个平台。
+     *
+     * @param repoRef 从哪儿查。默认是**设置里那个来源**（默认值 = Gitee 镜像），
+     *   与 `updateSelf` 共用 `service.selfRepo()` —— 两边各解析一次的话，
+     *   迟早会出现「检查说没有更新、更新却从另一个仓库拉」。
      */
-    async checkSelf(currentVersion: string, repoRef: RepoRef = SELF_REPO): Promise<SelfUpdateCheck> {
+    async checkSelf(
+        currentVersion: string,
+        repoRef: RepoRef = this.service.selfRepo()
+    ): Promise<SelfUpdateCheck> {
+        const attempts = selfRepoAttempts(repoRef);
+        let fellBackFrom: string | undefined;
+        let result = await this.checkSelfOnce(currentVersion, attempts[0]);
+
+        for (let index = 1; index < attempts.length && result.error !== undefined; index++) {
+            const failed = attempts[index - 1];
+            fellBackFrom = selfSourceLabel(failed);
+            this.service.notifySelfFallback(failed);
+            result = await this.checkSelfOnce(currentVersion, attempts[index]);
+        }
+
+        return fellBackFrom ? { ...result, fellBackFrom } : result;
+    }
+
+    /** 单次来源的检查（失败时把原因放进 `error`，不抛）。 */
+    private async checkSelfOnce(
+        currentVersion: string,
+        repoRef: RepoRef
+    ): Promise<SelfUpdateCheck> {
         try {
             const token = this.service.tokenForHost(repoRef.host);
             const latest = await this.latestReleaseTag(repoRef, token);

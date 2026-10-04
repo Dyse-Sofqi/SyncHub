@@ -44,6 +44,27 @@ export interface ImageSyncModule {
      */
     noteDeleted(file: TAbstractFile): void;
     /**
+     * 库里有个文件被**改名**了（由主类挂在 `vault.on("rename")` 上）。
+     *
+     * ## 为什么必须有它（2026-10-01 用户报的重复问题）
+     *
+     * 这套系统的身份就是 **vault 路径**（对象键 = 前缀 + 路径，状态清单也按路径
+     * 存）。没有这个入口时，改名在同步看来是「旧路径没了 + 新路径出现了」，于是
+     * 下一轮会同时做两件错事：新路径当成新增**重传**一份；旧路径当成「云端有、
+     * 本地没有」**下载回来** —— 库里出现两批同样的图片，而且因为两边重新对上了，
+     * 它不会再自愈。
+     *
+     * ## 文件夹改名也走这里
+     *
+     * Obsidian 在文件夹改名时会为**其中每个文件**各发一次 `rename`（适配器逐个
+     * 子项触发，见 `main.ts` 的说明），所以这里**不自己遍历子项** —— 那会让
+     * 「文件夹改名」与「文件改名」出现两套逻辑。
+     *
+     * 真正干活的是 `service.renameRemoteBackup`：它记账（记录搬到新路径 + 旧路径
+     * 立墓碑）、用服务端 COPY 搬云端那一份，并对「面板也调了一次」去重。
+     */
+    noteRenamed(file: TAbstractFile, oldPath: string): void;
+    /**
      * 批量删除（图片管理面板用）。
      *
      * ## 与 `noteDeleted` 那条路的关系
@@ -118,6 +139,18 @@ class ImageAutomatics {
             logger.debug("image automatics disabled: no timer scheduled");
             return;
         }
+
+        // 「按周期同步」那个开关关着 → 不起表。注意它与上面的总开关**不是一回事**：
+        // 总开关管「允不允许在背后动云端」（启动那一轮、改名换键、删除处置），
+        // 这个只管「要不要按周期跑」—— 所以关掉它之后，启动那一轮照旧。
+        if (!settings.autoSyncEnabled) {
+            logger.debug("image automatics: periodic sync is off");
+            return;
+        }
+
+        // 兜底，正常到不了这里：`normalizeSettings` 把周期钳在 5–1440。但**不能**
+        // 少了这一句 —— 周期若真是 0，`setTimeout(0)` 就是「立刻触发 → 重新起表」
+        // 的死循环（与 `Automatics` 里那一句同一个理由）。
         if (settings.autoSyncMinutes <= 0) return;
 
         this.schedule(settings.autoSyncMinutes);
@@ -161,7 +194,7 @@ class ImageAutomatics {
     private reschedule(generation: number): void {
         if (generation !== this.generation) return;
         const settings = this.images();
-        if (settings.enabled && settings.autoSyncMinutes > 0) {
+        if (settings.enabled && settings.autoSyncEnabled && settings.autoSyncMinutes > 0) {
             this.schedule(settings.autoSyncMinutes);
         }
     }
@@ -328,6 +361,33 @@ export function createImageSyncModule(deps: ImageSyncModuleDeps): ImageSyncModul
             pendingDeletions.add(file.path);
             if (deletionTimer !== undefined) window.clearTimeout(deletionTimer);
             deletionTimer = window.setTimeout(flushDeletions, DELETE_PROMPT_DELAY_MS);
+        },
+
+        /**
+         * 改名之后把云端那一份搬到新键（见接口上的说明）。
+         *
+         * 这里的检查与 `noteDeleted` 是同一套边界，顺序也一致：类型 → 扩展名 →
+         * 受管范围。删掉任何一条，改名都会造出重复（正是这次要修的 bug）。
+         */
+        noteRenamed(file: TAbstractFile, oldPath: string): void {
+            // 文件夹本身不处理 —— 它的每个子文件各自会收到一次事件。
+            if (!(file instanceof TFile)) return;
+
+            // 改完不是图片 → 交给下一轮同步（同一轮的同步会把它当新增上传/下载）。
+            if (!isImagePath(file.path)) return;
+
+            // 与同步、删除用的是同一个边界：**任一侧**在受管范围里就管。
+            // 只看新路径的话，「把图片搬出受管文件夹」这一动作会被漏掉，
+            // 而那种情况的后果正是「云端那份被下载回来」。
+            const folders = normalizeFolders(deps.getSettings().images.folders);
+            if (!isInsideFolders(file.path, folders) && !isInsideFolders(oldPath, folders)) {
+                return;
+            }
+
+            // **不 await**：事件回调要立刻返回，而这一趟可能包含网络请求
+            // （文件夹改名时每个文件各一次）。失败已经由 service 报出去了。
+            // 总开关关掉时它只记账、不发请求（见 `renameRemoteBackup`）。
+            void service.renameRemoteBackup(oldPath, file.path);
         },
 
         async deleteImages(

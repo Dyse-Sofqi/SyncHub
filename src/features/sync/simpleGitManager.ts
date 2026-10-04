@@ -9,6 +9,7 @@ import {
     GitBinaryMissingError,
     GitCredentialUsernameRejectedError,
     GitNotRepoError,
+    GitNetworkError,
     GitTimeoutError,
     NoUpstreamError,
     DetachedHeadError,
@@ -69,6 +70,23 @@ const HEAD_UNBORN_RE =
 const GIT_BLOCK_TIMEOUT_MS = 120_000;
 
 /**
+ * 每次 `git rm --cached` 最多带多少条路径。
+ *
+ * 命令行长度有上限（Windows 约 32k 字符），而「按扩展名忽略图片」会**逐个文件**
+ * 列出路径 —— 几千张图的库一次塞进去必然失败，而报错是「命令行过长」，与
+ * 「停止跟踪」毫无关系。200 条 × 平均 60 字符 ≈ 12k，留足余量。
+ */
+const UNTRACK_BATCH_SIZE = 200;
+
+/**
+ * 索引里的 gitlink 模式位 —— 「这一条指向另一个 git 仓库」。
+ *
+ * git 用它记子模块与「意外嵌进来的仓库」（`.gitmodules` 里没有登记的那些）。
+ * 见 `nestedRepoPaths`。
+ */
+const GITLINK_MODE = "160000";
+
+/**
  * 绝不让「人机交互」挂住 git。
  *
  * ## 为什么必须禁掉
@@ -88,7 +106,149 @@ const GIT_BLOCK_TIMEOUT_MS = 120_000;
 const GIT_NONINTERACTIVE_ENV = {
     GIT_TERMINAL_PROMPT: "0",
     GCM_INTERACTIVE: "never",
+    /**
+     * 合并时**不要开编辑器写提交信息**。
+     *
+     * 我们是非交互子进程（stdio 是管道），而 `git merge` 默认会为合并提交打开编辑器。
+     * 今天没出事只是因为 git 发现 stdin 不是终端就跳过了 —— 那是**它的实现细节**，
+     * 不是我们的保证。这一条把它变成明确的约定：合并提交用默认信息，不等人。
+     */
+    GIT_MERGE_AUTOEDIT: "no",
 } as const;
+
+/**
+ * 绝不能从父进程继承的变量：它们会让 git **去找另一个仓库**。
+ *
+ * 用户从终端里带着 `GIT_DIR`（或在一个 `git --git-dir=…` 的 shell 里）启动 Obsidian
+ * 时，这些变量会原样传给我们的 git 子进程 —— 于是插件操作的不再是库里那个仓库，
+ * 而是**别的仓库**，而且看起来一切正常（命令都成功）。这类「静默操作错对象」的坑
+ * 必须在这里一刀切掉。
+ */
+const GIT_REPO_LOCATING_ENV = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+] as const;
+
+/**
+ * **simple-git 会拒绝**的变量：它把这些名字当「危险配置」拦下来，直接让整条命令失败。
+ *
+ * 报错原文（实测）：
+ *
+ * ```
+ * Use of "GIT_PAGER" is not permitted without enabling allowUnsafePager
+ * ```
+ *
+ * 依据是 `@simple-git/argv-parser` 里那张「配置键 → 需要 allowUnsafe* 开关」的表
+ * （`core.pager`、`core.editor`、`core.askPass`、`core.sshCommand`、`diff.external`、
+ * `init.templateDir`、`sequence.editor`、`credential.helper` …），它同时也校验**子进程环境**，
+ * 而 simple-git 3.36 没有把这个开关暴露出来（它的产物里根本没有 `allowUnsafe*` 字样）
+ * —— 所以唯一的做法就是**不把这些变量交给它**。
+ *
+ * 2026-10-02 逐个实测出来的清单（同一批里 `HTTPS_PROXY`、`ALL_PROXY`、`VISUAL`、
+ * `SSH_AUTH_SOCK` 等是放行的）：
+ *
+ * - `GIT_PAGER` / `PAGER` —— 我们的输出是**管道**，分页器毫无意义，还可能挂住子进程；
+ * - `GIT_EDITOR` / `EDITOR` / `GIT_SEQUENCE_EDITOR` —— 非交互本来就不该开编辑器；
+ * - `GIT_ASKPASS` / `SSH_ASKPASS` —— 我们靠令牌，不靠弹窗问人；
+ * - `GIT_SSH` / `GIT_SSH_COMMAND` —— 交给 git 自己的 ssh 配置与 agent（`SSH_AUTH_SOCK` 照常继承）；
+ * - `GIT_EXTERNAL_DIFF` —— 我们自己在界面里画 diff；
+ * - `GIT_TEMPLATE_DIR` —— 建仓库时的模板目录，与同步无关；
+ * - `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` —— **不能覆盖**用户真实的全局/系统配置：
+ *   覆盖之后插件里的 git 与用户终端里的 git 读到的配置不是同一份（身份、代理、凭据助手
+ *   都可能不同），那正是最难查的一类「终端里好、插件里坏」；
+ * - `GIT_PROXY_COMMAND` —— `git://` 的代理命令，本插件不用这个传输。
+ */
+const GIT_UNSAFE_ENV = [
+    "GIT_PAGER",
+    "PAGER",
+    "GIT_EDITOR",
+    "EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_PROXY_COMMAND",
+] as const;
+
+/**
+ * 交给 git 子进程的环境：**父进程的环境打底**，再盖上我们的非交互开关。
+ *
+ * ## 为什么必须打底（2026-10-02 修）
+ *
+ * `simpleGit().env(...)` 的语义是**替换**环境，不是追加：simple-git 把
+ * `_executor.env` 原样交给 `child_process.spawn` 的 `env` 选项，而 Node 的 `env`
+ * 选项是**整份替换**。所以原来那两行 `.env(name, value)` 之后，git 子进程的环境里
+ * **只剩** `GIT_TERMINAL_PROMPT` 与 `GCM_INTERACTIVE`（实测 `_executor.env` 就是那两
+ * 个键）。
+ *
+ * 后果全是「本机终端里好、插件里坏」那一类：
+ * - **代理变量（`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`）被丢掉** ——
+ *   国内访问 GitHub 大多靠它；丢掉之后 git 只能直连，症状是
+ *   「unable to access …」「连不上远端」，而用户在终端里推同一个库完全正常。
+ * - `PATH` 丢掉 → `credential.helper`（GCM 等）找不到，鉴权失败会指向错误的方向。
+ * - `USERPROFILE` / `HOME` 丢掉 → 全局 `~/.gitconfig` 不一定还生效（代理、凭据助手、
+ *   `core.autocrlf`、用户身份都在里面）。
+ * - `TEMP`、`SystemRoot`、`SSL_CERT_FILE` 等平台变量丢掉 → 证书与网络栈的一些边角
+ *   行为和用户终端里的 git 不一致。
+ *
+ * 实测（本机 git 2.35.1.windows.2）：环境被剥光的 git 仍然能 `ls-remote`，也就是说这
+ * 不是必然立刻失败，而是**看环境** —— 有代理、有自定义凭据助手、或系统资源紧张时才
+ * 现形。正因为它不必然失败，这类问题最难查。
+ *
+ * ## 打底之后必须减掉两批
+ *
+ * 打底意味着把父进程的一切都带进去，其中两批**必须**去掉：`GIT_REPO_LOCATING_ENV`
+ * （会让 git 去找另一个仓库）与 `GIT_UNSAFE_ENV`（simple-git 会因此拒绝执行整条命令）。
+ * 两批的取值都是实测出来的，不靠记忆 —— 见各自的注释。
+ */
+export function gitChildEnv(
+    /**
+     * 默认取父进程的环境。
+     *
+     * 走 `process.env`（`eslint.config.mjs` 里给 `src` 声明了这个 Node 全局）而不是
+     * `globalThis.process` —— 社区审核有一条 `obsidianmd/no-global-this`，用 `globalThis`
+     * 会换来另一条告警。
+     */
+    parent: Record<string, string | undefined> = process.env
+): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const [name, value] of Object.entries(parent)) {
+        if (value === undefined) continue;
+        env[name] = value;
+    }
+    for (const name of GIT_REPO_LOCATING_ENV) delete env[name];
+    for (const name of GIT_UNSAFE_ENV) delete env[name];
+    return { ...env, ...GIT_NONINTERACTIVE_ENV };
+}
+
+/**
+ * 「远端地址是多少」这个探测结果能复用多久（毫秒）。
+ *
+ * ## 为什么要缓存它（2026-10-01）
+ *
+ * 鉴权是按远端地址算出来的（GitHub 与 Gitee 注入的用户名不同），所以每次
+ * 拿 SimpleGit 实例之前都得先知道远端是谁。原来的写法是**每次都探一遍**：
+ * `git()` 先 `rawGetRemoteUrl()`、拿它的结果去比缓存 —— 于是**每一次 git 操作
+ * 都白搭一个 `git remote -v` 子进程**。实测这个库上一次 `git remote -v` 约 46 ms，
+ * 而一次面板重绘要调 `git()` 四次（大约 185 ms 里外里白烧）、外加
+ * `getRemoteUrl()` 自己那一次。
+ *
+ * 远端地址在**我们自己的代码以外**几乎不会变，变了也只需要最多这么久就自动跟上；
+ * 而经由本插件改地址（`setRemoteUrl`）与改设置（`applySettings`）都会**立刻
+ * 让缓存作废**，所以「换远端后还用旧令牌」不会发生。
+ *
+ * 探测本身仍然走 `createGitInstance`（非交互环境变量 + 超时一个都不能少）。
+ */
+const REMOTE_PROBE_TTL_MS = 5_000;
 
 /**
  * 构造 simple-git 实例。
@@ -115,9 +275,12 @@ export function createGitInstance(options: {
     if (options.config && options.config.length > 0) instanceOptions.config = options.config;
 
     const instance = simpleGit(instanceOptions);
-    for (const [name, value] of Object.entries(GIT_NONINTERACTIVE_ENV)) {
-        instance.env(name, value);
-    }
+    /**
+     * 用**对象形式**一次设完（而不是逐个 `env(name, value)`）：对象形式直接替换
+     * `_executor.env`，逐个设是往同一个对象里加键 —— 两种写法都会**替换**子进程环境，
+     * 所以必须先把父进程环境打底进去，见 `gitChildEnv`。
+     */
+    instance.env(gitChildEnv());
     return instance;
 }
 
@@ -139,6 +302,12 @@ export class SimpleGitManager implements GitManager {
     private git_: SimpleGit | undefined;
     private authedForRemote: string | undefined;
 
+    /**
+     * 最近一次「远端地址」探测的结果与时刻（见 `REMOTE_PROBE_TTL_MS`）。
+     * `url: undefined` 也是有效结果（仓库还没有远端），照样缓存。
+     */
+    private remoteProbe: { url: string | undefined; at: number } | undefined;
+
     constructor(options: SimpleGitManagerOptions) {
         this.baseDir = options.baseDir;
         this.gitPath = options.gitPath;
@@ -151,14 +320,22 @@ export class SimpleGitManager implements GitManager {
         this.gitPath = options.gitPath;
         this.git_ = undefined;
         this.authedForRemote = undefined;
+        // gitPath 变了意味着之前那次探测可能是拿别的 git 跑的，不要复用。
+        this.remoteProbe = undefined;
     }
 
-    /** 按当前远端构造带鉴权的 SimpleGit 实例。 */
+    /**
+     * 按当前远端构造带鉴权的 SimpleGit 实例。
+     *
+     * 注意远端地址走的是**带缓存的** `probeRemoteUrl()`：一次操作里 `git()` 会被
+     * 调好几次，每次真去 spawn 一个 `git remote -v` 是本文件历史上最大的一笔
+     * 白烧（见 `REMOTE_PROBE_TTL_MS`）。
+     */
     private async git(): Promise<SimpleGit> {
         let remoteUrl: string | undefined;
         try {
             // 远端可能还不存在（刚 init）—— 取不到就当无鉴权实例。
-            remoteUrl = await this.rawGetRemoteUrl();
+            remoteUrl = await this.probeRemoteUrl(REMOTE_PROBE_TTL_MS);
         } catch {
             remoteUrl = undefined;
         }
@@ -290,7 +467,9 @@ export class SimpleGitManager implements GitManager {
      * 上层就能给出「令牌无效」和「网络不通」这两种完全不同的引导。
      */
     async testRemoteAccess(): Promise<number> {
-        const remoteUrl = await this.rawGetRemoteUrl();
+        // 传 0：这一步的结论必须基于**现在**这个远端地址，不能复用缓存
+        // （见 `probeRemoteUrl`）。它只由诊断入口调用，多一个子进程无所谓。
+        const remoteUrl = await this.probeRemoteUrl(0);
         if (!remoteUrl) {
             throw new NoUpstreamError("test remote access: no remote configured");
         }
@@ -329,6 +508,101 @@ export class SimpleGitManager implements GitManager {
             await wrap("unstaging files (no HEAD)", () =>
                 git.raw(["rm", "--cached", "--", ...paths])
             );
+        }
+    }
+
+    /**
+     * 把路径从**索引**里摘掉，工作区文件一个都不动 —— `git rm -r --cached`。
+     *
+     * ## 与 `unstage` 的区别
+     *
+     * `unstage`（`restore --staged`）只是把「已暂存的改动」撤回，文件仍然是**已跟踪**的
+     * —— 下一次 `git add -A` 再提交，它照样在。这里要的是「退出跟踪」：从索引里消失，
+     * 于是下次提交记下的是一条**删除**，而工作区那份还在（`.gitignore` 也才真正生效）。
+     *
+     * ## 为什么必须带 `--ignore-unmatch`
+     *
+     * 某个文件夹里一个已跟踪文件都没有时（刚配好、还没提交过），`git rm` 会以
+     * 「pathspec did not match」失败并**中止整条命令** —— 那样前面匹配上的文件夹
+     * 也白摘了。带上它，不匹配的路径被安静跳过。
+     *
+     * ## 为什么要分批
+     *
+     * 「按扩展名忽略图片」时路径是**逐个文件**列出来的（一次可能几千条），而命令行
+     * 有长度上限（Windows 约 32k 字符）—— 一次塞进去会以「命令行过长」失败，
+     * 那条错误跟「摘索引」毫无关系，用户根本猜不到。分批是纯保险，不影响语义。
+     *
+     * 不做提示、不额外刷新：调用方（`SyncService.untrackPaths`）负责排队与刷新，
+     * 设置页负责把结果讲给用户听。
+     */
+    async untrack(paths: string[]): Promise<void> {
+        if (paths.length === 0) return;
+        const git = await this.git();
+        for (let index = 0; index < paths.length; index += UNTRACK_BATCH_SIZE) {
+            const batch = paths.slice(index, index + UNTRACK_BATCH_SIZE);
+            await wrap("untracking paths", () =>
+                git.raw(["rm", "-r", "--cached", "--ignore-unmatch", "--", ...batch])
+            );
+        }
+    }
+
+    /**
+     * 当前已被跟踪的所有路径（`git ls-files`）。
+     *
+     * 用 `-z`：路径里的空格、中文、换行都不会把它拆错（`-z` 是 NUL 分隔）。
+     * 非仓库时返回空数组而不是抛错 —— 调用它的界面（「按扩展名忽略图片」）已经在
+     * 上游确认过仓库存在，这里再抛一次只会把「什么都没有」变成一句技术性报错。
+     */
+    async listTracked(): Promise<string[]> {
+        const git = await this.git();
+        try {
+            const raw = await wrap("listing tracked files", () => git.raw(["ls-files", "-z"]));
+            return raw.split("\0").filter((path) => path.length > 0);
+        } catch (err) {
+            if (err instanceof GitNotRepoError) return [];
+            throw mapError(err, "listing tracked files");
+        }
+    }
+
+    /**
+     * 这批路径里，哪些在索引里记的是**嵌套仓库**（gitlink，模式 `160000`）。
+     *
+     * ## 为什么需要它（2026-10-04，用户看着面板问「为什么这三项是文件夹地址、没有具体改动却算进了更改」）
+     *
+     * 用户在库的插件目录里**就地**开发插件，那些目录各自带一个 `.git`，于是库把
+     * 它们当成「指针」记进了索引。这种行有三个反直觉之处，用户一个人是猜不出来的：
+     * 暂存不掉（指针没变，`git add` 什么也记不下）、没有文件级差异、会永远挂在
+     * 「更改」里。面板认出它们之后才能说清这件事，并给一个能真正了结它的按钮。
+     *
+     * ## 为什么问 git 而不是自己看
+     *
+     * 判断「这是不是嵌套仓库」有几种土办法（看目录里有没有 `.git`），但都会漏：
+     * 索引里记着 gitlink 而目录已经被删掉也是同一件事，而这种情形只有索引知道。
+     * `git ls-files -s` 给的是**权威答案**（模式位 160000），而且一次就能问一批。
+     *
+     * 传空数组时**不碰 git**：没人会因为这个功能白搭一个子进程。
+     */
+    async nestedRepoPaths(paths: string[]): Promise<string[]> {
+        if (paths.length === 0) return [];
+        const git = await this.git();
+        try {
+            const raw = await wrap("listing index entries", () =>
+                git.raw(["ls-files", "-s", "-z", "--", ...paths])
+            );
+            const nested: string[] = [];
+            for (const record of raw.split("\0")) {
+                if (record.length === 0) continue;
+                // 形状：`<mode> <object> <stage>\t<path>`（`-z` 时制表符后只有路径）
+                const tab = record.indexOf("\t");
+                if (tab < 0) continue;
+                if (record.slice(0, tab).startsWith(GITLINK_MODE)) {
+                    nested.push(record.slice(tab + 1));
+                }
+            }
+            return nested;
+        } catch (err) {
+            if (err instanceof GitNotRepoError) return [];
+            throw mapError(err, "listing index entries");
         }
     }
 
@@ -528,7 +802,9 @@ export class SimpleGitManager implements GitManager {
     // ── 远端地址 ──────────────────────────────────────────────────────────
 
     async getRemoteUrl(): Promise<string | undefined> {
-        return this.rawGetRemoteUrl();
+        // 与 `git()` 共用同一次探测：面板一次重绘里两处都要远端地址，
+        // 以前这是两个 `git remote -v` 子进程。
+        return this.probeRemoteUrl(REMOTE_PROBE_TTL_MS);
     }
 
     /**
@@ -549,6 +825,22 @@ export class SimpleGitManager implements GitManager {
             throw new Error(`unrecognised count-objects output: ${output.trim().slice(0, 120)}`);
         }
         return size;
+    }
+
+    /**
+     * 远端地址；`maxAgeMs` 以内的探测结果直接复用（见 `REMOTE_PROBE_TTL_MS`）。
+     *
+     * 传 0 就是「立刻重新探测」—— 只读的诊断（`testRemoteAccess`）用得到：
+     * 它存在的意义就是**现在**能不能连上，不能拿几秒前的结论回答。
+     */
+    private async probeRemoteUrl(maxAgeMs: number): Promise<string | undefined> {
+        if (this.remoteProbe && Date.now() - this.remoteProbe.at < maxAgeMs) {
+            return this.remoteProbe.url;
+        }
+
+        const url = await this.rawGetRemoteUrl();
+        this.remoteProbe = { url, at: Date.now() };
+        return url;
     }
 
     private async rawGetRemoteUrl(): Promise<string | undefined> {
@@ -574,6 +866,9 @@ export class SimpleGitManager implements GitManager {
         } else {
             await wrap("adding remote", () => git.addRemote("origin", url));
         }
+        // 远端变了，缓存里那条探测结果立刻作废 —— 否则接下来这 5 秒里
+        // 回显与鉴权都还按旧地址算。
+        this.remoteProbe = undefined;
         // 远端变了鉴权对象可能也变了（GitHub → Gitee）。
         await this.revalidateAuth();
     }
@@ -680,6 +975,29 @@ export function mapError(err: unknown, what: string): Error {
     // `timed out` 是 git/curl 的（连接层面超时，对用户是同一件事）。
     if (/block timeout reached|timed out/i.test(message)) {
         return new GitTimeoutError(`git operation timed out (${detail})`, { cause: err });
+    }
+    /**
+     * 连不上远端。**放在鉴权判断之前**：连不上时 git 常把
+     * 「could not read Username」一起打出来（它连凭据助手都还没问到），
+     * 那只是症状 —— 报成鉴权失败会把用户指去反复检查一个没问题的令牌
+     * （与超时那条同一个理由）。
+     *
+     * ## 判据必须要求「网络层」的措辞
+     *
+     * `unable to access` 单独**不能**当判据：HTTP 层的失败也是这句话 ——
+     * Gitee 的「用户名不被支持」服务端原文就是
+     * `fatal: unable to access '…': The requested URL returned error: 403`
+     * （见 `gitErrorMapping.test.ts` 里逐字照抄的那条）。用它当判据会把鉴权类错误
+     * 一并吞掉，而那恰好是最需要说清方向的一类。
+     *
+     * 所以：出现明确的网络层措辞就算；只有 `unable to access` 时，还要**不是**
+     * `returned error: <HTTP 状态码>`（那是服务端答复了，只是答复是拒绝）。
+     */
+    const networkHints =
+        /getaddrinfo|could ?n[o']?t resolve host|name or service not known|temporary failure in name resolution|nodename nor servname|failed to connect|connection (refused|reset|timed out)|network is unreachable|ssl certificate problem|schannel|proxy connect/i;
+    const httpStatusAnswer = /returned error:\s*\d{3}/i;
+    if (networkHints.test(message) || (/unable to access/i.test(message) && !httpStatusAnswer.test(message))) {
+        return new GitNetworkError(`cannot reach the remote (${detail})`, { cause: err });
     }
     // 放在鉴权判断**之前**：某些平台会把「用户名不被支持」和
     // 「Authentication failed」一起打出来，此时更具体的这条应当胜出

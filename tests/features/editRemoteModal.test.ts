@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyRemoteUrl } from "../../src/features/sync/ui/EditRemoteModal";
+import { classifyRemoteUrl } from "../../src/features/sync/remoteUrl";
 
 /**
  * 「编辑远端地址」的提示判定。

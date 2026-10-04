@@ -12,6 +12,7 @@ import {
 } from "./diff";
 import { formatBytes, sumFileBytes } from "./repoSize";
 import { isFullyInSync } from "./syncState";
+import { ignoreRuleFor, mergeRuleLines } from "./imagesIgnore";
 import type { GitManager } from "./gitManager";
 import { ConflictError, describeSyncError } from "./errors";
 import type { SecretStore } from "../../core/secretStore";
@@ -73,6 +74,26 @@ export interface FileDiffSet {
     staged: FileDiff;
 }
 
+/**
+ * 状态读出来之后多久算「还新鲜」，可以直接复用（毫秒）。
+ *
+ * ## 为什么要有它
+ *
+ * `git status` 是这一层最贵的一步，而**同一个瞬间有好几处都想要状态**是常态：
+ * 启动时 `applyDerivedSettings()`→`reload()`、`onLayoutReady`→`start()`、
+ * 面板首次渲染各要一次；一次动作里 `withActivity` 收尾要一次、视图重绘又要一次。
+ * 实测（2026-10-01，Plugin-Test 库）：一次 `git status` 约 300 ms，
+ * 而一次面板重绘合计 754 ms / 10 个 git 子进程 —— 重复的那几次纯属白烧。
+ *
+ * ## 400 ms 是怎么定的
+ *
+ * 吃掉「同一轮事件里的重复读」绰绰有余（这些都发生在几十毫秒内），
+ * 而短到用户不可能察觉到「我明明刚改完，面板怎么没变」—— 何况任何**动过仓库**
+ * 的动作都会立刻让缓存失效（见 `enqueue`），所以「暂存完还显示未暂存」这种
+ * 新鲜度问题不存在。
+ */
+const STATUS_TTL_MS = 400;
+
 export class SyncService {
     /** 串行队列：队尾 promise。 */
     private tail: Promise<unknown> = Promise.resolve();
@@ -80,6 +101,24 @@ export class SyncService {
     private pending = 0;
     /** 状态变化订阅者（仓库同步视图）。见 `onStatusChange`。 */
     private readonly statusListeners = new Set<(status: RepoStatus | undefined) => void>();
+
+    /**
+     * 最近一次读出来的状态与读它的时刻（`undefined` 也是有效结果：不是仓库）。
+     *
+     * `statusCache === undefined` 表示「还没读过」，与「读出来是 undefined」是
+     * 两件不同的事 —— 混在一起会让「不是仓库」这个结论被当成「没缓存」而反复重读。
+     */
+    private statusCache: { status: RepoStatus | undefined; at: number } | undefined;
+
+    /**
+     * 正在进行的这一次状态读取。
+     *
+     * 单飞（single-flight）：同一时刻的第二次调用直接复用这个 promise。
+     * 这是与缓存**不同**的一层 —— 缓存管「刚读过就别再读」，它管「正在读就别再开一个」。
+     * 启动时那三次刷新间隔很近，只靠 TTL 的话它们会同时冲进 `git.status()`
+     * （三个 git 进程做同一件事），有了它就只有第一个真的跑。
+     */
+    private inFlightStatus: Promise<RepoStatus | undefined> | undefined;
 
     constructor(
         readonly git: GitManager,
@@ -101,6 +140,11 @@ export class SyncService {
 
     /** 串行执行一个动作；错误原样上抛给调用方决定怎么提示。 */
     private enqueue<T>(run: () => Promise<T>): Promise<T> {
+        // **任何排队过的动作都会动仓库**（暂存、提交、切换分支、甚至只读的
+        // `fileDiff` 都会读 index），所以缓存在这里一律作废：这是唯一的口子，
+        // 补在新加的写操作上不如补在这一处可靠。
+        this.forgetStatus();
+
         this.pending += 1;
         // 前一个任务无论成功失败都要接着跑下一个，所以 onRejected 也传 run。
         const task = this.tail.then(run, run);
@@ -108,6 +152,11 @@ export class SyncService {
         return task.finally(() => {
             this.pending -= 1;
         });
+    }
+
+    /** 丢掉状态缓存（下次 `refresh()` 一定真去读一次）。 */
+    private forgetStatus(): void {
+        this.statusCache = undefined;
     }
 
     /** 动作结束后统一刷新状态栏，并把新状态交给需要它的调用方。 */
@@ -414,6 +463,35 @@ export class SyncService {
         });
     }
 
+    /**
+     * 让 git **不再跟踪**这些路径（工作区文件保留）。
+     *
+     * 与 `stageFiles` / `unstageFiles` 一样走串行队列：它写的是 git 索引，
+     * 而索引是全局状态 —— 和自动提交定时器并发写索引是真实会发生的。
+     *
+     * 调用方（设置页那个「让 git 不再跟踪图片」）负责先把同样的规则写进
+     * `.gitignore`：**只做这一步文件会被下一次 `git add -A` 加回来**，
+     * 只做 `.gitignore` 则已跟踪的那些照旧同步（见 `features/sync/imagesIgnore.ts`）。
+     */
+    async untrackPaths(paths: string[]): Promise<void> {
+        if (paths.length === 0) return;
+        await this.enqueue(async () => {
+            await this.git.untrack(paths);
+            await this.refreshStatus();
+        });
+    }
+
+    /**
+     * 当前已被跟踪的所有路径（`git ls-files`）。
+     *
+     * **不走队列**：它只读、不改索引，和 `readGitignore` 同一类。走队列反而有害 ——
+     * 「按扩展名忽略图片」要在**摘索引之前**拿到这份清单，而摘索引本身在队列里，
+     * 排在它前面只会让用户多点一次等待。
+     */
+    async listTrackedPaths(): Promise<string[]> {
+        return this.git.listTracked();
+    }
+
     async checkoutBranch(name: string): Promise<void> {
         await this.enqueue(async () => {
             await this.git.checkout(name);
@@ -614,8 +692,46 @@ export class SyncService {
         }
     }
 
-    /** 只刷新状态（不打扰任何 git 写操作）。 */
-    async refresh(): Promise<RepoStatus | undefined> {
+    /**
+     * 只刷新状态（不打扰任何 git 写操作）。
+     *
+     * ## 它是全插件唯一读状态的地方，所以去重也收在这里
+     *
+     * 三层防护，各自挡一个真实的浪费（见 `STATUS_TTL_MS` 与两个字段的说明）：
+     * 1. **单飞**：正在读就直接复用那次 promise；
+     * 2. **短 TTL**：刚读过（400 ms 内）就直接返回上一次的结果；
+     * 3. **动作让缓存失效**（`enqueue` 里的 `forgetStatus`）：动过仓库之后
+     *    一定重新读，界面不会显示旧状态。
+     *
+     * 命中缓存时**故意不再 `publish`**：订阅者拿到的就是这份状态对象
+     * （同一次读取的结果），状态栏显示的也已经是它 —— 再推一次只是让界面
+     * 白重绘一遍，而重绘正是我们要省的。
+     *
+     * @param options.force 跳过缓存与单飞，**立刻**去读一次。
+     *   只给「我们刚在 git 之外动了仓库」这类调用点用：改远端地址
+     *   （`main.ts` 的 `editRemote`）与面板上那次手动「刷新」。前者会让
+     *   领先/落后重新算，而用户刚点完保存，缓存那 400 ms 就是「改了没反应」；
+     *   后者的全部意义就是「现在读一次」，拿 400 ms 前的结论回答是骗人的。
+     */
+    async refresh(options: { force?: boolean } = {}): Promise<RepoStatus | undefined> {
+        if (!options.force) {
+            if (this.inFlightStatus) return this.inFlightStatus;
+
+            const cached = this.statusCache;
+            if (cached && Date.now() - cached.at < STATUS_TTL_MS) return cached.status;
+        }
+
+        const task = this.readStatus();
+        this.inFlightStatus = task;
+        try {
+            return await task;
+        } finally {
+            this.inFlightStatus = undefined;
+        }
+    }
+
+    /** 真的去读一次状态：更新缓存、状态栏，并推给订阅者。 */
+    private async readStatus(): Promise<RepoStatus | undefined> {
         let status: RepoStatus | undefined;
 
         try {
@@ -625,9 +741,55 @@ export class SyncService {
             logger.debug("status refresh failed", err);
             status = undefined;
         }
+
+        // 认出「嵌套仓库」行（2026-10-04）。**问一次 git、只问变了的那些路径**：
+        // 这类行（用户在插件目录里就地开发留下的 gitlink）暂存不掉、没有文件级差异，
+        // 面板必须能把它和普通文件区分开，否则只能看着一条永远消不掉的「更改」。
+        // 放在状态快照里而不是让视图自己问 —— 视图只管画，git 只在这里碰。
+        if (status) {
+            const changed = [
+                ...status.staged,
+                ...status.unstaged,
+                ...status.untracked,
+            ].map((change) => change.path);
+            if (changed.length > 0) {
+                try {
+                    const nested = await this.git.nestedRepoPaths(changed);
+                    if (nested.length > 0) status.nestedRepos = nested;
+                } catch (err) {
+                    // 认不出来只是少了那个标记，不该让整个面板读不出状态。
+                    logger.debug("could not detect nested repositories", err);
+                }
+            }
+        }
+
+        this.statusCache = { status, at: Date.now() };
         this.statusBar.update(status);
         this.publish(status);
         return status;
+    }
+
+    /**
+     * 让 git 不再跟踪这些路径，**并把它们写进 `.gitignore`**（一步到位）。
+     *
+     * 「只摘索引」是不够的：下一次 `git add -A`（自动同步每轮都会跑）会把它们加回来
+     * —— 这正是它们当初进索引的方式。所以忽略规则和摘索引必须一起做。
+     *
+     * 只动索引与 `.gitignore`：**工作区文件一个都不碰**（对「就地开发的插件目录」
+     * 尤其要紧 —— 里面有用户没提交的代码）。
+     *
+     * @returns 这次真正写进 `.gitignore` 的规则条数（0 = 本来就有）。
+     */
+    async untrackAndIgnore(paths: string[]): Promise<number> {
+        if (paths.length === 0) return 0;
+        const current = (await this.readGitignore()) ?? "";
+        const merged = mergeRuleLines(
+            current,
+            paths.map((path) => ignoreRuleFor(path))
+        );
+        if (merged.added.length > 0) await this.writeGitignore(merged.content);
+        await this.untrackPaths(paths);
+        return merged.added.length;
     }
 
     /**

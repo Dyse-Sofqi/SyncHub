@@ -1248,3 +1248,191 @@ describe("onFinished", () => {
         expect(calls).toBe(0);
     });
 });
+
+/**
+ * 改名（2026-10-01）。
+ *
+ * ## 报的是什么
+ *
+ * 用户在库里**给文件夹改名**（或文件改名）之后，图片同步看起来「不认识改名」：
+ * 新路径被当成新图片重传，而云端旧键那一份被当成「云端新增」下载回来 ——
+ * 库里出现**两批**同样的图片，而且因为两边重新对上了，它不会自愈。
+ *
+ * ## 这里钉住的四件事
+ *
+ * 1. 记录跟着改名走 → 新路径**不重传**、旧路径**不下载**（正常路径）；
+ * 2. 云端搬不动（源不存在、旧键删失败）时，**仍然**不出现重复 ——
+ *    墓碑挡住回下载，下一轮把新路径补传上去；
+ * 3. 搬到受管范围之外时旧路径也留墓碑（否则它会凭空回到受管文件夹里）；
+ * 4. 总开关关掉时只记账、不发请求，而打开开关后的第一轮**也不出现重复**。
+ */
+describe("改名", () => {
+    /** 一次改名在本地发生了什么：旧路径消失、新路径出现（内容与 mtime 不变）。 */
+    function renameLocally(h: Harness, from: string, to: string): void {
+        h.vault.remove(from);
+        h.vault.seed(to, { bytes: 10, mtime: 5 });
+    }
+
+    /** 把「已同步」这一份准备好：本地 + 云端 + 清单三处对齐。 */
+    function seedSynced(h: Harness, path: string): void {
+        h.vault.seed(path, { bytes: 10, mtime: 5 });
+        h.remote(path, 10, "etag-a");
+        h.track(path, { size: 10, mtime: 5, etag: "etag-a" });
+    }
+
+    it("正常改名：云端用 COPY 搬到新键，然后删掉旧键（图片内容不重传）", async () => {
+        const h = createHarness();
+        seedSynced(h, "images/旧.png");
+        renameLocally(h, "images/旧.png", "images/新.png");
+
+        await expect(
+            h.service.renameRemoteBackup("images/旧.png", "images/新.png")
+        ).resolves.toBe(true);
+
+        // 只发了两个请求：服务端 COPY + DELETE。**没有**一次上传图片内容 ——
+        // 这正是「文件夹改名会重传整批图片」那个问题的修复点。
+        expect(h.r2.requests.map((request) => request.method)).toEqual(["PUT", "DELETE"]);
+        expect(h.r2.requests[0]!.headers["x-amz-copy-source"]).toBe("/notes/images/%E6%97%A7.png");
+        expect(h.r2.objects.has("images/新.png")).toBe(true);
+        expect(h.r2.objects.has("images/旧.png")).toBe(false);
+    });
+
+    it("改名之后一轮同步：新路径**不重传**、旧路径**不下载回来**（没有第二批）", async () => {
+        const h = createHarness();
+        seedSynced(h, "images/旧.png");
+        renameLocally(h, "images/旧.png", "images/新.png");
+        await h.service.renameRemoteBackup("images/旧.png", "images/新.png");
+
+        const plan = await h.service.plan();
+
+        // 旧路径**整个从计划里消失了**：旧键已经在上一段里删掉，本地也没有它
+        // —— 两边都不存在，于是计划里只剩新路径，而且是「一致」。
+        expect(plan.entries).toEqual([
+            { path: "images/新.png", action: "skip", reason: "in-sync", size: 10 },
+        ]);
+
+        const summary = await h.service.run();
+        expect(summary.uploaded).toBe(0);
+        expect(summary.downloaded).toBe(0);
+        expect(h.vault.has("images/旧.png")).toBe(false);
+        // 旧键已删、本地也没有 → 那条墓碑被 cut 掉，清单不会为它一直留着
+        expect(h.saved()["images/旧.png"]).toBeUndefined();
+    });
+
+    /**
+     * 云端那一份从来没传过（新加的图 / 这台设备的清单丢过）。
+     *
+     * COPY 会拿到 404，而**这不是失败**：新路径本来就会被下一轮同步当成新增
+     * 上传上去。要守的是「旧路径不会因此被下载回来」。
+     */
+    it("云端本来就没有这一份：新路径补上传，旧路径**不**下载回来", async () => {
+        const h = createHarness();
+        h.vault.seed("images/旧.png", { bytes: 10, mtime: 5 });
+        h.track("images/旧.png", { size: 10, mtime: 5, etag: "etag-a" });
+        renameLocally(h, "images/旧.png", "images/新.png");
+
+        await expect(
+            h.service.renameRemoteBackup("images/旧.png", "images/新.png")
+        ).resolves.toBe(false);
+
+        const plan = await h.service.plan();
+        expect(plan.entries).toEqual([
+            { path: "images/新.png", action: "upload", reason: "local-new", size: 10 },
+        ]);
+    });
+
+    /**
+     * 旧键删失败（403 / 网络抖动）。
+     *
+     * 此时云端同时有新旧两个键，而本地只有新路径 —— 如果没有墓碑，旧键那一份
+     * 会在下一轮被下载回来，用户就得到两张一样的图。**这是最需要守住的一条**：
+     * 云端没删干净不能变成本地出现重复。
+     */
+    it("旧键删失败：新路径照样算已同步，旧路径仍**不**下载回来", async () => {
+        const h = createHarness();
+        seedSynced(h, "images/旧.png");
+        renameLocally(h, "images/旧.png", "images/新.png");
+        // COPY 成功、DELETE 被拒
+        h.r2.override = (request) =>
+            request.method === "DELETE" ? { status: 403 } : undefined;
+
+        const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+        try {
+            await expect(
+                h.service.renameRemoteBackup("images/旧.png", "images/新.png")
+            ).resolves.toBe(false);
+            expect(logged).toHaveBeenCalled();
+        } finally {
+            logged.mockRestore();
+        }
+
+        // 云端留着两份（我们从不自动删云端），旧路径有墓碑
+        expect(h.r2.objects.has("images/新.png")).toBe(true);
+        expect(h.r2.objects.has("images/旧.png")).toBe(true);
+        expect(h.saved()["images/旧.png"]).toMatchObject({ remoteOnly: true });
+
+        const plan = await h.service.plan();
+        expect(plan.entries.map((entry) => entry.action)).toEqual(["skip", "skip"]);
+        expect(plan.entries[1]!.reason).toBe("local-deleted");
+    });
+
+    it("搬到受管范围之外：旧路径留墓碑（否则它会凭空回到受管文件夹里）", async () => {
+        const h = createHarness();
+        seedSynced(h, "images/旧.png");
+        renameLocally(h, "images/旧.png", "templates/新.png");
+
+        await expect(
+            h.service.renameRemoteBackup("images/旧.png", "templates/新.png")
+        ).resolves.toBe(false);
+
+        // 范围外的目标不记账，也不发请求（云端那份留着，用户可自己去桶里清）
+        expect(h.r2.requests).toEqual([]);
+        expect(h.saved()["templates/新.png"]).toBeUndefined();
+
+        const plan = await h.service.plan();
+        expect(plan.entries).toEqual([
+            { path: "images/旧.png", action: "skip", reason: "local-deleted", size: 10 },
+        ]);
+    });
+
+    /**
+     * 总开关关掉 = 「别在背后动我的图片」（与 `noteDeleted` 同一个边界）。
+     *
+     * 但**记录照搬**：少了这一步，用户下次打开开关的第一轮就会同时重传新路径、
+     * 又把旧路径下载回来 —— 重复问题只是延后发生，而不是消失。
+     */
+    it("总开关关掉时只记账、不发请求；打开后的第一轮也不出现重复", async () => {
+        const h = createHarness({ enabled: false });
+        seedSynced(h, "images/旧.png");
+        renameLocally(h, "images/旧.png", "images/新.png");
+
+        await h.service.renameRemoteBackup("images/旧.png", "images/新.png");
+
+        expect(h.r2.requests).toEqual([]);
+        expect(h.saved()["images/新.png"]).toMatchObject({ etag: "etag-a" });
+        expect(h.saved()["images/旧.png"]).toMatchObject({ remoteOnly: true });
+
+        h.configure({ enabled: true });
+        const summary = await h.service.run();
+
+        // 云端那份还是旧键（关着的时候没搬），所以新路径补上传一次；
+        // 而旧路径**不下载回来** —— 这就是「没有第二批」。
+        expect(summary.uploaded).toBe(1);
+        expect(summary.downloaded).toBe(0);
+        expect(h.vault.has("images/旧.png")).toBe(false);
+    });
+
+    it("同一次改名被受理两遍（面板 + 事件）只搬一次", async () => {
+        const h = createHarness();
+        seedSynced(h, "images/旧.png");
+        renameLocally(h, "images/旧.png", "images/新.png");
+
+        await h.service.renameRemoteBackup("images/旧.png", "images/新.png");
+        await expect(
+            h.service.renameRemoteBackup("images/旧.png", "images/新.png")
+        ).resolves.toBe(true);
+
+        expect(h.r2.requests).toHaveLength(2);
+    });
+});
+

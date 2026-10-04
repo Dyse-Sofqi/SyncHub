@@ -38,6 +38,7 @@ const SAMPLES: { [K in ImageSyncErrorKind]: ImageSyncErrorDetail[K] } = {
     listFailed: { status: 500, detail: "InternalError" },
     uploadFailed: { path: "images/a.png", status: 400, detail: "EntityTooLarge" },
     downloadFailed: { path: "images/b.png", status: 404, detail: "NoSuchKey" },
+    copyFailed: { path: "images/c.png", status: 400, detail: "InvalidRequest" },
     deleteFailed: { path: "images/c.png", status: 403, detail: "AccessDenied" },
     network: { detail: "ERR_CONNECTION_RESET" },
     localReadFailed: { path: "images/d.png", detail: "ENOENT" },

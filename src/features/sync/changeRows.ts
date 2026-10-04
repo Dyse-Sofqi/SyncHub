@@ -18,6 +18,84 @@ export interface ChangeRow {
     status: FileChangeStatus;
     /** 已经在索引里 —— 点一下是「取消暂存」而不是「暂存」。 */
     staged: boolean;
+    /**
+     * 这一行在索引里记的是**嵌套仓库**（gitlink，模式 `160000`）。
+     *
+     * 面板据此换一套呈现：加「嵌套仓库」徽标、不给「查看差异 / 暂存」按钮
+     * （对 gitlink 它们是空操作），改给「不再跟踪」——见 `SourceControlView`。
+     */
+    nestedRepo?: boolean;
+}
+
+/** 路径的扩展名（小写、不含点）；没有扩展名时返回空串。 */
+export function extensionOf(path: string): string {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const dot = name.lastIndexOf(".");
+    // 开头的点不算扩展名（`.gitignore` 这类隐藏文件不该被当成「gitignore 格式」）
+    if (dot <= 0) return "";
+    return name.slice(dot + 1).toLowerCase();
+}
+
+/** Markdown 笔记的扩展名 —— 「笔记同步主要还是同步 md」那个主要诉求。 */
+const MARKDOWN_EXTENSIONS = ["md", "markdown"];
+
+/** 这一行是不是 Markdown 笔记。 */
+export function isMarkdown(row: ChangeRow): boolean {
+    return MARKDOWN_EXTENSIONS.includes(extensionOf(row.path));
+}
+
+/** 一行是否符合筛选（`filter` 为 `all` 时恒真）。 */
+export function matchesFilter(row: ChangeRow, filter: string): boolean {
+    if (filter === "all") return true;
+    if (filter === "md") return isMarkdown(row);
+    return extensionOf(row.path) === filter;
+}
+
+/**
+ * 筛选下拉的选项：**由这次的改动生成**。
+ *
+ * 只有真实出现的格式才列出来 —— 固定一份清单的话，用户会看到一堆筛出空结果的入口。
+ * `.md` 单独并成一条（`md` / `markdown` 都算），其余按扩展名各一条；无扩展名的文件
+ * 归到 `(无扩展名)`。
+ *
+ * 顺序：全部 → Markdown → 其余按出现次数倒序（多的在前，最可能是他要找的）。
+ */
+export function changeFilterOptions(
+    rows: ChangeRow[],
+    labels: { all: (count: number) => string; markdown: (count: number) => string; noExtension: string }
+): Array<{ value: string; label: string }> {
+    const counts = new Map<string, number>();
+    let markdown = 0;
+    let noExtension = 0;
+
+    for (const row of rows) {
+        if (isMarkdown(row)) {
+            markdown += 1;
+            continue;
+        }
+        const extension = extensionOf(row.path);
+        if (!extension) {
+            noExtension += 1;
+            continue;
+        }
+        counts.set(extension, (counts.get(extension) ?? 0) + 1);
+    }
+
+    const options = [
+        { value: "all", label: labels.all(rows.length) },
+        ...(markdown > 0 ? [{ value: "md", label: labels.markdown(markdown) }] : []),
+        ...[...counts.entries()]
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .map(([extension, count]) => ({
+                value: extension,
+                label: `.${extension} (${count})`,
+            })),
+        ...(noExtension > 0
+            ? [{ value: "no-extension", label: `${labels.noExtension} (${noExtension})` }]
+            : []),
+    ];
+
+    return options;
 }
 
 /**
@@ -37,6 +115,7 @@ export interface ChangeRow {
  */
 export function changeRows(status: RepoStatus): ChangeRow[] {
     const stagedPaths = new Set(status.staged.map((change) => change.path));
+    const nestedPaths = new Set(status.nestedRepos ?? []);
     const seen = new Set<string>();
     const rows: ChangeRow[] = [];
 
@@ -44,11 +123,13 @@ export function changeRows(status: RepoStatus): ChangeRow[] {
         if (change.status === "conflicted") continue;
         if (seen.has(change.path)) continue;
         seen.add(change.path);
-        rows.push({
+        const row: ChangeRow = {
             path: change.path,
             status: change.status,
             staged: stagedPaths.has(change.path),
-        });
+        };
+        if (nestedPaths.has(change.path)) row.nestedRepo = true;
+        rows.push(row);
     }
 
     return rows;

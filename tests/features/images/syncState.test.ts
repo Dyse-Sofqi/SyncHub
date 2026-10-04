@@ -4,8 +4,10 @@ import {
     emptyState,
     forget,
     loadState,
+    markRemoteOnly,
     pruneState,
     recordSynced,
+    renameEntry,
     sanitizeState,
     saveState,
     type ImageSyncState,
@@ -196,6 +198,74 @@ describe("recordSynced / forget", () => {
     it("forget 一个不存在的路径不报错", () => {
         const state = emptyState();
         expect(() => forget(state, "nope.png")).not.toThrow();
+    });
+});
+
+/**
+ * 改名（2026-10-01）。
+ *
+ * 身份就是路径，所以改名必须**搬记录**，否则下一轮同步既会重传新路径、
+ * 又会把旧路径下载回来（库里出现两批同样的图片）。旧路径那一侧留的是
+ * **墓碑**，不是 `forget` —— 这是这个函数唯一容易写错的地方。
+ */
+describe("renameEntry", () => {
+    it("把 size / mtime / etag 搬到新路径", () => {
+        const state = emptyState();
+        recordSynced(state, "images/旧.png", { size: 42, mtime: 7 }, "etag-7", 100);
+
+        expect(renameEntry(state, "images/旧.png", "images/新.png", 200)).toBe(true);
+
+        expect(state.entries["images/新.png"]).toEqual({
+            size: 42,
+            mtime: 7,
+            etag: "etag-7",
+            syncedAt: 200,
+        });
+    });
+
+    /**
+     * 旧路径留墓碑（而不是删掉记录）——**这是整个改名修复的关键**。
+     *
+     * 旧键在改名过程中必然还会存在一会儿（删除可能失败、或者总开关关着时
+     * 压根没搬）。没有墓碑，镜像规则对「云端有、本地没有」的唯一解释就是
+     * 补齐到本地 —— 旧那份图片会自己回来。
+     */
+    it("旧路径留墓碑（否则云端那一份会被下载回来）", () => {
+        const state = emptyState();
+        recordSynced(state, "images/旧.png", { size: 42, mtime: 7 }, "etag-7", 100);
+
+        renameEntry(state, "images/旧.png", "images/新.png", 200);
+
+        expect(state.entries["images/旧.png"]).toMatchObject({ remoteOnly: true });
+    });
+
+    it("墓碑**不会**被搬到新路径（那边本地就在，墓碑只会说假话）", () => {
+        const state = emptyState();
+        recordSynced(state, "images/旧.png", { size: 42, mtime: 7 }, "etag-7", 100);
+        markRemoteOnly(state, "images/旧.png");
+
+        renameEntry(state, "images/旧.png", "images/新.png", 200);
+
+        expect(state.entries["images/新.png"]!.remoteOnly).toBeUndefined();
+    });
+
+    it("旧路径没有记录时返回 false，且不凭空造一条", () => {
+        const state = emptyState();
+
+        expect(renameEntry(state, "images/没有过.png", "images/新.png")).toBe(false);
+        expect(state.entries).toEqual({});
+    });
+
+    it("旧键真被删掉之后，墓碑会被 pruneState 自然清掉", () => {
+        const state = emptyState();
+        recordSynced(state, "images/旧.png", { size: 1, mtime: 1 }, "e", 1);
+        renameEntry(state, "images/旧.png", "images/新.png", 2);
+
+        // 两边都只剩新路径（旧键已经从云端删掉、本地也没有）
+        const removed = pruneState(state, new Set(["images/新.png"]));
+
+        expect(removed).toBe(1);
+        expect(Object.keys(state.entries)).toEqual(["images/新.png"]);
     });
 });
 

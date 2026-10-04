@@ -33,6 +33,16 @@ export interface RepoStatus {
     unstaged: FileChange[];
     /** 未跟踪文件单独列出 —— 提交前要不要带上它是个显式决策。 */
     untracked: FileChange[];
+    /**
+     * 上面这些更改里，**索引记的是嵌套仓库**（gitlink，模式 `160000`）的那些路径。
+     *
+     * 用户在库的插件/主题目录里就地开发时，那些目录各自带 `.git`，库就把它们记成了
+     * 一个「指针」。这种行的三个反直觉之处（暂存不掉、没有文件级差异、永远挂在
+     * 「更改」里）面板要能解释，也要能一键了结 —— 见 `SimpleGitManager.nestedRepoPaths`。
+     *
+     * 缺省（`undefined`）表示「没查过」或者「一个都没有」。
+     */
+    nestedRepos?: string[];
     /** 双方都改了的文件（未解决的冲突）。 */
     conflicted: string[];
     /** 本地领先远端的提交数。没有 upstream 时为 null。 */

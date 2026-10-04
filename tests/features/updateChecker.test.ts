@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { __setRequestUrlHandler } from "../stubs/obsidian";
+import { __setRequestUrlHandler, Notice } from "../stubs/obsidian";
 import { Notifier } from "../../src/core/notice";
 import { SecretStore } from "../../src/core/secretStore";
 import { normalizeSettings, type ObsyncSettings } from "../../src/core/settings";
 import { zhCN } from "../../src/core/i18n/locales/zh-cn";
 import { InstallerService } from "../../src/features/installer/installerService";
+import { SELF_REPO } from "../../src/features/installer/selfUpdate";
 import {
     shouldCheckOnSettingsOpen,
     UpdateChecker,
@@ -110,6 +111,8 @@ function createContext(fake: FakeApp) {
 
 beforeEach(() => {
     routes = [];
+    // 提示条是全局收集的：不清会跨用例串味（回退提示正是靠它断言的）。
+    Notice.instances.length = 0;
     __setRequestUrlHandler(async (request) => {
         for (const candidate of routes) {
             if (candidate.match.test(request.url)) {
@@ -749,10 +752,15 @@ describe("主题的更新检查", () => {
  * 而用户此刻跑的根本不是它。
  */
 describe("checkSelf", () => {
+    /**
+     * 路由的都是 **Gitee 镜像**（`sofqi/SyncHub`），不是官方 GitHub ——
+     * 因为 2026-10-01 起自身更新的**默认来源就是那个镜像**，而这里全部用例
+     * 都不传来源（走默认）。官方那条路由由最后一条用例单独盯着。
+     */
     it("远端有更新版本时报有更新", async () => {
         const fake = createFakeApp();
         const { checker } = createContext(fake);
-        route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+        route(/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
             status: 200,
             text: releaseJson("0.2.0"),
         }));
@@ -768,7 +776,7 @@ describe("checkSelf", () => {
     it("远端同版本时报已是最新", async () => {
         const fake = createFakeApp();
         const { checker } = createContext(fake);
-        route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+        route(/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
             status: 200,
             text: releaseJson("0.1.0"),
         }));
@@ -794,7 +802,7 @@ describe("checkSelf", () => {
             })
         );
         const { checker } = createContext(fake);
-        route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+        route(/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
             status: 200,
             text: releaseJson("0.3.0"),
         }));
@@ -807,7 +815,7 @@ describe("checkSelf", () => {
     it("**不写 availableUpdates**（自己不在跟踪列表里）", async () => {
         const fake = createFakeApp();
         const { checker, settings } = createContext(fake);
-        route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+        route(/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
             status: 200,
             text: releaseJson("0.2.0"),
         }));
@@ -815,6 +823,37 @@ describe("checkSelf", () => {
         await checker.checkSelf("0.1.0");
 
         expect(settings.installer.availableUpdates).toEqual({});
+    });
+
+    /**
+     * 默认来源是**设置里那一个**（默认 Gitee 镜像），而显式传官方仓库仍然有效
+     * —— 这是「默认换了、退路还在」的那一半。
+     */
+    it("显式传官方仓库时打 GitHub（退路还在）", async () => {
+        const fake = createFakeApp();
+        const { checker } = createContext(fake);
+        route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 200,
+            text: releaseJson("0.2.0"),
+        }));
+
+        const result = await checker.checkSelf("0.1.0", SELF_REPO);
+
+        expect(result.hasUpdate).toBe(true);
+    });
+
+    it("设置改成官方地址之后，检查也跟着走 GitHub（与更新同源）", async () => {
+        const fake = createFakeApp();
+        const { checker, settings } = createContext(fake);
+        settings.installer.selfUpdateSource = "https://github.com/Dyse-Sofqi/SyncHub";
+        route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 200,
+            text: releaseJson("0.2.0"),
+        }));
+
+        const result = await checker.checkSelf("0.1.0");
+
+        expect(result.hasUpdate).toBe(true);
     });
 
     it("没有 release 时「无从比较」而不是错误（main.js 是构建产物，源码通道取不到）", async () => {
@@ -843,5 +882,88 @@ describe("checkSelf", () => {
 
         expect(result.hasUpdate).toBe(false);
         expect(result.error).toBeTruthy();
+    });
+
+    /**
+     * **镜像报错 → 改用官方仓库再查一次**（2026-10-01 用户要求）。
+     *
+     * 三件事：顺序、结论（用官方那次的结果）、以及**回退要说出来** ——
+     * 提示条一次，状态行里也留一句（`fellBackFrom`）。
+     */
+    it("镜像报错时回退官方，结论取官方那次，并记下回退过的来源", async () => {
+        const fake = createFakeApp();
+        const { checker } = createContext(fake);
+        // 顺序敏感：这条要压在下面那条宽泛的规则之前
+        route(/gitee\.com\/api\/v5\/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 403,
+            text: '{"message":"rate limit"}',
+        }));
+        route(/api\.github\.com\/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 200,
+            text: releaseJson("0.2.0"),
+        }));
+
+        const result = await checker.checkSelf("0.1.0");
+
+        expect(result.hasUpdate).toBe(true);
+        expect(result.latestVersion).toBe("0.2.0");
+        expect(result.error).toBeUndefined();
+        // 状态行靠它写下「这次是从哪儿查的」
+        expect(result.fellBackFrom).toBe("gitee.com/sofqi/SyncHub");
+        // 并且提示了一次（提示条会消失，状态行不会）
+        expect(
+            Notice.instances.some((notice) =>
+                String(notice.message).includes("gitee.com/sofqi/SyncHub")
+            )
+        ).toBe(true);
+    });
+
+    it("两边都失败时如实报错，同时记着回退过", async () => {
+        const fake = createFakeApp();
+        const { checker } = createContext(fake);
+        route(/releases\/latest$/, () => ({
+            status: 403,
+            text: '{"message":"rate limit"}',
+            headers: { "x-ratelimit-remaining": "0" },
+        }));
+
+        const result = await checker.checkSelf("0.1.0");
+
+        expect(result.error).toBeTruthy();
+        expect(result.fellBackFrom).toBe("gitee.com/sofqi/SyncHub");
+    });
+
+    it("镜像正常时不打官方、也不记回退", async () => {
+        const fake = createFakeApp();
+        const { checker } = createContext(fake);
+        const requested: string[] = [];
+        route(/releases\/latest$/, (request) => {
+            requested.push(request.url);
+            return { status: 200, text: releaseJson("0.2.0") };
+        });
+
+        const result = await checker.checkSelf("0.1.0");
+
+        expect(result.hasUpdate).toBe(true);
+        expect(result.fellBackFrom).toBeUndefined();
+        expect(requested.some((url) => url.includes("gitee.com"))).toBe(true);
+        expect(requested.some((url) => url.includes("api.github.com"))).toBe(false);
+    });
+
+    it("配的就是官方时只有一次请求", async () => {
+        const fake = createFakeApp();
+        const { checker, settings } = createContext(fake);
+        settings.installer.selfUpdateSource = "https://github.com/Dyse-Sofqi/SyncHub";
+        const requested: string[] = [];
+        route(/releases\/latest$/, (request) => {
+            requested.push(request.url);
+            return { status: 403, text: '{"message":"rate limit"}' };
+        });
+
+        const result = await checker.checkSelf("0.1.0");
+
+        expect(result.error).toBeTruthy();
+        expect(result.fellBackFrom).toBeUndefined();
+        expect(requested).toHaveLength(1);
     });
 });

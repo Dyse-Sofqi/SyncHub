@@ -5,18 +5,37 @@ import {
     type ButtonComponent,
     type TextComponent,
 } from "obsidian";
-import { LANGUAGE_OPTIONS, type LanguageSetting, type LocaleStrings } from "./core/i18n";
+import { type LocaleStrings } from "./core/i18n";
 import { logger } from "./core/logger";
 import { DEFAULT_SETTINGS } from "./core/settings";
-import { formatFolders, normalizeFolders, parseFolders } from "./features/images/imageScan";
-import { FolderSuggestModal } from "./features/images/ui/FolderSuggestModal";
+import { pickFile } from "./core/desktopFileDialog";
+import { formatCountdown } from "./features/sync/countdown";
+import { bindRemoteInput } from "./features/sync/remoteEditor";
+import { SYNC_EXTENSIONS } from "./features/images/imageScan";
+import {
+    extensionIgnoreRules,
+    ignoreRuleFor,
+    isImagePath,
+    mergeRuleLines,
+} from "./features/sync/imagesIgnore";
+import {
+    ConfirmUntrackImagesModal,
+    type UntrackMode,
+} from "./features/sync/ui/ConfirmUntrackImagesModal";
+import { normalizeFolders } from "./features/images/imageScan";
+import {
+    FolderSuggestModal,
+    filterFolderOptions,
+    folderOptions,
+    type FolderOption,
+} from "./features/images/ui/FolderSuggestModal";
 import type { ImageSyncService } from "./features/images/imageSyncService";
 import type { SyncPlan, SyncSummary } from "./features/images/types";
 import type {
     DiagnosticCheck,
     DiagnosticsReport,
 } from "./features/sync/types";
-import { describeSelfState, resolveSelfRepo } from "./features/installer/selfUpdate";
+import { describeSelfState } from "./features/installer/selfUpdate";
 import { shouldCheckOnSettingsOpen } from "./features/installer/updateChecker";
 import type { SelfUpdateCheck } from "./features/installer/types";
 import { renderTrackedItems } from "./features/installer/ui/TrackedItemsList";
@@ -66,6 +85,15 @@ export class ObsyncSettingsTab extends PluginSettingTab {
      */
     private duplicateFolders: Array<{ name: string; count: number }> = [];
 
+    /**
+     * 页面上正在跑的倒计时刷新器（`window.setInterval` 的 id）。
+     *
+     * 记下来是为了**能清掉**：`display()` 每次都会重建整页 DOM，而 `hide()` 是
+     * 用户关掉这一页。不清的话每重绘一次就多一个永不停止的 interval，而且它守着
+     * 的是已经脱离文档的节点 —— 页面开着久了就是一个缓慢的泄漏。
+     */
+    private countdowns: number[] = [];
+
     constructor(private readonly obsync: ObsyncPlugin) {
         super(obsync.app, obsync);
     }
@@ -73,6 +101,9 @@ export class ObsyncSettingsTab extends PluginSettingTab {
     display(): void {
         const justOpened = !this.tabOpen;
         this.tabOpen = true;
+
+        // 先清掉上一轮重绘留下的倒计时（见 `countdowns`）。
+        this.stopCountdowns();
 
         const { containerEl } = this;
         containerEl.empty();
@@ -134,8 +165,16 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         }
     }
 
+    /**
+     * 关掉设置页时收尾。
+     *
+     * `tabOpen = false` 让下次打开重新走一遍「打开时」的动作（校正版本、查更新）；
+     * `stopCountdowns()` 停掉「定时同步」那一行上的倒计时刷新器 —— 页面都不在了，
+     * 每秒还去改一个脱离文档的节点是纯浪费（见 `countdowns`）。
+     */
     hide(): void {
         this.tabOpen = false;
+        this.stopCountdowns();
         super.hide();
     }
 
@@ -286,26 +325,179 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         if (redraw) this.display();
     }
 
-    private renderLanguage(): void {
-        const t = this.obsync.t;
+    /**
+     * 开一个「设置组」，返回组内放各设置行的容器。
+     *
+     * ## 为什么需要它
+     *
+     * Obsidian 1.13 起，**一条 `Setting` 自己就是一张卡片**（
+     * `--setting-items-background` 的圆角块，见 app.css 的 `.setting-item`）。
+     * 照原样一条条画出来，一页就是十几张紧挨着的卡片：没有层次，每一行都在
+     * 同样大声地喊 —— 用户的原话是「图中展示的布局样式是丑陋的」。
+     *
+     * 官方自己的设置页把**相关**的几条放进 `.setting-group > .setting-items`：
+     * 整组只有一张卡片，组内用发丝线分隔。这里用同一套 DOM 结构（不是 API，
+     * 只是类名）：1.13 以上直接得到原生观感，连主题里的 `--setting-items-*`
+     * 变量都照常生效；老版本上这几个类没有样式，退化成原来的逐行排布 —— 不会坏。
+     *
+     * ## 返回的是「行容器」，不是组
+     *
+     * 组标题必须是 `.setting-group` 的**直接子节点**，而行要放进 `.setting-items`
+     * —— 两个位置不同，所以带标题的那种由 `openSection` 负责；这里给的是
+     * 「标题已经在上面了」的那一组（页面标题正下方）。
+     */
+    private openGroup(): HTMLElement {
+        return this.containerEl
+            .createDiv({ cls: "setting-group obsync-group" })
+            .createDiv({ cls: "setting-items" });
+    }
 
-        new Setting(this.containerEl)
-            .setName(t.settings.language.name)
-            .setDesc(t.settings.language.desc)
-            .addDropdown((dropdown) => {
-                for (const option of LANGUAGE_OPTIONS) {
-                    dropdown.addOption(
-                        option.value,
-                        option.value === "auto" ? t.settings.language.auto : option.label
-                    );
-                }
-                dropdown.setValue(this.obsync.settings.language);
-                dropdown.onChange(async (value) => {
-                    this.obsync.settings.language = value as LanguageSetting;
-                    // 语言变了，整页文案都要换，所以重绘。
-                    await this.commit(true);
-                });
+    /**
+     * 开一个**带标题**的设置组：标题 + 说明 + 右侧动作按钮在同一行。
+     *
+     * 没有名称的那种「按钮行」是这一页最丑的地方 —— 一整条卡片上只有最右边
+     * 挂着一个按钮（用户截图里正是它）。把按钮挂到**组标题**上就不需要那种行了：
+     * 标题在左、按钮在右，中间没有空白（与「已跟踪」页的头部栏同一形状）。
+     *
+     * 返回的 `rows` 是该组的行容器；`heading` 是标题那一行，可以接着
+     * `.setDesc(...)` / `.addButton(...)`。
+     */
+    private openSection(title: string): { rows: HTMLElement; heading: Setting } {
+        const group = this.containerEl.createDiv({ cls: "setting-group obsync-group" });
+        const heading = new Setting(group)
+            .setName(title)
+            .setHeading()
+            .setClass("obsync-group-heading");
+        const rows = group.createDiv({ cls: "setting-items" });
+        return { rows, heading };
+    }
+
+    /**
+     * 在元素上挂一个**每秒刷新**的「距离下次同步还有多久」（2026-10-02 用户要求：
+     * 「如果仓库同步里的定时同步是开启的状态，请显示距离下次同步的倒计时」）。
+     *
+     * ## 数据从哪来
+     *
+     * `Automatics.nextRunAt()` —— 定时器自己记下的**预定触发时刻**。没有定时器
+     * （开关关着 / 策略是 `reset` 挂起 / 刚触发还没重新起表）时它是 `undefined`，
+     * 这里就把文字清空，元素由 CSS 的 `:empty` 收起来（不写内联样式：
+     * 社区审核的 `no-static-styles-assignment` 会拦）。
+     *
+     * ## 同步进行中显示另一句话
+     *
+     * 那一轮的表已经烧掉了，显示「还剩 0:00」是错的；`service.isBusy` 为真时说
+     * 「正在同步…」。两者都拿不到就什么都不显示 —— 倒计时的前提是**真有一个表**。
+     *
+     * ## 每秒一次 + 必须能停
+     *
+     * 显示到秒，所以一秒一次。定时器 id 记进 `countdowns`，由 `display()`（重绘）
+     * 与 `hide()`（关闭）清掉 —— 否则每重绘一次就多一个永不停止的 interval。
+     */
+    private startCountdown(el: HTMLElement): void {
+        const tick = (): void => {
+            const sync = this.obsync.sync;
+            const nextRunAt = sync?.automatics.nextRunAt();
+            if (nextRunAt === undefined) {
+                el.setText("");
+                return;
+            }
+            el.setText(
+                sync?.service.isBusy
+                    ? this.obsync.t.settings.sync.countdownRunning
+                    : this.obsync.t.settings.sync.countdown(formatCountdown(nextRunAt - Date.now()))
+            );
+        };
+
+        tick();
+        this.countdowns.push(window.setInterval(tick, 1000));
+    }
+
+    /** 停掉所有倒计时刷新器（重绘与关闭这一页时都要调）。 */
+    private stopCountdowns(): void {
+        for (const id of this.countdowns) window.clearInterval(id);
+        this.countdowns = [];
+    }
+
+    /**
+     * 数字输入框：**合法输入立即生效，出界的输入在失焦时把框里的显示对齐回真正生效的值**。
+     *
+     * ## 为什么要这一层
+     *
+     * 这些框原先各写各的「解析失败就 `return`」，于是框里能留下一个**不生效**的数字：
+     * 在「按周期同步」里打 `0`，什么都没发生、框里却写着 0，而真正生效的还是 10 ——
+     * 存储、定时器、界面三者互相不一致。用户的实测原话是
+     * 「输入 0-4 的值不会被视觉修正是吗？这不合理吧」。**界面在撒谎比拒绝输入更糟**：
+     * 拒绝至少是「没反应」，撒谎会让人以为设置已经生效。
+     *
+     * 同样的毛病另外四处都有（`compressQuality` 更糟：它把越界的 5 直接存下去，
+     * 直到下次加载被 `normalizeSettings` 改成 10，框里写的与生效的一直不是一回事）。
+     *
+     * ## 为什么在失焦修，而不是在 onChange 里改
+     *
+     * Obsidian 的 `TextComponent.onChange` 绑的是 `input` 事件 —— **每按一个键都会来一次**。
+     * 在 onChange 里改框，用户打「15」的第一个键「1」就会被立刻改掉，接着那个「5」
+     * 拼出来已经不是他想输的数。所以 onChange 只接受合法值，失焦时再对齐显示。
+     *
+     * ## 为什么出界是「不接受」而不是「钳到边界」
+     *
+     * 这些数字里有一类是**周期**：更小 = 更激进（1 分钟提交一次、5 分钟跑一轮整库比对）。
+     * 把误输入的 `0` 钳成下限，等于替用户选了一个比默认更激进的档 —— 比拒绝危险。
+     * 所以一律不写、并把框改回当前值。`min` / `max` 仍然设上：浏览器的步进按钮与
+     * 校验提示都靠它们，而**它们的值必须与 `normalizeSettings` 的钳制一致** ——
+     * 不一致就会出现「框里能填、存下去又被改掉」那种新的谎。
+     *
+     * @param spec.get 当前生效值（失焦时把框对齐到它）
+     * @param spec.apply 写入设置 —— 调用方在这里顺带 `commit()`
+     * @returns 那个 `TextComponent`（调用方可能要事后 `setDisabled`）
+     */
+    private addNumberField(
+        setting: Setting,
+        spec: {
+            get: () => number;
+            apply: (value: number) => Promise<void>;
+            min: number;
+            max: number;
+            ariaLabel: string;
+            /** 单位后缀（跟在框后面，见 styles.css 的 `.obsync-unit`）。 */
+            unit?: string;
+            disabled?: boolean;
+        }
+    ): TextComponent {
+        let component: TextComponent | undefined;
+
+        setting.addText((text) => {
+            component = text;
+            text.inputEl.type = "number";
+            text.inputEl.min = String(spec.min);
+            text.inputEl.max = String(spec.max);
+            // 框旁边没有自己的文字说明（单位是后面那个 span），所以给它一个无障碍标签。
+            text.inputEl.setAttribute("aria-label", spec.ariaLabel);
+            text.setValue(String(spec.get()));
+            if (spec.disabled) text.setDisabled(true);
+
+            text.onChange(async (value) => {
+                const parsed = Number.parseInt(value, 10);
+                // 打字过程中每个键都会到这里：出界的先**不写**（见方法说明）。
+                if (!Number.isFinite(parsed) || parsed < spec.min || parsed > spec.max) return;
+                await spec.apply(parsed);
             });
+        });
+
+        if (spec.unit !== undefined) {
+            setting.controlEl.createSpan({ cls: "obsync-unit", text: spec.unit });
+        }
+
+        const field = component;
+        if (field) {
+            // 失焦：框里留着一个不生效的数字是最糟的状态，对齐回去。
+            field.inputEl.addEventListener("blur", () => {
+                const current = String(spec.get());
+                if (field.inputEl.value !== current) field.setValue(current);
+            });
+        }
+
+        // `addText` 的回调是同步执行的，所以到这里一定已经赋值。
+        return component as TextComponent;
     }
 
     private renderTokens(): void {
@@ -428,11 +620,15 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         refreshStatus();
     }
 
-    /** 标签四：通用 —— 界面语言 + 提示与日志。 */
+    /**
+     * 标签四：通用 —— 提示与日志。
+     *
+     * 这里原来第一行是「界面语言」下拉，2026-10-01 删了：界面语言一律跟随
+     * Obsidian（见 `core/i18n/index.ts` 的文件头），留一个能与 Obsidian 不一致的
+     * 开关只会让「界面语言不对」变成用户自己能造出来的状态。
+     */
     private renderGeneral(): void {
         const t = this.obsync.t;
-
-        this.renderLanguage();
 
         new Setting(this.containerEl).setName(t.settings.general.heading).setHeading();
 
@@ -513,23 +709,23 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 })
             );
 
-        new Setting(this.containerEl)
-            .setName(t.settings.installer.autoCheckDelay)
-            .setDesc(t.settings.installer.autoCheckDelayDesc)
-            .addText((text) => {
-                delayField = text;
-                text.inputEl.type = "number";
-                text.inputEl.min = "0";
-                text.inputEl.max = "3600";
-                text.setValue(String(settings.autoCheckDelaySeconds));
-                text.setDisabled(!settings.autoCheckOnStartup);
-                text.onChange(async (value) => {
-                    const parsed = Number.parseInt(value, 10);
-                    if (!Number.isFinite(parsed)) return;
-                    settings.autoCheckDelaySeconds = parsed;
+        delayField = this.addNumberField(
+            new Setting(this.containerEl)
+                .setName(t.settings.installer.autoCheckDelay)
+                .setDesc(t.settings.installer.autoCheckDelayDesc),
+            {
+                get: () => settings.autoCheckDelaySeconds,
+                apply: async (value) => {
+                    settings.autoCheckDelaySeconds = value;
                     await this.commit();
-                });
-            });
+                },
+                // 与 `normalizeSettings` 里那一句钳制一致。
+                min: 0,
+                max: 3600,
+                ariaLabel: t.settings.installer.autoCheckDelay,
+                disabled: !settings.autoCheckOnStartup,
+            }
+        );
 
         new Setting(this.containerEl)
             .setName(t.settings.installer.mirrorDiscovery)
@@ -597,12 +793,11 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 return button.setButtonText(t.installer.checkOne).onClick(async () => {
                     setBusy("checking");
                     try {
-                        // 检查也要走**同一个来源** —— 否则会出现「检查说没有更新、
-                        // 更新却从另一个仓库拉」这种自相矛盾（`updateSelf` 内部同样读这个设置）。
-                        check = await this.obsync.installer.checker.checkSelf(
-                            currentVersion,
-                            resolveSelfRepo(this.obsync.settings.installer.selfUpdateSource)
-                        );
+                        // 不传来源：`checkSelf` 的默认值就是 `service.selfRepo()`
+                        // —— 与 `updateSelf` **同一个入口**。传一份解析结果进来
+                        // 也能对，但那就多了一处「两边各读一次设置」的机会，而
+                        // 分叉的症状正是「检查说没有更新、更新却从另一个仓库拉」。
+                        check = await this.obsync.installer.checker.checkSelf(currentVersion);
                     } finally {
                         setBusy(undefined);
                     }
@@ -642,9 +837,10 @@ export class ObsyncSettingsTab extends PluginSettingTab {
          * 放在按钮行下面而不是上面：它是「不常改、改了就一直生效」的配置，而上面那两个
          * 按钮是每次发新版都要点的动作 —— 先把常用动作给出来。
          *
-         * 留空 = 官方仓库（`selfUpdate.ts` 的 `SELF_REPO`）；填了就用它，**不再探测镜像**。
-         * 这与「Gitee 镜像发现」是两回事：那套是自动探测 + 只提议 + 要用户确认，每次都要
-         * 探一遍；这里是用户写下的固定来源。
+         * **默认是 Gitee 镜像**（`selfUpdate.ts` 的 `DEFAULT_SELF_SOURCE`，国内可直连）；
+         * 留空也表示用它。要回官方仓库就把 `https://github.com/Dyse-Sofqi/SyncHub`
+         * 填进来 —— 这一格是「写死的固定来源」，填了就不再探测（与「Gitee 镜像发现」
+         * 是两回事：那套是自动探测 + 只提议 + 要用户确认，每次都要探一遍）。
          */
         new Setting(this.containerEl)
             .setName(t.settings.installer.selfSource)
@@ -654,6 +850,9 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     .setPlaceholder(t.settings.installer.selfSourcePlaceholder)
                     .setValue(this.obsync.settings.installer.selfUpdateSource)
                     .onChange(async (value) => {
+                        // 原样存（去掉首尾空白）：空串是**合法**的，意思是「用默认来源」。
+                        // 归一化（空 → 默认地址）在 `normalizeSettings` 里做，于是这里
+                        // 不必要在用户还在打字时就把内容替换掉。
                         this.obsync.settings.installer.selfUpdateSource = value.trim();
                         await this.commit();
                     })
@@ -713,77 +912,96 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             noteList.createEl("li", { text: note });
         }
 
+        /**
+         * **连接测试的两个前提**：远端地址与 git 可执行文件路径。
+         *
+         * 2026-10-04 的两条用户要求把它们放到了这里：
+         *
+         * 1. 「git 可执行文件路径应该移上来，在远端地址设置项后面展示」——
+         *    理由是这一页的结构约定（用户的话）：**「连接测试」之前的每一项都必须是
+         *    「测试能通过」的充要条件**。连接测试查的正是这两件事（git 能不能跑、
+         *    远端能不能连），原来 git 路径沉在「定时同步 / 提交模板 / 整合策略」后面。
+         * 2. 「这两个设置项之间用分割线隔开就好，不用分成两个圆角背景」——
+         *    所以两行放**同一个设置组**里（一张卡片、两行之间一条分割线），
+         *    而不是各自一行各占一张卡片。
+         *
+         * 远端那一行里还并着「打开仓库同步面板」按钮：地址是**配置**，打开面板是配完
+         * 之后**去看它**，本来就挨着（原来那个只剩这一个按钮的「操作」一节占了整张
+         * 卡片加一行标题）。按钮的说明文字挂在它的 tooltip 上。
+         */
+        const prerequisites = this.openGroup();
+        this.renderRemoteRow(prerequisites);
+        this.renderGitPathRow(prerequisites);
+
+        // 「连接测试」提到这一页最前面（2026-10-02 用户要求：「放到最上边展示」）。
+        // 与图片同步页把「操作」提到最前是同一条理由：它是**动作**，而下面那两节
+        // 是配一次就不再翻的设置。放在「注意事项」**之后**而不是之前 —— 那两段
+        // 提醒是刻意钉在标题正下方的（有用例守着），而且它们说的是「别这么配」，
+        // 摆在动作前面比摆在一个按钮后面更有用。
+        this.renderDiagnostics();
+
         const settings = this.obsync.settings.sync;
 
+        // 这一节没有自己的标题（页面标题「仓库同步」就在上面），所以开一个无标题的组。
+        // 相关的几条收进同一张卡片：这一页原本是十几张彼此独立的卡片。
+        const rows = this.openGroup();
+
         /**
-         * 策略为「重置」时把总开关灰掉。
+         * 策略为「重置」时把这一行的两个控件都灰掉。
          *
          * 真正的拦截在 `Automatics.start()`（那里读同一个字段），这里只是
          * **说明** —— 只灰不说，用户会以为插件坏了。
          *
-         * 开关的**值**刻意不动：用户改回「合并」后自动恢复，不用重新拨一次。
+         * 值刻意不动：用户改回「合并」后自动恢复，不用重新拨一次。
          */
         const suspended = settings.syncStrategy === "reset";
 
-        new Setting(this.containerEl)
+        /**
+         * 「定时同步」：**周期框 + 单位 + 开关，同一行**（2026-10-02）。
+         *
+         * 之前这里是「一个总开关」+「三个间隔」两处都能表达关：
+         * 总开关关掉 = 三个间隔全设 0，行为完全一样，而默认又是「开着 + 全 0」
+         * （拨到哪边都不动），于是读起来像重复的设置项。
+         *
+         * 现在开与关只有开关说了算，周期里的数字**没有「0 = 关闭」的含义**
+         * （`normalizeSettings` 钳在 1–1440）。两个控件各表达一件事。
+         */
+        const timer = new Setting(rows)
             .setName(t.settings.sync.enabled)
             .setDesc(
                 suspended ? t.settings.sync.enabledSuspendedByReset : t.settings.sync.enabledDesc
-            )
-            .addToggle((toggle) =>
-                toggle
-                    .setValue(settings.enabled)
-                    .setDisabled(suspended)
-                    .onChange(async (value) => {
-                        settings.enabled = value;
-                        await this.commit();
-                    })
             );
 
-        const intervals: Array<{
-            name: string;
-            desc: string;
-            get: () => number;
-            set: (value: number) => void;
-        }> = [
-            {
-                name: t.settings.sync.autoCommit,
-                desc: t.settings.sync.autoCommitDesc,
-                get: () => settings.autoCommitMinutes,
-                set: (value) => (settings.autoCommitMinutes = value),
-            },
-            {
-                name: t.settings.sync.autoPush,
-                desc: t.settings.sync.autoPushDesc,
-                get: () => settings.autoPushMinutes,
-                set: (value) => (settings.autoPushMinutes = value),
-            },
-            {
-                name: t.settings.sync.autoPull,
-                desc: t.settings.sync.autoPullDesc,
-                get: () => settings.autoPullMinutes,
-                set: (value) => (settings.autoPullMinutes = value),
-            },
-        ];
+        // 倒计时徽标（2026-10-02 用户要求）挂在名称后面，每秒刷新一次；
+        // 没有定时器时它是空的，由 CSS 的 `:empty` 收起来。
+        this.startCountdown(timer.nameEl.createSpan({ cls: "obsync-badge obsync-countdown" }));
 
-        for (const interval of intervals) {
-            new Setting(this.containerEl)
-                .setName(interval.name)
-                .setDesc(interval.desc)
-                .addText((text) => {
-                    text.inputEl.type = "number";
-                    text.inputEl.min = "0";
-                    text.setValue(String(interval.get()));
-                    text.onChange(async (value) => {
-                        const parsed = Number.parseInt(value, 10);
-                        if (!Number.isFinite(parsed)) return;
-                        interval.set(parsed);
-                        await this.commit();
-                    });
-                });
-        }
+        this.addNumberField(timer, {
+            get: () => settings.intervalMinutes,
+            apply: async (value) => {
+                settings.intervalMinutes = value;
+                await this.commit();
+            },
+            // 1–1440：0 在新模型里没有含义，24 小时是「还算定时同步」的上限。
+            // 与 `normalizeSettings` 里 `sync.intervalMinutes` 的钳制一致。
+            min: 1,
+            max: 24 * 60,
+            ariaLabel: t.settings.sync.intervalAria,
+            unit: t.settings.sync.minutesUnit,
+            disabled: suspended,
+        });
 
-        new Setting(this.containerEl)
+        timer.addToggle((toggle) =>
+            toggle
+                .setValue(settings.enabled)
+                .setDisabled(suspended)
+                .onChange(async (value) => {
+                    settings.enabled = value;
+                    await this.commit();
+                })
+        );
+
+        new Setting(rows)
             .setName(t.settings.sync.commitMessage)
             .setDesc(t.settings.sync.commitMessageDesc)
             .addText((text) =>
@@ -793,7 +1011,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 })
             );
 
-        new Setting(this.containerEl)
+        new Setting(rows)
             .setName(t.settings.sync.strategy)
             .setDesc(t.settings.sync.strategyDesc)
             .addDropdown((dropdown) => {
@@ -811,22 +1029,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(this.containerEl)
-            .setName(t.settings.sync.gitPath)
-            .setDesc(t.settings.sync.gitPathDesc)
-            .addText((text) =>
-                text
-                    .setPlaceholder("C:\\Program Files\\Git\\cmd\\git.exe")
-                    .setValue(settings.gitPath)
-                    .onChange(async (value) => {
-                        settings.gitPath = value.trim();
-                        await this.commit();
-                    })
-            );
-
         this.renderGitignore();
-
-        this.renderDiagnostics();
     }
 
     /**
@@ -857,10 +1060,11 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         const sync = this.obsync.sync;
         if (!sync) return;
 
-        const heading = new Setting(this.containerEl)
-            .setName(t.settings.sync.gitignoreHeading)
-            .setHeading();
-        this.containerEl.createEl("p", {
+        // 这一节自带标题，所以开一个**带标题的组**：说明、代码框、三个按钮
+        // 都落在同一张卡片里。代码框以前是裸挂在页面上的（全宽是当时唯一的
+        // 诉求），现在卡片本身就给了它左右边距（见 styles.css 的 `.obsync-group`）。
+        const { rows, heading } = this.openSection(t.settings.sync.gitignoreHeading);
+        rows.createEl("p", {
             cls: "setting-item-description",
             text: t.settings.sync.gitignoreDesc,
         });
@@ -926,14 +1130,19 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         };
 
         /**
-         * 代码框**直接挂在页面上**，不是某个 `Setting` 的控件。
+         * 代码框**是块级元素**，不是某个 `Setting` 的控件。
          *
          * 放进 `.setting-item-control` 的话，它只会拿到右侧那几百像素宽 ——
          * 那是 Obsidian 给「一个下拉 / 一个输入框」留的宽度，而 12 行的规则清单
-         * 挤在里面根本没法读。块级元素在块级容器里天然就是全宽，
-         * 不依赖 Obsidian 设置页的 flex 细节（那些规则没有公开承诺）。
+         * 挤在里面根本没法读。
+         *
+         * 外面还套了一层 `.obsync-block-wrap`，**只为缩进**：组内的行内边距
+         * 长在 `.setting-item` 上，不会传给兄弟节点；而代码框的宽度是内联写死的
+         * `100%`，直接给它 `margin-inline` 会溢出。包一层最省事。
+         * （这一层壳现在两处共用：这里，以及图片同步页的文件夹那一格。）
          */
-        const areaEl = this.containerEl.createEl("textarea", { cls: "obsync-gitignore" });
+        const areaWrap = rows.createDiv({ cls: "obsync-block-wrap" });
+        const areaEl = areaWrap.createEl("textarea", { cls: "obsync-gitignore" });
         // 一行一条规则，12 行够看清一整套排除规则（模板大约 20 行，滚动即可）。
         areaEl.rows = 12;
         // 示例值用**本库的配置目录名**（可以不是 `.obsidian`）——
@@ -973,14 +1182,12 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         // 失焦也保存 —— 点到别处不会丢
         areaEl.addEventListener("blur", () => void save(false));
 
-        // 按钮另起一行：三个按钮挤在代码框旁边只会互相压扁
-        // （与图片同步页的文件夹选择入口同一个形状）。
-        //
-        // `obsync-gitignore-actions` 让按钮**贴左**：代码框是全宽的，而这一行
-        // 没有名称/描述，Obsidian 默认会把控件推到最右 —— 那会离框太远，
-        // 看不出这三个按钮是给上面那个框用的。
-        new Setting(this.containerEl)
-            .setClass("obsync-gitignore-actions")
+        // 按钮另起一行，并**贴左**：代码框是全宽的，而这一行没有名称/描述 ——
+        // 按钮跟到最右会离框太远，看不出它们是给上面那个框用的。
+        // （与图片同步页的「浏览… / 恢复默认」同一形状，共用
+        // `obsync-inline-actions`。）
+        new Setting(rows)
+            .setClass("obsync-inline-actions")
             .addButton((button) => {
                 saveButton = button;
                 return button
@@ -1017,6 +1224,45 @@ export class ObsyncSettingsTab extends PluginSettingTab {
 
         refreshStatus();
 
+        /**
+         * 把框里的内容**按磁盘上的现状**重新读一遍。
+         *
+         * 「停止跟踪图片」写完 `.gitignore` 之后必须走这一步：框里那份是旧的，
+         * 而框是**失焦即保存**的 —— 用户接着点进去改一个字再点走，就会把刚写下去的
+         * 忽略规则整份覆盖掉（看起来像「加了规则又没了」）。
+         *
+         * 之所以不整个重绘设置页：`PluginSettingTab.display()` 在 1.13 起是 deprecated
+         * （社区审核的 `no-deprecated` 会报），而这里真正需要刷新的只有徽标与这个框。
+         */
+        const reload = async (): Promise<void> => {
+            try {
+                const content = await sync.service.readGitignore();
+                if (content !== undefined) {
+                    created = true;
+                    pending = content;
+                    areaEl.value = content;
+                    dirty = false;
+                }
+            } catch (err) {
+                logger.debug("could not re-read .gitignore", err);
+            }
+            refreshStatus();
+        };
+
+        // 「让 git 不再跟踪图片」（2026-10-02，用户要求：图片已经交给图片同步了）。
+        //
+        // 放在 `.gitignore` 一节里：它改的就是这个文件，而这一页才是用户排查
+        // 「什么东西进了 git」的地方。为什么是一个动作而不是「自己加两行」——
+        // 见 `imagesIgnore.ts` 的文件头（`.gitignore` 对**已跟踪**的文件毫无作用）。
+        new Setting(rows)
+            .setName(t.settings.sync.untrack.name)
+            .setDesc(t.settings.sync.untrack.desc)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.untrack.action)
+                    .onClick(() => void this.untrackImageFolders(reload))
+            );
+
         // 读内容要 await，而渲染是同步的 —— 先把框画出来，读到了再填。
         void (async () => {
             try {
@@ -1033,6 +1279,140 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             }
             refreshStatus();
         })();
+    }
+
+    /**
+     * 「让 git 不再跟踪图片」：**检查 → 确认 → 执行**（2026-10-02）。
+     *
+     * ## 为什么是三步而不是直接改
+     *
+     * 这个动作把图片从 git 里摘出去，而摘出去之后它们只剩 R2 那一份 —— 别的设备拉取
+     * 这次改动时，工作区里那些图片会被 git 删掉、再由图片同步补回来。所以在此之前
+     * 必须确认「云端已经有每一张」，否则丢的是真东西。那一步要列一次远端清单，
+     * 花一两秒，因此先给一条即时反馈。
+     *
+     * ## 三道闸
+     *
+     * 1. **图片同步得配好**（否则这些图片没有第二个家）；
+     * 2. **每一张都已经在 R2 上**（`plan()` 里没有待上传的条目）—— 要问一次远端；
+     * 3. **规则形状与图片同步的范围必须对得上**，见下。
+     *
+     * ## 第 3 道闸：两种形状各有各的前提（2026-10-02 用户问「不能写图片格式吗」之后加的）
+     *
+     * - 图片文件夹是**具体的**（`attachments` 之类）→ 用**按文件夹**：范围与图片同步
+     *   镜像的文件夹完全重合，一条原则「图片同步管的，git 不管」。
+     * - 图片文件夹是**整个库**（默认的 `[""]`）→ 用**按扩展名**：那种配置下按文件夹写
+     *   等于让 git 什么都不同步，而按扩展名只放走图片、不动别的文件。
+     *
+     * 反过来用会漏东西：扩展名规则管的是**全库**，而图片同步只镜像你配的那几个文件夹
+     * —— 文件夹之外的图片会同时退出 git 和 R2（两边都不管）。所以这里**不让**用户在
+     * 错误的配置下选错形状，而是直接拒绝并告诉他该怎么改。
+     *
+     * @param onDone 执行完之后刷新那个代码框（见 `renderGitignore` 里 `reload` 的说明）。
+     */
+    private async untrackImageFolders(onDone: () => Promise<void>): Promise<void> {
+        const t = this.obsync.t;
+        const copy = t.settings.sync.untrack;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        const raw = normalizeFolders(this.obsync.settings.images.folders);
+        // 空串 = 整个库（见 `normalizeFolder`）：它既是「没有具体文件夹」，
+        // 也是「按扩展名」那种形状成立的前提。
+        const wholeVault = raw.includes("");
+        const folders = raw.filter((folder) => folder !== "");
+        if (wholeVault) {
+            // 整个库 → 只有按扩展名说得通；但图片同步覆盖全库时，扩展名清单必须
+            // 与它的判断一致，所以这里直接把两道前提并成一条话说清楚。
+        } else if (folders.length === 0) {
+            this.obsync.notifier.warn(copy.needFolders);
+            return;
+        }
+
+        const service = this.obsync.images?.service;
+        if (!service || !service.isConfigured()) {
+            this.obsync.notifier.warn(copy.needCloud);
+            return;
+        }
+
+        // 远端清单要一会儿，先给一条反馈 —— 否则点了按钮像是没反应。
+        this.obsync.notifier.info(copy.checking);
+
+        let pendingUploads: number;
+        try {
+            const plan = await service.plan();
+            pendingUploads = plan.entries.filter((entry) => entry.action === "upload").length;
+        } catch (err) {
+            // 列不出清单（网络 / 凭据）时**不放行**：这一步的意义就是确认云端有每一张。
+            this.obsync.notifier.reportError(err, copy.needCloud);
+            return;
+        }
+        if (pendingUploads > 0) {
+            this.obsync.notifier.warn(copy.notUploaded.replace("{count}", String(pendingUploads)));
+            return;
+        }
+
+        new ConfirmUntrackImagesModal(
+            this.obsync.app,
+            t,
+            folders,
+            wholeVault ? "extensions" : "folders",
+            SYNC_EXTENSIONS,
+            (mode) => this.runUntrackImages(mode, folders, onDone)
+        ).open();
+    }
+
+    /** 确认之后的执行：写 `.gitignore` → 摘索引 → 汇报。 */
+    private async runUntrackImages(
+        mode: UntrackMode,
+        folders: string[],
+        onDone: () => Promise<void>
+    ): Promise<void> {
+        const t = this.obsync.t;
+        const copy = t.settings.sync.untrack;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        try {
+            // 先把要摘的路径算出来 —— 按扩展名那种形状得**问 git** 哪些图片已被跟踪
+            // （`.gitignore` 对已跟踪的文件毫无作用，见 `imagesIgnore.ts` 的文件头）。
+            let untrackPaths: string[];
+            let rules: string[];
+            if (mode === "extensions") {
+                rules = extensionIgnoreRules(SYNC_EXTENSIONS);
+                const tracked = await sync.service.listTrackedPaths();
+                untrackPaths = tracked.filter((path) => isImagePath(path, SYNC_EXTENSIONS));
+            } else {
+                rules = folders.map((folder) => ignoreRuleFor(folder));
+                untrackPaths = folders;
+            }
+
+            // 先读磁盘上的现状再合并：设置页那个框里可能有**没保存**的改动，
+            // 而这一步必须以磁盘为准（否则会把用户没保存的编辑悄悄写下去）。
+            const current = (await sync.service.readGitignore()) ?? "";
+            const merged = mergeRuleLines(current, rules);
+            if (merged.added.length > 0) {
+                await sync.service.writeGitignore(merged.content);
+            }
+
+            // 摘索引。`--ignore-unmatch` 保证「本来就没跟踪」时不报错。
+            await sync.service.untrackPaths(untrackPaths);
+
+            if (merged.added.length === 0) {
+                this.obsync.notifier.info(copy.nothing);
+            } else {
+                this.obsync.notifier.success(
+                    copy.done
+                        .replace("{rules}", String(merged.added.length))
+                        .replace("{files}", String(untrackPaths.length))
+                );
+            }
+            // 框里那份现在是旧的（我们刚在磁盘上加了规则），而框是失焦即保存的 ——
+            // 不刷新的话，用户接着改一个字再点走就会把新规则整份覆盖掉。
+            await onDone();
+        } catch (err) {
+            this.obsync.notifier.reportError(err, copy.failed);
+        }
     }
 
     /**
@@ -1059,7 +1439,48 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             noteList.createEl("li", { text: note });
         }
 
-        new Setting(this.containerEl)
+        // ── 操作 ──
+        //
+        // **放在这一页最前面**（2026-10-02）：用户的原话是「图中的功能比较常用，应该放到
+        // 页面最前面才对」。三个动作按钮与「打开图片管理」都是进这一页就想点的东西，
+        // 而此前它们沉在四个设置节的最底下 —— 要滚过 R2 连接、冲突策略、压缩默认值
+        // 才能看到，而一旦配好这三段就再也不会去看。
+        //
+        // 三个动作按钮挂在**组标题那一行**：以前它们是「一整条只有按钮的卡片」，
+        // 左半边空着 —— 用户截图里那条最丑的横条就是它（仓库同步页的
+        // 「连接测试」同病，同样改掉了）。
+        const actions = this.openSection(t.settings.images.actionsHeading);
+
+        if (service) {
+            // 结果区在动作按钮**下面**、入口行**上面**：它说的就是刚点的那一下。
+            const resultEl = actions.rows.createDiv({ cls: "obsync-diagnostics" });
+            this.renderImageActions(actions.heading, resultEl, service);
+        } else {
+            // 装配层没给出服务（理论上不会发生）—— 说明白，而不是给一堆点了没反应的按钮。
+            // 注意这里**不能 return**：这一节现在排在最前面，早退会把整页剩下的设置
+            // 全部吞掉（它们并不需要这个服务）。
+            actions.rows.createEl("p", {
+                cls: "setting-item-description",
+                text: t.images.notice.notConfigured,
+            });
+        }
+
+        // 图片管理标签页的入口。挂在这里而不是只留命令面板：设置页是用户排查
+        // 「我库里这些图到底是什么状态」时的必经之路，而命令面板只有**已经知道
+        // 有这个功能**的人才找得到。
+        new Setting(actions.rows)
+            .setName(t.settings.images.openManager)
+            .setDesc(t.settings.images.openManagerDesc)
+            .addButton((button) =>
+                button.setButtonText(t.settings.images.openManager).onClick(() => {
+                    void this.obsync.openImageManager();
+                })
+            );
+
+        // 这一节没有自己的标题（页面标题「图片同步」就在上面），所以开一个无标题的组。
+        const basics = this.openGroup();
+
+        new Setting(basics)
             .setName(t.settings.images.enabled)
             .setDesc(t.settings.images.enabledDesc)
             .addToggle((toggle) =>
@@ -1072,65 +1493,215 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 })
             );
 
-        new Setting(this.containerEl)
-            .setName(t.settings.images.folders)
-            .setDesc(t.settings.images.foldersDesc)
-            .addTextArea((area) => {
-                area.inputEl.rows = 3;
-                area.setPlaceholder(t.settings.images.foldersPlaceholder);
-                // 空串（整个库）显示成 `.`：一个空行读起来像「什么都没填」，
-                // 而它正是默认值（见 formatFolderPath）。
-                area.setValue(formatFolders(images.folders));
-                area.onChange(async (value) => {
-                    // 拆行 + 丢空行 + 归一都在 parseFolders 里：`/attachments/` 与
-                    // `attachments` 必须变成同一个值，否则范围判断会悄悄失准；
-                    // 而空行必须在这里丢 —— 进了 normalizeFolders 就会被当成
-                    // 「整个库」（见那边的说明）。
-                    images.folders = parseFolders(value);
+        // 「按周期同步」紧跟在总开关下面（2026-10-02 挪的；原先它排在「冲突与删除」
+        // 那一节的**末尾**，与它实际管的事毫无关系）。
+        //
+        // 形状与「仓库同步」页的「定时同步」一致：`[周期] 单位 [开关]`。周期**没有**
+        // 「0 = 关闭」的含义（`normalizeSettings` 钳在 5–1440）——「关」由这个开关
+        // 表达，于是数字里不必再有一个魔法值。
+        const periodic = new Setting(basics)
+            .setName(t.settings.images.autoSync)
+            .setDesc(t.settings.images.autoSyncDesc);
+
+        this.addNumberField(periodic, {
+            get: () => images.autoSyncMinutes,
+            apply: async (value) => {
+                images.autoSyncMinutes = value;
+                await this.commit();
+            },
+            // 下限 5：每 1 分钟跑一轮整库比对没有意义（与 compressQuality 下限 10 同源）。
+            // 与 `normalizeSettings` 里 `images.autoSyncMinutes` 的钳制一致。
+            min: 5,
+            max: 24 * 60,
+            ariaLabel: t.settings.images.intervalAria,
+            unit: t.settings.images.minutesUnit,
+        });
+
+        periodic.addToggle((toggle) =>
+            toggle
+                .setValue(images.autoSyncEnabled)
+                .onChange(async (value) => {
+                    images.autoSyncEnabled = value;
                     await this.commit();
+                })
+        );
+
+        // 「需要图片同步的文件夹」：名称/描述一行，下面**同一行**是
+        // `[输入框] [浏览…] [恢复默认]`，再下面列出已经加入的文件夹（各带一个删除按钮）。
+        //
+        // 2026-10-02 用户两次要求定下的形状：
+        // ① 先要「路径文本框和浏览、恢复默认按钮在下一行展示」（框挤在
+        //    `.setting-item-control` 里只有几百像素，描述四行、框里只看得见一个 `.`）；
+        // ② 再要「输入框和浏览、恢复默认按钮在同一行」「不需要拉高度」「输入时下方给
+        //    候选辅助」「可以添加多个文件夹，在下方列出并提供删除按钮」。
+        //
+        // 于是它从「一个多行文本框 = 整个列表」改成「一个**添加**输入框 + 一份列表」：
+        // 手打路径的错法（`/attachments/`、`assets//img`、根本不存在的目录）以前全都
+        // 没有任何提示，现在一边有候选可选、一边有列表能看见加进去的是什么。
+        new Setting(basics)
+            .setName(t.settings.images.folders)
+            .setDesc(t.settings.images.foldersDesc);
+
+        const addRow = new Setting(basics)
+            // 两个类分两次给：`setClass` 在 Obsidian 里是 `addClass`（追加），
+            // 一次给一整串会被当成一个类名。
+            .setClass("obsync-inline-actions")
+            .setClass("obsync-inline-field");
+
+        // 候选下拉：绝对定位在输入框下方（CSS 里给 `position: absolute`），
+        // 默认收起，有候选时才加 `is-open`。
+        const suggestEl = addRow.settingEl.createDiv({ cls: "obsync-path-suggest" });
+
+        // 加一个文件夹。`normalizeFolders` 负责去重与归一（`.` → 整个库），
+        // 重复加入是**无害的空操作** —— 用户从候选里挑一个已经加过的，不该报错。
+        const addFolder = (raw: string): void => {
+            const next = normalizeFolders([...images.folders, raw]);
+            const changed = next.length !== images.folders.length;
+            if (changed) images.folders = next;
+            // **无论有没有真的加进去都清空输入框**：留着原文会让下一次回车
+            // 把同一个路径再加一遍（看起来像「加了两次」）。
+            folderInput?.setValue("");
+            if (!changed) return;
+            // 重绘：列表要立刻出现新那一行，「还没有指定文件夹」的提示也要消失。
+            void this.commit(true);
+        };
+
+        let folderInput: TextComponent | undefined;
+        let active = -1;
+
+        const options = (): FolderOption[] =>
+            folderOptions(this.obsync.app, t, images.folders).slice(0, 50);
+
+        const closeSuggest = (): void => {
+            active = -1;
+            suggestEl.removeClass("is-open");
+            suggestEl.empty();
+        };
+
+        const renderSuggest = (query: string): void => {
+            const matches = filterFolderOptions(options(), query);
+            suggestEl.empty();
+            active = -1;
+            if (matches.length === 0) {
+                closeSuggest();
+                return;
+            }
+
+            matches.forEach((option, index) => {
+                const item = suggestEl.createDiv({ cls: "obsync-path-suggest-item" });
+                item.createDiv({ cls: "obsync-path-suggest-label", text: option.label });
+                if (option.included) {
+                    item.createEl("small", {
+                        cls: "obsync-suggestion-meta",
+                        text: t.settings.images.folderPickerIncluded,
+                    });
+                }
+                // 用 `mousedown` 而不是 `click`：`click` 之前输入框会先 blur，
+                // 那个处理器会把整张列表收起来，点击就落空了。
+                item.addEventListener("mousedown", (event) => {
+                    event.preventDefault();
+                    addFolder(option.path);
+                });
+                item.addEventListener("mouseenter", () => {
+                    active = index;
                 });
             });
 
+            suggestEl.addClass("is-open");
+        };
+
+        const highlight = (): void => {
+            const items = Array.from(suggestEl.children) as HTMLElement[];
+            items.forEach((item, index) => item.toggleClass("is-active", index === active));
+        };
+
+        addRow.addText((text) => {
+            folderInput = text;
+            text.inputEl.addClass("obsync-folders-input");
+            text.setPlaceholder(t.settings.images.foldersPlaceholder).setValue("");
+            text.inputEl.addEventListener("input", () => renderSuggest(text.inputEl.value));
+            text.inputEl.addEventListener("focus", () => renderSuggest(text.inputEl.value));
+            text.inputEl.addEventListener("blur", () => {
+                // 延后一点再收：点候选时这条会先跑，早收就等于点不到（见上面的 mousedown）。
+                window.setTimeout(closeSuggest, 150);
+            });
+            text.inputEl.addEventListener("keydown", (event) => {
+                const items = Array.from(suggestEl.children) as HTMLElement[];
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    if (items.length === 0) return;
+                    event.preventDefault();
+                    const step = event.key === "ArrowDown" ? 1 : -1;
+                    active = (active + step + items.length) % items.length;
+                    highlight();
+                    return;
+                }
+                if (event.key === "Escape") {
+                    closeSuggest();
+                    return;
+                }
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                // 有高亮就加它，否则加用户打进去的那一串（归一与去重交给 addFolder）。
+                const chosen = active >= 0 ? filterFolderOptions(options(), text.inputEl.value)[active] : undefined;
+                const raw = chosen ? chosen.path : text.inputEl.value;
+                if (!raw.trim()) return;
+                addFolder(raw);
+            });
+        });
+
+        addRow.addButton((button) =>
+            button.setButtonText(t.settings.images.foldersBrowse).onClick(() => {
+                new FolderSuggestModal(this.obsync.app, t, images.folders, (folder) => {
+                    addFolder(folder);
+                }).open();
+            })
+        );
+
+        addRow.addButton((button) =>
+            button
+                .setButtonText(t.settings.images.foldersReset)
+                // 已经是默认值就置灰：点了什么都不发生，只会让人怀疑按钮是坏的。
+                // 置灰而不改值 —— 与仓库同步页的总开关同一个道理。
+                .setDisabled(isDefaultFolders(images.folders))
+                .onClick(async () => {
+                    images.folders = normalizeFolders([...DEFAULT_SETTINGS.images.folders]);
+                    await this.commit(true);
+                })
+        );
+
+        // 已经加入的文件夹：一行一个 + 删除按钮。
+        //
+        // 用一整行 `Setting` 而不是一堆小药丸：这一页的行都是这个形状，而路径本身
+        // 可能很长（`assets/images/inbox`），药丸挤在输入框下面会折成两三行。
         if (images.folders.length === 0) {
-            this.containerEl.createEl("p", {
+            basics.createEl("p", {
                 cls: "setting-item-description",
                 text: t.settings.images.foldersEmpty,
             });
         }
 
-        // 选择入口与「恢复默认」。
-        //
-        // 单独一行而不是塞进上面那一行：`.setting-item-control` 是 flex 且默认
-        // 不换行（见 styles.css 里 obsync-actions 的注释），一个三行高的文本框
-        // 再并两个按钮只会互相压扁。与页面底部那排「测试 / 预览 / 立即同步」
-        // 同一形状 —— 无名称的设置行。
-        new Setting(this.containerEl)
-            .addButton((button) =>
-                button.setButtonText(t.settings.images.foldersBrowse).onClick(() => {
-                    new FolderSuggestModal(this.obsync.app, t, images.folders, (folder) => {
-                        images.folders = normalizeFolders([...images.folders, folder]);
-                        // 重绘：文本框要立刻显示新加的那一行（否则用户以为没选上），
-                        // 「还没有指定文件夹」那行提示也要跟着消失。
-                        void this.commit(true);
-                    }).open();
-                })
-            )
-            .addButton((button) =>
-                button
-                    .setButtonText(t.settings.images.foldersReset)
-                    // 已经是默认值就置灰：点了什么都不发生，只会让人怀疑按钮是坏的。
-                    // 置灰而不改值 —— 与仓库同步页的总开关同一个道理。
-                    .setDisabled(isDefaultFolders(images.folders))
-                    .onClick(async () => {
-                        images.folders = normalizeFolders([...DEFAULT_SETTINGS.images.folders]);
-                        await this.commit(true);
-                    })
-            );
+        for (const folder of images.folders) {
+            new Setting(basics)
+                .setClass("obsync-folder-row")
+                // 空串 = 整个库，直接显示成空行会像「坏了一行」。
+                .setName(folder === "" ? t.settings.images.folderPickerRoot : folder)
+                .addExtraButton((button) =>
+                    button
+                        .setIcon("trash")
+                        .setTooltip(t.settings.images.foldersRemove)
+                        .onClick(async () => {
+                            // 删掉最后一个 = 一个文件夹都不管（`normalizeSettings` 允许
+                            // 空列表），页面会改成「一个文件夹都没指定」的提示。
+                            images.folders = images.folders.filter((item) => item !== folder);
+                            await this.commit(true);
+                        })
+                );
+        }
 
         // ── 连接 ──
-        new Setting(this.containerEl).setName(t.settings.images.connectionHeading).setHeading();
+        const connection = this.openSection(t.settings.images.connectionHeading).rows;
 
-        new Setting(this.containerEl)
+        new Setting(connection)
             .setName(t.settings.images.accountId)
             .setDesc(t.settings.images.accountIdDesc)
             .addText((text) =>
@@ -1143,7 +1714,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     })
             );
 
-        new Setting(this.containerEl)
+        new Setting(connection)
             .setName(t.settings.images.bucket)
             .setDesc(t.settings.images.bucketDesc)
             .addText((text) =>
@@ -1153,7 +1724,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 })
             );
 
-        new Setting(this.containerEl)
+        new Setting(connection)
             .setName(t.settings.images.accessKeyId)
             .setDesc(t.settings.images.accessKeyIdDesc)
             .addText((text) =>
@@ -1163,9 +1734,9 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 })
             );
 
-        this.renderR2Secret();
+        this.renderR2Secret(connection);
 
-        new Setting(this.containerEl)
+        new Setting(connection)
             .setName(t.settings.images.prefix)
             .setDesc(t.settings.images.prefixDesc)
             .addText((text) =>
@@ -1180,7 +1751,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     })
             );
 
-        new Setting(this.containerEl)
+        new Setting(connection)
             .setName(t.settings.images.publicBaseUrl)
             .setDesc(t.settings.images.publicBaseUrlDesc)
             .addText((text) =>
@@ -1194,9 +1765,9 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             );
 
         // ── 冲突与删除 ──
-        new Setting(this.containerEl).setName(t.settings.images.conflictHeading).setHeading();
+        const conflict = this.openSection(t.settings.images.conflictHeading).rows;
 
-        new Setting(this.containerEl)
+        new Setting(conflict)
             .setName(t.settings.images.conflictPolicy)
             .setDesc(t.settings.images.conflictPolicyDesc)
             .addDropdown((dropdown) => {
@@ -1211,7 +1782,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(this.containerEl)
+        new Setting(conflict)
             .setName(t.settings.images.deleteRemotePolicy)
             .setDesc(t.settings.images.deleteRemotePolicyDesc)
             .addDropdown((dropdown) => {
@@ -1226,55 +1797,45 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(this.containerEl)
-            .setName(t.settings.images.autoSync)
-            .setDesc(t.settings.images.autoSyncDesc)
-            .addText((text) => {
-                text.inputEl.type = "number";
-                text.inputEl.min = "0";
-                text.setValue(String(images.autoSyncMinutes));
-                text.onChange(async (value) => {
-                    const parsed = Number.parseInt(value, 10);
-                    if (!Number.isFinite(parsed)) return;
-                    images.autoSyncMinutes = parsed;
-                    await this.commit();
-                });
-            });
-
         // ── 裁剪与压缩的默认值 ──
-        new Setting(this.containerEl).setName(t.settings.images.compressHeading).setHeading();
+        const compress = this.openSection(t.settings.images.compressHeading).rows;
 
-        new Setting(this.containerEl)
-            .setName(t.settings.images.compressQuality)
-            .setDesc(t.settings.images.compressQualityDesc)
-            .addText((text) => {
-                text.inputEl.type = "number";
-                text.inputEl.min = "10";
-                text.inputEl.max = "100";
-                text.setValue(String(images.compressQuality));
-                text.onChange(async (value) => {
-                    const parsed = Number.parseInt(value, 10);
-                    if (!Number.isFinite(parsed)) return;
-                    images.compressQuality = parsed;
+        this.addNumberField(
+            new Setting(compress)
+                .setName(t.settings.images.compressQuality)
+                .setDesc(t.settings.images.compressQualityDesc),
+            {
+                get: () => images.compressQuality,
+                apply: async (value) => {
+                    images.compressQuality = value;
                     await this.commit();
-                });
-            });
+                },
+                // 下限 10 而不是 1：质量 1 的 jpeg 基本不可看，而用户多半是手滑拖到底。
+                // 与 `normalizeSettings` 里 `images.compressQuality` 的钳制一致。
+                min: 10,
+                max: 100,
+                ariaLabel: t.settings.images.compressQuality,
+            }
+        );
 
-        new Setting(this.containerEl)
-            .setName(t.settings.images.compressMaxEdge)
-            .setDesc(t.settings.images.compressMaxEdgeDesc)
-            .addText((text) => {
-                text.inputEl.type = "number";
-                text.inputEl.min = "0";
-                text.setValue(String(images.compressMaxEdge));
-                text.onChange(async (value) => {
-                    const parsed = Number.parseInt(value, 10);
-                    images.compressMaxEdge = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+        this.addNumberField(
+            new Setting(compress)
+                .setName(t.settings.images.compressMaxEdge)
+                .setDesc(t.settings.images.compressMaxEdgeDesc),
+            {
+                get: () => images.compressMaxEdge,
+                apply: async (value) => {
+                    images.compressMaxEdge = value;
                     await this.commit();
-                });
-            });
+                },
+                // 0 是**有意义**的：表示不缩放。上限与 `normalizeSettings` 的钳制一致。
+                min: 0,
+                max: 20_000,
+                ariaLabel: t.settings.images.compressMaxEdge,
+            }
+        );
 
-        new Setting(this.containerEl)
+        new Setting(compress)
             .setName(t.settings.images.compressFormat)
             .setDesc(t.settings.images.compressFormatDesc)
             .addDropdown((dropdown) => {
@@ -1287,34 +1848,6 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     await this.commit();
                 });
             });
-
-        // ── 操作 ──
-        new Setting(this.containerEl).setName(t.settings.images.actionsHeading).setHeading();
-
-        if (!service) {
-            // 装配层没给出服务（理论上不会发生）—— 说明白，而不是给一堆点了没反应的按钮。
-            this.containerEl.createEl("p", {
-                cls: "setting-item-description",
-                text: t.images.notice.notConfigured,
-            });
-            return;
-        }
-
-        const resultEl = this.containerEl.createDiv({ cls: "obsync-diagnostics" });
-
-        // 图片管理标签页的入口。挂在这里而不是只留命令面板：设置页是用户排查
-        // 「我库里这些图到底是什么状态」时的必经之路，而命令面板只有**已经知道
-        // 有这个功能**的人才找得到。
-        new Setting(this.containerEl)
-            .setName(t.settings.images.openManager)
-            .setDesc(t.settings.images.openManagerDesc)
-            .addButton((button) =>
-                button.setButtonText(t.settings.images.openManager).onClick(() => {
-                    void this.obsync.openImageManager();
-                })
-            );
-
-        this.renderImageActions(resultEl, service);
     }
 
     /**
@@ -1325,7 +1858,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
      * 直接去点下面的「测试连接」—— 那时如果还没落盘，测的就是**旧值**，
      * 报出来的错会让人去怀疑一个根本没被使用的密钥。
      */
-    private renderR2Secret(): void {
+    private renderR2Secret(container: HTMLElement): void {
         const t = this.obsync.t;
         const label = t.settings.images.secretKey;
 
@@ -1344,7 +1877,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             statusEl.toggleClass("obsync-badge-muted", !configured);
         };
 
-        const setting = new Setting(this.containerEl)
+        const setting = new Setting(container)
             .setName(label)
             .setDesc(t.settings.images.secretKeyDesc)
             .addText((text) => {
@@ -1381,11 +1914,20 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         refreshStatus();
     }
 
-    /** 三个操作按钮 + 结果区。 */
-    private renderImageActions(resultEl: HTMLElement, service: ImageSyncService): void {
+    /**
+     * 三个操作按钮（挂在「操作」那一节的**标题行**上）+ 结果区。
+     *
+     * 按钮不自己占一行：没有名称的设置行会把控件顶到最右边，左半边空着 ——
+     * 那正是用户截图里最丑的一处。挂到标题行上之后，标题在左、按钮在右。
+     */
+    private renderImageActions(
+        heading: Setting,
+        resultEl: HTMLElement,
+        service: ImageSyncService
+    ): void {
         const t = this.obsync.t;
 
-        new Setting(this.containerEl)
+        heading
             .addButton((button) =>
                 button.setButtonText(t.settings.images.test).onClick(async () => {
                     button.setDisabled(true);
@@ -1552,20 +2094,156 @@ export class ObsyncSettingsTab extends PluginSettingTab {
      *
      * 放在同步设置的最后：用户配完远端与令牌，顺手就能验一下。
      */
+    /**
+     * 远端地址那一行（就地可改的输入框，排在「连接测试」之前）。
+     *
+     * 行为与仓库同步面板顶部那一行**完全一致**（`bindRemoteInput`）：脱敏回显、
+     * 失焦/回车才保存、明显写错的输入拦住并把框恢复原样、成功后强制刷新。
+     *
+     * **行要同步建出来、地址异步填进去**：`git.getRemoteUrl()` 是异步的，若把建行
+     * 也放进 `await` 之后，这一行会被追加到整页的最后（实测：跑到「忽略规则」后面），
+     * 而用户要的是它排在「连接测试」之前 —— 那正是「先填地址再测连接」的读法。
+     */
+    private renderRemoteRow(container: HTMLElement): void {
+        const sync = this.obsync.sync;
+        if (!sync) return;
+        const t = this.obsync.t;
+
+        let input: HTMLInputElement | undefined;
+        new Setting(container)
+            .setName(t.sync.remoteLabel)
+            .setClass("obsync-remote-row")
+            .addText((text) => {
+                input = text.inputEl;
+                text.setPlaceholder(t.sync.editRemotePlaceholder);
+                text.inputEl.addClass("obsync-remote-input");
+            })
+            // 「打开仓库同步面板」与地址同一行（2026-10-04 用户要求合并）。
+            // 面板本身还有三个入口（命令面板 / 侧栏图标 / 状态栏），但**正在配置它的
+            // 这一页**最该有一个 —— 那正是用户会想「让我看一眼现在什么状态」的地方。
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.openView)
+                    .setTooltip(t.settings.sync.openViewDesc)
+                    .onClick(() => sync.openView())
+            );
+
+        // 读不到（还没配远端 / 不是仓库）就当空 —— 空框正是「可以填一个」的样子，
+        // 而不是显示一个假的地址。
+        void sync.git
+            .getRemoteUrl()
+            .catch(() => undefined)
+            .then((currentUrl) => {
+                if (!input) return;
+                bindRemoteInput(input, {
+                    currentUrl,
+                    setRemoteUrl: (url) => sync.git.setRemoteUrl(url),
+                    refresh: async () => {
+                        await sync.service.refresh({ force: true });
+                    },
+                    notify: this.obsync.notifier,
+                    t,
+                });
+            });
+    }
+
+    /**
+     * git 可执行文件路径那一行（+ 「git 从哪儿来」的下载链接）。
+     *
+     * 2026-10-04 从无标题设置组里**提到「连接测试」之前**：这一页的结构约定是
+     * 「测试按钮之前的每一项都是测试能通过的充要条件」，而 git 能不能跑正是
+     * 连接测试查的头一件事。原来它沉在「定时同步 / 提交模板 / 整合策略」后面。
+     */
+    private renderGitPathRow(container: HTMLElement): void {
+        const t = this.obsync.t;
+        const settings = this.obsync.settings.sync;
+
+        // git 可执行文件路径：**输入框整行、旁边一个「浏览…」**（2026-10-02 用户要求：
+        // 「输入框应该单独一行，并提供浏览按钮打开资源管理器」）。
+        //
+        // 桌面上的路径（`C:\Program Files\Git\cmd\git.exe`）比 `.setting-item-control`
+        // 那几百像素长得多，挤在右边只能看见开头一截；`.obsync-stacked` 把名称/描述
+        // 与控件排成上下两行、控件占满整行（app.css 在窄容器里就是这么折的）。
+        // 2026-10-04 用户要求：「SyncHub 不捆绑 git 的那句提示，放到留空使用系统 PATH 那条
+        // 提示后面展示」，随后又说「那句应该换行显示」—— 所以两句在**同一段描述里**，
+        // 中间一个 `<br>`。分成两段（两个 `<p>`）时下载提示看起来像**另一项设置**；
+        // 而同一段里不换行又会读成一句话，看起来像 PATH 那半句还没说完。
+        //
+        // 链接接在描述**末尾**（同一个元素里）：设置页的描述是纯文本，光写
+        // `git-scm.com` 用户得自己复制到浏览器；而 `target=_blank` 就够了 ——
+        // Obsidian 主进程注册了 `setWindowOpenHandler`，http(s) 一律交给系统浏览器
+        // （`will-navigate` 那道守卫保证它不会把设置弹窗导航走）。
+        const row = new Setting(container)
+            .setName(t.settings.sync.gitPath)
+            .setDesc(t.settings.sync.gitPathDesc)
+            .setClass("obsync-stacked");
+
+        row.descEl.createEl("br");
+        row.descEl.appendText(t.settings.sync.gitPathDownload);
+
+        // 第二个类**单独加**：`Setting.setClass()` 走的是 `classList.add`，一次只能给
+        // 一个 token —— 传 `"a b"` 在真机上直接抛 `InvalidCharacterError`（测试替身
+        // 原样存字符串，所以这条路只有真机/预览能发现，2026-10-04 被预览抓到）。
+        row.settingEl.addClass("obsync-git-path");
+
+        row.descEl.createEl("a", {
+            text: t.settings.sync.gitPathLink,
+            // 用 `attr` 而不是 `href`：`createEl` 的 `attr` 在真机与测试替身里都生效，
+            // 而测试要能读到这个网址（它是这条提示的全部意义）。
+            attr: { href: GIT_DOWNLOAD_URL, target: "_blank", rel: "noopener" },
+        });
+
+        // 「浏览…」挑完要把值写回这个框（用户得看得见发生了什么），所以留住引用。
+        let field: TextComponent | undefined;
+
+        row.addText((text) => {
+            field = text;
+            text.setPlaceholder("C:\\Program Files\\Git\\cmd\\git.exe")
+                .setValue(settings.gitPath)
+                .onChange(async (value) => {
+                    settings.gitPath = value.trim();
+                    await this.commit();
+                });
+        });
+
+        row.addButton((button) =>
+            button.setButtonText(t.settings.sync.gitPathBrowse).onClick(async () => {
+                const picked = await pickFile({
+                    title: t.settings.sync.gitPathBrowseTitle,
+                    // 已经填过就落在它所在的位置：第二次挑（换版本）时省一次翻目录。
+                    defaultPath: settings.gitPath.trim() || undefined,
+                    // `dontAddToRecent`：别让 git.exe 进系统的「最近使用」
+                    // （Obsidian 自己开文件框时也带着这一条）。
+                    properties: ["openFile", "dontAddToRecent"],
+                    filters: [
+                        { name: "git", extensions: ["exe"] },
+                        { name: t.settings.sync.gitPathBrowseAllFiles, extensions: ["*"] },
+                    ],
+                });
+                // 用户取消、或者这个环境开不了对话框（移动端 / 将来的 Electron 换了
+                // 实现）：什么都不做 —— 上面那个输入框仍然可以手输。
+                if (!picked) return;
+                settings.gitPath = picked.trim();
+                field?.setValue(settings.gitPath);
+                await this.commit();
+            })
+        );
+    }
+
     private renderDiagnostics(): void {
         const t = this.obsync.t;
         const sync = this.obsync.sync;
         if (!sync) return;
 
-        new Setting(this.containerEl).setName(t.sync.diagnoseHeading).setHeading();
-        this.containerEl.createEl("p", {
-            cls: "setting-item-description",
-            text: t.sync.diagnoseDesc,
-        });
+        // 「说明 + 一个按钮」合成组标题那一行：以前它们分别是「一段说明」和
+        // 「一整条只有按钮的卡片」，后者就是截图里那条空荡荡的横条。
+        const { rows, heading } = this.openSection(t.sync.diagnoseHeading);
+        heading.setDesc(t.sync.diagnoseDesc);
 
-        const resultEl = this.containerEl.createDiv({ cls: "obsync-diagnostics" });
+        // 结果区在按钮**下面**：它说的就是上面那一下的结果。
+        const resultEl = rows.createDiv({ cls: "obsync-diagnostics" });
 
-        new Setting(this.containerEl).addButton((button) =>
+        heading.addButton((button) =>
             button
                 .setButtonText(t.sync.diagnoseRun)
                 .setCta()
@@ -1666,3 +2344,12 @@ function isDefaultFolders(folders: string[]): boolean {
     const fallback = normalizeFolders(DEFAULT_SETTINGS.images.folders);
     return current.length === fallback.length && current.every((item, index) => item === fallback[index]);
 }
+
+/**
+ * git 官方下载页。设置页「git 可执行文件路径」那一行下方的链接指向它。
+ *
+ * 写成常量而不是放进 locale：**网址不随语言变**，而且这是唯一一处用到它的地方。
+ */
+const GIT_DOWNLOAD_URL = "https://git-scm.com/downloads";
+
+

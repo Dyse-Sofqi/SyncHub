@@ -1,5 +1,5 @@
 import { Platform, Plugin, TFile, WorkspaceLeaf } from "obsidian";
-import { getTranslations, type LocaleStrings } from "./core/i18n";
+import { currentLocale, getTranslations, type LocaleStrings } from "./core/i18n";
 import { logger } from "./core/logger";
 import { Notifier } from "./core/notice";
 import { SecretStore } from "./core/secretStore";
@@ -26,7 +26,7 @@ import {
     type RemoteContext,
 } from "./features/sync/remoteLinks";
 import { EditRemoteModal } from "./features/sync/ui/EditRemoteModal";
-import { DiffModal } from "./features/sync/ui/DiffModal";
+import { DIFF_VIEW_TYPE, DiffView, type DiffRequest } from "./features/sync/ui/DiffView";
 import { SourceControlView, SYNC_VIEW_TYPE } from "./features/sync/ui/SourceControlView";
 import { setHttpDebugLogger } from "./host/http";
 import { redactUrl } from "./host/redact";
@@ -112,7 +112,17 @@ export default class ObsyncPlugin extends Plugin {
      */
     images?: ImageSyncModule;
 
-    private translations: LocaleStrings = getTranslations("auto");
+    /**
+     * 当前语言的翻译表。
+     *
+     * 界面语言**跟随 Obsidian**（没有设置项，见 `core/i18n/index.ts`）：字段
+     * 初始化时取一次，设置变更时由 `applyDerivedSettings()` 再取一次。
+     * Obsidian 自己那个语言下拉执行的是 `location.reload()`（从 app.asar 里读到
+     * 的），于是插件会重新加载、这个实例跟着重建 —— 不需要额外监听。
+     * 常驻视图（同步面板 / 图片管理）自己持有 `getT`，每次重绘重新取，
+     * 所以「语言」在这条链路上只有这一个来源。
+     */
+    private translations: LocaleStrings = getTranslations();
 
     async onload(): Promise<void> {
         await this.loadSettings();
@@ -177,6 +187,18 @@ export default class ObsyncPlugin extends Plugin {
             this.app.vault.on("delete", (file) => this.images?.noteDeleted(file))
         );
 
+        // 改名之后云端那一份要跟着换键。
+        //
+        // **文件夹改名也走这一条**：Obsidian 的适配器在改名文件夹时会遍历
+        // 里面的每个文件、逐个发出 `rename` 事件（`Vault` 再原样转发），所以
+        // 这里不需要自己遍历子项。没有它的话，改名后下一轮同步会「重传新路径 +
+        // 把旧路径下载回来」，库里出现两批同样的图片（2026-10-01 用户报的问题）。
+        this.registerEvent(
+            this.app.vault.on("rename", (file, oldPath) =>
+                this.images?.noteRenamed(file, oldPath)
+            )
+        );
+
         this.installer = createInstallerModule(this.createInstallerHost(), this.app);
         this.registerInstallerCommands();
 
@@ -212,10 +234,32 @@ export default class ObsyncPlugin extends Plugin {
                         // `getT` 而不是 `this.t`：视图是常驻的，快照文案会让它
                         // 切换语言后一直显示旧语言（见视图的 deps 注释）。
                         getT: () => this.translations,
-                        onEditRemote: () => this.editRemote(),
                         onInitRepo: () => void this.initRepo(),
                         onOpenFileOnRemote: (path) => void this.openFileOnRemote(path),
                         onOpenCommitOnRemote: (hash) => void this.openCommitOnRemote(hash),
+                        openDiff: (request) => void this.openDiff(request),
+                        // 面板工具栏上那个「下次同步」倒计时读它 —— 与设置页那一行
+                        // 是同一份数据（`Automatics.nextRunAt()`）。
+                        nextRunAt: () => sync.automatics.nextRunAt(),
+                    })
+            );
+        }
+
+        /**
+         * 差异视图（**主工作区标签页**，2026-10-04 从弹窗改过来）。
+         *
+         * 与图片管理视图同一条路：注册一次，之后靠 `openDiff()` 复用同一个标签。
+         * 视图类型写进用户的 `workspace.json`，所以**名字不能再改**（改了就认不出
+         * 已经开着的标签页）—— 与 `SYNC_VIEW_TYPE` 同一条规矩。
+         */
+        if (this.sync) {
+            const sync = this.sync;
+            this.registerView(
+                DIFF_VIEW_TYPE,
+                (leaf: WorkspaceLeaf) =>
+                    new DiffView(leaf, {
+                        service: sync.service,
+                        getT: () => this.translations,
                     })
             );
         }
@@ -250,7 +294,9 @@ export default class ObsyncPlugin extends Plugin {
         });
 
         logger.info("plugin loaded", {
-            language: this.settings.language,
+            // 记的是**当前生效的**语言（跟随 Obsidian），而不是某个设置项 ——
+            // 设置项已经没有了，而「界面语言不对」这类问题要的正是这个值。
+            locale: currentLocale(),
             desktop: Platform.isDesktopApp,
             secretStorage: this.secretStore.isUsingSecretStorage(),
             tracked: this.settings.installer.tracked.length,
@@ -295,7 +341,10 @@ export default class ObsyncPlugin extends Plugin {
 
     /** 设置变更后调用：重新计算所有从设置派生的状态。 */
     applyDerivedSettings(): void {
-        this.translations = getTranslations(this.settings.language);
+        // 语言没有设置项，取的是 Obsidian 当前的语言 —— 这一行留着是因为
+        // 设置页在别的设置变更后也会重绘（`commit()` → 这里），顺带刷新一次
+        // 不会有副作用，而把它删掉就得手工解释「为什么语言不在这里更新」。
+        this.translations = getTranslations();
         logger.setVerbose(this.settings.debugLogging);
         setHttpDebugLogger(
             this.settings.debugLogging ? (message) => logger.debug(message) : undefined
@@ -840,24 +889,11 @@ export default class ObsyncPlugin extends Plugin {
     /**
      * 打开当前文件的差异（命令面板那条路）。
      *
-     * 与面板上那一行的入口是同一个弹窗、同一份数据，只是**从哪儿点**不同：
+     * 与面板上那一行的入口是同一个**差异标签页**、同一份数据，只是**从哪儿点**不同：
      * 面板是「我扫到了这一行」，命令面板是「我正在看这个文件」。
      */
     private openFileDiff(vaultPath: string): void {
-        const service = this.sync?.service;
-        if (!service) return;
-
-        new DiffModal(this.app, {
-            target: vaultPath,
-            getT: () => this.translations,
-            load: async () => {
-                const diff = await service.fileDiff(vaultPath);
-                return [
-                    { kind: "working", files: [diff.unstaged] },
-                    { kind: "staged", files: [diff.staged] },
-                ];
-            },
-        }).open();
+        void this.openDiff({ kind: "file", target: vaultPath });
     }
 
     private async openFileHistoryOnRemote(vaultPath: string): Promise<void> {
@@ -896,6 +932,13 @@ export default class ObsyncPlugin extends Plugin {
         }
     }
 
+    /**
+     * 「编辑远端地址」命令（命令面板）。
+     *
+     * 面板上的远端地址现在是**就地可改的输入框**（2026-10-04 用户要求），
+     * 所以这里不再是那一行的唯一入口 —— 但这条命令照旧保留：键盘用户与
+     * 「先看一眼校验提示再决定」的用法都靠它，删掉是凭空少一个功能。
+     */
     private editRemote(): void {
         if (!this.sync) return;
 
@@ -908,12 +951,43 @@ export default class ObsyncPlugin extends Plugin {
                     // 回显前脱敏：用户完全可能填一个带令牌的地址
                     // （弹窗会警告，但选择权留给他），而这条提示会**弹在屏幕上**。
                     this.notifier.success(this.t.sync.editRemoteSaved(redactUrl(url) || "—"));
-                    await this.sync!.service.refresh();
+                    // `force`：远端地址是在 git 之外改的（`setRemoteUrl` 不走同步队列），
+                    // 而领先/落后要按新远端重算 —— 缓存那 400 ms 会让用户觉得「改了没反应」。
+                    await this.sync!.service.refresh({ force: true });
                 } catch (err) {
                     await this.runSyncAction(() => Promise.reject(err));
                 }
             }).open();
         });
+    }
+
+    /**
+     * 打开（或复用）差异标签页。
+     *
+     * **复用一个**：点五条改动不该开出五个标签。已有就换内容 + 亮出来 —— 与
+     * `openSyncView` 同一个做法（面板也是「只有一个」）。
+     *
+     * 用 `getLeaf("tab")` 而不是 `getLeaf(false)`：后者会**占用当前活动的标签页**
+     * （把用户正在看的笔记顶掉），而「看差异」是个旁路动作，不该有这种副作用。
+     */
+    private async openDiff(request: DiffRequest): Promise<void> {
+        if (!this.sync) return;
+        const { workspace } = this.app;
+        const state = { kind: request.kind, target: request.target, label: request.label };
+
+        const existing = workspace.getLeavesOfType(DIFF_VIEW_TYPE)[0];
+        if (existing) {
+            await existing.setViewState({ type: DIFF_VIEW_TYPE, active: true, state });
+            await workspace.revealLeaf(existing);
+            return;
+        }
+
+        const leaf = workspace.getLeaf("tab");
+        await leaf.setViewState({ type: DIFF_VIEW_TYPE, active: true, state });
+        await workspace.revealLeaf(leaf);
+        // `revealLeaf` 之后才 `active`：`setViewState` 里带 `active: true` 在新建标签时
+        // 并不总是生效（用户点完看不到标签被切过去）。
+        workspace.setActiveLeaf(leaf, { focus: false });
     }
 
     private async openSyncView(): Promise<void> {

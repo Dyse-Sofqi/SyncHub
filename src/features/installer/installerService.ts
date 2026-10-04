@@ -25,7 +25,13 @@ import {
     resolvePluginFolder,
     resolvePluginFolderInfo,
 } from "./pluginFolder";
-import { resolveSelfRepo, setPendingRestart, SELF_PLUGIN_ID } from "./selfUpdate";
+import {
+    resolveSelfRepo,
+    selfRepoAttempts,
+    selfSourceLabel,
+    setPendingRestart,
+    SELF_PLUGIN_ID,
+} from "./selfUpdate";
 import {
     getActiveTheme,
     readThemeManifestVersion,
@@ -39,6 +45,8 @@ import {
     type InstallChannel,
     type InstallResult,
     type InstallSource,
+    type PluginFileName,
+    type PluginManifest,
     type ThemeUpdateResult,
     type TrackedItem,
     type TrackedKind,
@@ -195,6 +203,30 @@ export class InstallerService {
      */
     tokenForHost(kind: HostKind): string | undefined {
         return this.tokenFor(kind);
+    }
+
+    /**
+     * 自身更新的来源（**默认就是 Gitee 镜像**，见 `resolveSelfRepo`）。
+     *
+     * 公开它是因为「检查更新」与「执行更新」必须是**同一个来源** —— 与
+     * `tokenForHost` 同一个理由：两条路各读一次设置、各写一遍解析，迟早会有一条
+     * 读漏或读错（那正是「检查说没有更新、更新却从另一个仓库拉」的来源）。
+     * `UpdateChecker.checkSelf` 拿它当默认参数，`updateSelf` 也用它。
+     */
+    selfRepo(): RepoRef {
+        return resolveSelfRepo(this.settings.installer.selfUpdateSource);
+    }
+
+    /**
+     * 回退到官方仓库时提示一次（**每次回退都提示**）。
+     *
+     * 公开给同模块的协作者（`UpdateChecker`）：检查与更新的回退必须长得一模一样，
+     * 而两边各写一遍文案迟早会有一边漏掉 —— 那正是「悄悄换了来源」。
+     */
+    notifySelfFallback(from: RepoRef): void {
+        this.deps.notifier.warn(
+            this.deps.getT().installer.selfSourceFallback(selfSourceLabel(from))
+        );
     }
 
     // ── 解析 ──────────────────────────────────────────────────────────────
@@ -738,43 +770,26 @@ export class InstallerService {
      * - **不允许降级**（远端比当前旧就中止）：「更新」不该把用户降回旧版本。
      *   版本相同则放行 —— 那是「重装修复」，把一个坏掉的安装修回来是合理需求。
      *
+     * ## 来源会**依次尝试**（2026-10-01）
+     *
+     * 设置里那个来源（默认 Gitee 镜像）失败时改用官方仓库重试，**每次回退都提示**
+     * （`notifySelfFallback`）。取回文件与两道校验都算「这一次尝试」—— 镜像给了一个
+     * id 不对的 manifest、或者落后到比当前版本还旧，同样该改用官方。
+     * 写盘**只做一次**：它不属于任何一次尝试（磁盘错误的回退到另一个来源没有意义）。
+     *
      * @param currentVersion 运行中的版本（来自插件 manifest）。传进来而不是读磁盘：
      *   待重启期间磁盘上那份比运行中的新，拿它比就永远比不出「降级」。
      */
     async updateSelf(currentVersion: string): Promise<{ version: string; replaced: boolean }> {
-        // 来源由设置决定：空串 = 官方仓库，填了就用用户写下的那个**固定**来源
-        // （见 `resolveSelfRepo`）。
+        // 来源由设置决定（默认 = Gitee 镜像）；与「检查更新」共用 `selfRepo()`，
+        // 于是两条路不可能分叉（见那个方法的说明）。
         //
         // **不做镜像发现**：那套是「自动探测 + 只提议、要用户确认」，每次都要探一遍；
-        // 而这里的来源是用户明确写下的，再探一次只会让「到底从哪更新」变得不确定。
-        const source = resolveSelfRepo(this.settings.installer.selfUpdateSource);
-
-        const { files, manifest, repoRef } = await this.fetchItem(
-            PLUGIN_SPEC,
-            formatRepoId(source),
-            "latest",
-            // `formatRepoId` 只给 `owner/repo`（它**不带 host** —— 持久化与去重都用那个
-            // 形式），所以必须把 host 一并传下去。否则 `sofqi/SyncHub` 会被当成 **GitHub**
-            // 上的同名仓库，用户填的 Gitee 地址就悄悄失效了 —— 而界面看起来一切正常
-            // （2026-09-20 被测试抓到，见 `selfUpdate.test.ts` 的「来源取设置里的地址」）。
-            { allowMirror: false, defaultHost: source.host }
+        // 而这里的来源是写死的固定来源，再探一次只会让「到底从哪更新」变得不确定。
+        const { files, manifest } = await this.firstWorkingSelfSource(
+            selfRepoAttempts(this.selfRepo()),
+            (repoRef) => this.fetchSelfUpdate(repoRef, currentVersion)
         );
-
-        if (manifest.id !== SELF_PLUGIN_ID) {
-            throw new InstallerError({
-                kind: "selfIdMismatch",
-                repo: formatRepoId(repoRef),
-                id: manifest.id,
-            });
-        }
-
-        if (compareVersions(manifest.version, currentVersion) === -1) {
-            throw new InstallerError({
-                kind: "selfUpdateDowngrade",
-                current: currentVersion,
-                latest: manifest.version,
-            });
-        }
 
         const folder = await resolvePluginFolder(this.app, SELF_PLUGIN_ID);
         const backup = await createBackup(this.app, "plugin", SELF_PLUGIN_ID, folder);
@@ -789,6 +804,78 @@ export class InstallerService {
         logger.info(`SyncHub updated to ${manifest.version}; restart required`);
 
         return { version: manifest.version, replaced: backup.folderExisted };
+    }
+
+    /**
+     * 依次尝试各个来源，返回**第一次成功**的结果；全部失败时抛出最后一次的错误。
+     *
+     * 每次回退都提示用户（`notifySelfFallback`）—— 悄悄换成官方仓库正是这里要避免的。
+     * 抛的是**最后一次**（也就是官方那次）的原因：用户看到的该是「最后为什么没成」，
+     * 而回退本身已经单独提示过了。
+     */
+    private async firstWorkingSelfSource<T>(
+        attempts: RepoRef[],
+        run: (repoRef: RepoRef) => Promise<T>
+    ): Promise<T> {
+        for (const [index, repoRef] of attempts.entries()) {
+            try {
+                return await run(repoRef);
+            } catch (error) {
+                const fallback = attempts[index + 1];
+                // 最后一次也失败了 —— 原样上抛（调用方按错误路径显示）。
+                if (!fallback) {
+                    throw error instanceof Error ? error : new Error(String(error));
+                }
+                logger.warn(
+                    `self update from ${formatRepoId(repoRef)} failed; retrying with ${formatRepoId(fallback)}`,
+                    error
+                );
+                this.notifySelfFallback(repoRef);
+            }
+        }
+
+        // 只有 `attempts` 为空才可能走到这里，而 `selfRepoAttempts` 保证它至少有一项。
+        throw new Error("self update: no source to try");
+    }
+
+    /**
+     * 从**某一个**来源取回自身更新的文件并做两道校验（不写盘）。
+     *
+     * 抽出来是为了让「尝试」有明确的边界：取文件、id 校验、降级校验三者一起构成
+     * 「这一次来源可不可用」；写盘不算（见 `updateSelf`）。
+     */
+    private async fetchSelfUpdate(
+        repoRef: RepoRef,
+        currentVersion: string
+    ): Promise<FetchedItem<PluginManifest, PluginFileName>> {
+        const fetched = await this.fetchItem(
+            PLUGIN_SPEC,
+            formatRepoId(repoRef),
+            "latest",
+            // `formatRepoId` 只给 `owner/repo`（它**不带 host** —— 持久化与去重都用那个
+            // 形式），所以必须把 host 一并传下去。否则 `sofqi/SyncHub` 会被当成 **GitHub**
+            // 上的同名仓库，用户填的 Gitee 地址就悄悄失效了 —— 而界面看起来一切正常
+            // （2026-09-20 被测试抓到，见 `selfUpdate.test.ts` 的「来源取设置里的地址」）。
+            { allowMirror: false, defaultHost: repoRef.host }
+        );
+
+        if (fetched.manifest.id !== SELF_PLUGIN_ID) {
+            throw new InstallerError({
+                kind: "selfIdMismatch",
+                repo: formatRepoId(fetched.repoRef),
+                id: fetched.manifest.id,
+            });
+        }
+
+        if (compareVersions(fetched.manifest.version, currentVersion) === -1) {
+            throw new InstallerError({
+                kind: "selfUpdateDowngrade",
+                current: currentVersion,
+                latest: fetched.manifest.version,
+            });
+        }
+
+        return fetched;
     }
 
     // ── 取消绑定 ──────────────────────────────────────────────────────────

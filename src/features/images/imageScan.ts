@@ -17,8 +17,12 @@ import type { LocalImage } from "./types";
  * 参与**同步**的图片扩展名。
  *
  * 含 svg：它是文本，但同样是用户笔记里的图片资源，同样该有云端副本。
+ *
+ * 2026-10-02 起导出：仓库同步那边「按扩展名忽略图片」要用**同一份**清单 ——
+ * 两处各写一份的话，会出现「图片同步认它是图、git 却放着不管」的缝（或多出
+ * 一个两边都不管的扩展名）。这份清单就是「什么是图片」的唯一答案。
  */
-const SYNC_EXTENSIONS = [
+export const SYNC_EXTENSIONS = [
     "png",
     "jpg",
     "jpeg",
@@ -95,19 +99,25 @@ export function normalizeFolder(value: string): string {
 }
 
 /**
- * 归一整个文件夹列表（设置里是一行一个）。
+ * 归一整个文件夹列表。
  *
- * 去重是必需的：重复项会让 `some()` 白跑，更会让设置页看起来像坏了。
+ * 去重是必需的：重复项会让 `some()` 白跑，更会让设置页看起来像坏了
+ * （从候选里挑一个已经加过的，必须是**无害的空操作**）。
  *
  * ## 空串是合法值，不能丢
  *
  * `""` 是「整个库」归一之后的**规范形状**（`data.json` 里存的就是它），
  * 丢它等于把用户「同步整个库」的设置悄悄改回「什么都没管」—— 没有任何提示。
- * 要丢的是**空行**（`"   "` 这种纯空白）：那通常是用户多打了回车，或从别处
- * 粘贴时带上了换行。区别在原始值上：`""` 与 `"."` 都表示整个库，而纯空白什么都不表示。
+ * 要丢的是**纯空白**（`"   "`）：那通常是手滑。区别在原始值上：`""` 与 `"."`
+ * 都表示整个库，而纯空白什么都不表示。
  *
- * 调用方如果拿到的是**用户刚输入的文本**（设置页那一格），先用 `parseFolders`
- * 拆行并丢掉空行，再进这里 —— 那个函数干的就是这件事。
+ * ## 与设置页那一格的关系（2026-10-02 起）
+ *
+ * 那一格现在是「输入一个路径 → 加进列表」，用户输入的是**单个**路径，
+ * 直接并进列表再进这里即可（`normalizeFolder` 负责 `/attachments/`、`assets//img`、
+ * `.` 这些写法的归一，纯空白在这里被丢掉）。所以原先那个「按行拆、先丢空行」
+ * 的 `parseFolders` 连同它的逆向 `formatFolders` / `formatFolderPath` 一起删了：
+ * 多行文本框没有了，拆行这件事也不存在了。
  */
 export function normalizeFolders(values: string[]): string[] {
     const result: string[] = [];
@@ -117,34 +127,6 @@ export function normalizeFolders(values: string[]): string[] {
         if (!result.includes(folder)) result.push(folder);
     }
     return result;
-}
-
-/**
- * 解析设置页里那一格文本：一行一个，**丢掉空行**，再归一。
- *
- * 空行必须在这里丢而不能拖进 `normalizeFolders`：拆行产生的 `""` 与「整个库」
- * 的规范形状长得一模一样，进了那边就会被当成合法值 —— 用户多打一个回车，
- * 受管范围就悄悄变成整个库。而 `normalizeFolders` 又要能保留来自 `data.json`
- * 的 `""`（见那边的说明）。两边对 `""` 的要求正好相反，所以分开。
- */
-export function parseFolders(value: string): string[] {
-    return normalizeFolders(value.split("\n").filter((line) => line.trim().length > 0));
-}
-
-/**
- * 文件夹在**界面上**的写法：`normalizeFolder` 的逆运算。
- *
- * 空串表示整个库，而一个空行在设置页里读起来就是「什么都没填」—— 尤其是它
- * 正是默认值的时候。显示成 `.` 与这一格自己的说明文字（「填 . 表示整个库」）
- * 对上，用户才知道那个空行不是 bug。
- */
-export function formatFolderPath(folder: string): string {
-    return folder === "" ? "." : folder;
-}
-
-/** `parseFolders` 的逆运算：列表 → 设置页那一格的文本。 */
-export function formatFolders(folders: string[]): string {
-    return folders.map(formatFolderPath).join("\n");
 }
 
 /**

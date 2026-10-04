@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { simpleGit } from "simple-git";
-import { SimpleGitManager } from "../../src/features/sync/simpleGitManager";
+import { SimpleGitManager, createGitInstance } from "../../src/features/sync/simpleGitManager";
 import {
     ConflictError,
     GitNotRepoError,
@@ -146,6 +146,212 @@ describe("状态与提交", () => {
         const status = await manager.status();
         expect(status.staged).toHaveLength(0);
         expect(status.untracked.map((change) => change.path)).toEqual(["fresh.md"]);
+    });
+
+    /**
+     * 「停止跟踪」（`git rm -r --cached`）—— 这一条必须在**真仓库**上跑。
+     *
+     * 它守的正是「`.gitignore` 只对未跟踪的文件生效」这条 git 语义：光写忽略规则，
+     * 已提交的图片照旧每次提交都带着。所以这里连着验三件事：
+     *
+     * 1. 忽略规则 + `untrack` 之后，**本地文件还在**（工作区一个字节都不能少 ——
+     *    这是这个动作敢做的唯一理由）；
+     * 2. 那个文件**退出了跟踪**（出现在 `untracked`，而不是 `unstaged`）；
+     * 3. 提交之后仓库里记下的是**删除**，且 `git status` 不再把它当成待提交的改动
+     *    （因为 `.gitignore` 已经覆盖它）。
+     */
+    it("untrack 让已提交的文件退出跟踪，而本地文件原封不动", async () => {
+        const { manager, dir } = await makeReadyRepo("untrack");
+        // 一个「图片文件夹」+ 一篇笔记
+        await write(dir, "attachments/a.png", "PNG-A");
+        await write(dir, "attachments/b.png", "PNG-B");
+        await write(dir, "note.md", "笔记");
+        await manager.stage([]);
+        await manager.commit("add images");
+
+        // 只加 .gitignore 不会改变任何事：文件仍然被跟踪
+        await write(dir, ".gitignore", "attachments/\n");
+        let status = await manager.status();
+        expect(status.untracked.map((change) => change.path)).not.toContain("attachments/");
+
+        await manager.untrack(["attachments"]);
+
+        // 1) 本地文件还在
+        expect(await read(dir, "attachments/a.png")).toBe("PNG-A");
+        expect(await read(dir, "attachments/b.png")).toBe("PNG-B");
+
+        // 2) 退出跟踪 → 以「删除」的形式进了暂存区
+        status = await manager.status();
+        expect(status.staged.map((change) => change.path).sort()).toEqual([
+            "attachments/a.png",
+            "attachments/b.png",
+        ]);
+
+        // 3) 提交之后不再有任何待提交的图片改动，且笔记没被牵连
+        await manager.commit("stop tracking images");
+        status = await manager.status();
+        expect(status.staged).toHaveLength(0);
+        expect(status.unstaged).toHaveLength(0);
+        // 只剩刚写下的 .gitignore 自己是未跟踪的（它还没提交）——
+        // `attachments/` 已经被忽略，所以不会出现在这里。
+        expect(status.untracked.map((change) => change.path)).toEqual([".gitignore"]);
+        expect(await read(dir, "attachments/a.png")).toBe("PNG-A");
+    });
+
+    it("untrack 对「一个已跟踪文件都没有」的路径不报错（--ignore-unmatch）", async () => {
+        // 刚配好、还没提交过任何图片的常见情形：git rm 不带这个开关会以
+        // 「pathspec did not match」失败，并中止整条命令 —— 那样前面匹配上的
+        // 文件夹也白摘了。
+        const { manager, dir } = await makeReadyRepo("untrack-unmatch");
+        await write(dir, "note.md", "笔记");
+        await manager.stage([]);
+        await manager.commit("init");
+
+        await expect(manager.untrack(["attachments"])).resolves.toBeUndefined();
+        // 空数组直接返回，不惊动 git
+        await expect(manager.untrack([])).resolves.toBeUndefined();
+        expect(await read(dir, "note.md")).toBe("笔记");
+    });
+
+    /**
+     * `listTracked` 是「按扩展名忽略图片」的眼睛：`.gitignore` 对已跟踪的文件毫无作用，
+     * 所以必须先问 git「哪些图片已经被跟踪」，才能把它们摘出索引。
+     *
+     * 顺带钉住两件事：
+     * - `-z` 解析：路径里有空格、中文、`\` 也不会被拆错（`-z` 是 NUL 分隔）；
+     * - 非仓库时返回**空数组**而不是抛错（界面已经在别处确认过仓库存在，
+     *   这里再抛一次只会把「什么都没有」变成一句技术性报错）。
+     */
+    it("listTracked 列出全部已跟踪路径（含中文与空格），非仓库时返回空数组", async () => {
+        const plain = path.join(root, "plain-list");
+        await fs.mkdir(plain);
+        await expect(new SimpleGitManager({ baseDir: plain }).listTracked()).resolves.toEqual([]);
+
+        const { manager, dir } = await makeReadyRepo("list-tracked");
+        await write(dir, "attachments/中文 图.png", "PNG");
+        await write(dir, "notes/note.md", "笔记");
+        await manager.stage([]);
+        await manager.commit("init");
+
+        const tracked = await manager.listTracked();
+        expect(tracked.sort()).toEqual(["attachments/中文 图.png", "notes/note.md"]);
+    });
+
+    it("untrack 分批下发（一次几千个路径会撞上命令行长度上限）", async () => {
+        const { manager, dir } = await makeReadyRepo("untrack-batches");
+        // 造 250 个文件：超过一批（200）但不至于让测试变慢
+        const files = Array.from({ length: 250 }, (_unused, index) => `img/${index}.png`);
+        for (const file of files) await write(dir, file, "P");
+        await manager.stage([]);
+        await manager.commit("many images");
+
+        await manager.untrack(["img"]);
+
+        const status = await manager.status();
+        expect(status.staged).toHaveLength(250);
+        // 本地文件一个都没少
+        expect(await read(dir, "img/249.png")).toBe("P");
+    });
+
+    /**
+     * 「嵌套仓库」（gitlink）的识别（2026-10-04）。
+     *
+     * 用户在库的插件目录里就地开发插件，那些目录各自带 `.git`，而库把它们记成了
+     * **指针**（模式 160000）。这种行在面板里表现为「文件夹地址 + 没有具体改动 +
+     * 怎么点都消不掉」—— 用户看不出原因，所以面板要能认出它们。
+     *
+     * 这里连着验三件事：认得出、**不误报普通文件**、以及「摘索引之后目录与里面的
+     * 东西一个都不动」（这是那个「不再跟踪」按钮敢做的唯一理由）。
+     */
+    it("nestedRepoPaths 认得出嵌套仓库，且不误报普通文件", async () => {
+        const { dir } = await makeReadyRepo("nested-detect");
+        // 一个真正的嵌套仓库：它自己是 git 仓库
+        const nested = path.join(dir, "plugins", "demo");
+        await fs.mkdir(nested, { recursive: true });
+        await simpleGit(nested).raw(["init", "-q"]);
+        await simpleGit(nested).addConfig("user.email", "t@example.com");
+        await simpleGit(nested).addConfig("user.name", "T");
+        await write(nested, "a.md", "A");
+        await simpleGit(nested).add("-A");
+        await simpleGit(nested).commit("nested A");
+
+        await write(dir, "note.md", "笔记");
+        const manager = new SimpleGitManager({ baseDir: dir });
+        await manager.stage([]);
+        await manager.commit("init");
+
+        // 嵌套仓库的 HEAD 动了 → 库这边把它报成一条「更改」
+        await write(nested, "b.md", "B");
+        await simpleGit(nested).add("-A");
+        await simpleGit(nested).commit("nested B");
+        await write(dir, "note.md", "笔记改了");
+
+        const changed = ["plugins/demo", "note.md"];
+        await expect(manager.nestedRepoPaths(changed)).resolves.toEqual(["plugins/demo"]);
+
+        // 空数组不碰 git
+        await expect(manager.nestedRepoPaths([])).resolves.toEqual([]);
+    });
+
+    it("摘索引之后，嵌套仓库的目录、.git 与未提交的代码都还在", async () => {
+        const { dir } = await makeReadyRepo("nested-untrack");
+        const nested = path.join(dir, "plugins", "demo");
+        await fs.mkdir(nested, { recursive: true });
+        await simpleGit(nested).raw(["init", "-q"]);
+        await simpleGit(nested).addConfig("user.email", "t@example.com");
+        await simpleGit(nested).addConfig("user.name", "T");
+        await write(nested, "a.md", "A");
+        await simpleGit(nested).add("-A");
+        await simpleGit(nested).commit("nested A");
+        // 开发中：一份**未提交**的改动
+        await write(nested, "wip.md", "未提交的代码");
+
+        await write(dir, "note.md", "笔记");
+        const manager = new SimpleGitManager({ baseDir: dir });
+        await manager.stage([]);
+        await manager.commit("init");
+        await expect(manager.nestedRepoPaths(["plugins/demo"])).resolves.toEqual(["plugins/demo"]);
+
+        await manager.untrack(["plugins/demo"]);
+
+        expect(await fs.readFile(path.join(nested, "a.md"), "utf8")).toBe("A");
+        expect(await fs.readFile(path.join(nested, "wip.md"), "utf8")).toBe("未提交的代码");
+        expect(await fs.readdir(path.join(nested, ".git"))).not.toHaveLength(0);
+    });
+
+    /**
+     * git 子进程**继承父进程环境**（2026-10-02 修的一个真 bug）。
+     *
+     * 修之前：`simpleGit().env(name, value)` 是**替换**子进程环境，于是 git 里没有
+     * PATH、没有代理变量、没有 USERPROFILE —— 症状是「本机终端里好、插件里坏」，
+     * 而且只在有代理或自定义凭据助手时才现形（用户报的
+     * `getaddrinfo() thread failed to start` 就在这一类里）。
+     *
+     * 探针用 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`：它们是**放行**的普通变量（不在
+     * simple-git 拒绝的那批里），而 git 环境里的作者身份**优先于仓库配置** —— 所以
+     * `git var GIT_AUTHOR_IDENT` 会给出环境里的那个名字。环境被剥掉的话，读到的就是
+     * 仓库本地配置里的 `SyncHub Test`。整条路不碰网络。
+     */
+    it("git 子进程继承父进程环境（GIT_AUTHOR_NAME 探针）", async () => {
+        const { dir } = await makeReadyRepo("child-env");
+
+        const previousName = process.env.GIT_AUTHOR_NAME;
+        const previousEmail = process.env.GIT_AUTHOR_EMAIL;
+        process.env.GIT_AUTHOR_NAME = "Probe From Parent Env";
+        process.env.GIT_AUTHOR_EMAIL = "probe@example.com";
+        try {
+            // 实例必须在设好环境**之后**创建（环境在创建时快照进 spawn 选项）
+            const git = createGitInstance({ baseDir: dir });
+            const ident = await git.raw(["var", "GIT_AUTHOR_IDENT"]);
+
+            expect(ident).toContain("Probe From Parent Env");
+            expect(ident).toContain("probe@example.com");
+        } finally {
+            if (previousName === undefined) delete process.env.GIT_AUTHOR_NAME;
+            else process.env.GIT_AUTHOR_NAME = previousName;
+            if (previousEmail === undefined) delete process.env.GIT_AUTHOR_EMAIL;
+            else process.env.GIT_AUTHOR_EMAIL = previousEmail;
+        }
     });
 
     it("log 返回按时间倒序的提交，短 hash 可用", async () => {
@@ -426,6 +632,34 @@ describe("远端：push / pull / 冲突", () => {
         const other = await makeBareRepo("other.git");
         await b.manager.setRemoteUrl(other);
         await expect(b.manager.getRemoteUrl()).resolves.toBe(other);
+    });
+
+    /**
+     * 远端地址的探测结果会被**复用**（2026-10-01）。
+     *
+     * 以前 `git()` 每次都先探一遍远端（`git remote -v`），而一次面板重绘要调
+     * `git()` 四次 —— 实测一次 `git remote -v` 约 46 ms，也就是每画一次面板就
+     * 白烧近 200 ms（见 `REMOTE_PROBE_TTL_MS`）。
+     *
+     * 复用是有代价的：在**插件外面**改了远端地址，最多 5 秒内我们还按旧地址算。
+     * 这条用例把这个取舍钉下来 —— 连同它的边界：走我们自己的入口改地址
+     * （`setRemoteUrl`）会立刻作废缓存，不存在「换了远端还用旧令牌」。
+     */
+    it("远端探测结果在 TTL 内复用：插件外改地址不会立刻看到，走我们自己入口会立刻作废", async () => {
+        const { origin, b } = await makeCluster();
+        await expect(b.manager.getRemoteUrl()).resolves.toBe(origin);
+
+        // 绕过 manager 直接改仓库配置 —— 模拟「在插件外面改了远端」
+        const direct = await makeBareRepo("direct.git");
+        await simpleGit(b.dir).remote(["set-url", "origin", direct]);
+
+        // 仍然是旧值：这正是「复用」的证据
+        await expect(b.manager.getRemoteUrl()).resolves.toBe(origin);
+
+        // 而经由 `setRemoteUrl` 改的地址立刻生效（缓存被显式作废）
+        const viaPlugin = await makeBareRepo("via-plugin.git");
+        await b.manager.setRemoteUrl(viaPlugin);
+        await expect(b.manager.getRemoteUrl()).resolves.toBe(viaPlugin);
     });
 });
 

@@ -194,6 +194,10 @@ export class TextComponent {
     }
     setValue(value: string): this {
         this.value = value;
+        // 真实 Obsidian 的 `setValue` 会把值写进 `inputEl` —— 于是「代码清空了
+        // 输入框」这件事在裸元素上也看得见（用户按回车加入一个文件夹之后框必须
+        // 变空，否则下一次回车会把同一个路径再加一遍）。
+        (this.inputEl as unknown as { value: string }).value = value;
         return this;
     }
     getValue(): string {
@@ -214,6 +218,9 @@ export class TextComponent {
     /** 模拟用户输入：同步 value 并触发 onChange（等价于真实 input 事件）。 */
     type(value: string): this {
         this.value = value;
+        // 打字写的是**元素**：失焦修正（`addNumberField`）比对的正是
+        // `inputEl.value`，不写这一句就测不出「框里留着一个不生效的数字」。
+        (this.inputEl as unknown as { value: string }).value = value;
         this.changeHandler?.(value);
         return this;
     }
@@ -367,6 +374,15 @@ export class Setting {
     settingEl = document.createElement("div");
     readonly nameEl = document.createElement("div");
     readonly descEl = document.createElement("div");
+    /**
+     * 控件区。
+     *
+     * 真实的 `Setting` 把每个控件 append 进这里；替身只把控件记在 `controls` 上。
+     * 但代码里确实有**直接往 `controlEl` 塞节点**的写法（「定时同步」那一行的
+     * 单位后缀 `分钟`），缺了这个元素，那条渲染路径一跑就 TypeError ——
+     * 而它只在真机上才暴露。
+     */
+    readonly controlEl = document.createElement("div");
     /** 名称与描述 —— 断言列表/设置页写了什么时要用。 */
     name = "";
     desc = "";
@@ -411,7 +427,20 @@ export class Setting {
     setHeading(): this {
         return this;
     }
+    /**
+     * `setClass()` —— 真机上它走 `classList.add`，**因此一次只能给一个类名**：
+     * 传 `"a b"` 会抛 `InvalidCharacterError`（`DOMTokenList` 的 token 不许带空格）。
+     *
+     * 替身原来把整串原样存下来，于是这条规则只有真机（或 `.probe/settings-preview`
+     * 那套真 DOM 预览）才发现得了 —— 2026-10-04 就真的这么漏过一次。
+     * 现在替身**照样抛**，让这条规则在单测里就能红。
+     */
     setClass(cls?: string): this {
+        if (cls?.includes(" ")) {
+            throw new Error(
+                `setClass() 一次只能给一个类名（真机上这是 classList.add），收到：${JSON.stringify(cls)}`
+            );
+        }
         if (cls) this.classes.push(cls);
         return this;
     }
@@ -736,7 +765,22 @@ export class ItemView {
     contentEl = document.createElement("div");
     /** 真实的 `ItemView`（Component）能拿到 app；视图用它打开库里的文件。 */
     app: unknown = {};
+    /**
+     * `setState()` 记下的状态。
+     *
+     * 真实 `View.setState(state, result)` 由 Obsidian 在挂载视图时调（恢复布局时也走
+     * 这里），子类覆盖它并调 `super.setState()`。替身缺了这个方法的话，
+     * 「视图是被 setState 驱动的」那类代码在测试里一构造就 TypeError ——
+     * 差异标签页（`DiffView`，2026-10-04）就是这么踩上的。
+     */
+    viewState: unknown;
     constructor(public leaf: unknown) {}
+    async setState(state: unknown, _result?: unknown): Promise<void> {
+        this.viewState = state;
+    }
+    getState(): unknown {
+        return this.viewState;
+    }
     getViewType(): string {
         return "";
     }

@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
     extensionOf,
-    formatFolders,
     isEditableImage,
     isImagePath,
     isInsideFolders,
     normalizeFolder,
     normalizeFolders,
-    parseFolders,
     scanLocalImages,
 } from "../../../src/features/images/imageScan";
 import { createFakeImageVault } from "../../helpers/fakeImageVault";
@@ -192,34 +190,24 @@ describe("normalizeFolders", () => {
 });
 
 /**
- * 设置页那一格文本的解析。
- *
- * 与 `normalizeFolders` 分开的理由：拆行产生的 `""`（用户多打了一个回车）
- * 和「整个库」的规范形状长得一模一样，而两者要的处置正好相反 ——
- * 前者必须丢，后者必须留。
+ * 设置页那一格现在是「输入一个路径 → 加入列表」（2026-10-02 起），所以
+ * 「按行拆、先丢空行」那一层连同 `parseFolders` / `formatFolders` 一起删了：
+ * 多行文本框没有了，拆行这件事也就不存在了。留下的判据在 `normalizeFolders`：
+ * 纯空白丢掉、`""` 与 `"."` 都留下（整个库）。
  */
-describe("parseFolders（设置页文本 → 列表）", () => {
-    it("一行一个，丢掉空行", () => {
-        expect(parseFolders("attachments\n\nassets/img\n")).toEqual(["attachments", "assets/img"]);
-    });
-
+describe("normalizeFolders 对用户输入的那一条", () => {
     it("`.` 表示整个库（归一成空串）", () => {
-        expect(parseFolders(".")).toEqual([""]);
+        expect(normalizeFolders(["."])).toEqual([""]);
     });
 
-    it("空行不会把范围悄悄扩大成整个库", () => {
-        expect(parseFolders("attachments\n\n")).toEqual(["attachments"]);
+    it("纯空白什么都不表示（不是整个库）", () => {
+        expect(normalizeFolders(["   "])).toEqual([]);
     });
 
-    it("全空白时是「没有文件夹」，不是整个库", () => {
-        expect(parseFolders("\n\n")).toEqual([]);
-    });
-});
-
-describe("formatFolders（列表 → 设置页文本）", () => {
-    it("空串显示成 `.`（空行读起来像「什么都没填」，而它正是默认值）", () => {
-        expect(formatFolders([""])).toBe(".");
-        expect(formatFolders(["attachments", ""])).toBe("attachments\n.");
+    it("重复加同一个文件夹是无害的空操作", () => {
+        expect(normalizeFolders(["attachments", "attachments"])).toEqual(["attachments"]);
+        // `/attachments/` 归一之后与 `attachments` 是同一个，所以也算重复
+        expect(normalizeFolders(["attachments", "/attachments/"])).toEqual(["attachments"]);
     });
 });
 

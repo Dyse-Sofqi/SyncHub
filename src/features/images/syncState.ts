@@ -160,6 +160,53 @@ export function forget(state: ImageSyncState, path: string): void {
 }
 
 /**
+ * 把一条记录从旧路径搬到新路径（本地改名之后）。
+ *
+ * ## 为什么必须有它（2026-10-01 用户报的重复问题）
+ *
+ * 这套系统的身份就是 **vault 路径**（见文件头：对象键 = 前缀 + 路径，清单也按
+ * 路径存）。所以本地改名在它看来是「旧路径没了、新路径出现了」，没有这一步，
+ * 下一轮同步会同时做两件错事：
+ *
+ * - 新路径 → `local-new` → **重传**一份（云端多一个键）；
+ * - 旧路径 → `remote-new` → **下载回来**（库里出现两批同样的图片）。
+ *
+ * 而且它不会自愈：旧那份下载回来之后两边又都对上了，清单里两条都写着「一致」。
+ *
+ * ## 旧路径留的是**墓碑**，不是 `forget`
+ *
+ * 「旧键还在、本地已经没有了」这个状态在改名过程中必然出现（删除旧键可能在
+ * 云端那一趟失败、或者总开关关着时压根没搬）。而镜像规则对它的解释只有一个：
+ * 补齐到本地。墓碑（`remoteOnly`）是那条路上唯一的闸门，所以搬记录的同时就立上。
+ *
+ * 它会自己消失：旧键真的删掉之后，`pruneState` 会因为「两边都不存在」
+ * 把整条记录剪掉 —— 不需要额外清理。
+ *
+ * @returns 是否搬过。`false` 表示旧路径本来就没有记录（这一份从没传上去过，
+ *   或者这台设备的清单丢过）—— 调用方据此知道「云端本来就没有这一份」。
+ */
+export function renameEntry(
+    state: ImageSyncState,
+    from: string,
+    to: string,
+    now = Date.now()
+): boolean {
+    const existing = state.entries[from];
+    if (!existing) return false;
+
+    // 逐字段搬：**不带上 `remoteOnly`**。那一份在新路径上是存在的（本地就在
+    // 那儿），墓碑只在「本地没有」时才有意义；照抄过来会让清单说一件假话。
+    state.entries[to] = {
+        size: existing.size,
+        mtime: existing.mtime,
+        etag: existing.etag,
+        syncedAt: now,
+    };
+    existing.remoteOnly = true;
+    return true;
+}
+
+/**
  * 记一条「本地已删除、云端保留」。
  *
  * 没有记录时**什么都不做**：那说明云端本来就没有这一份（否则上次同步会记下），

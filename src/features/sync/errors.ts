@@ -84,6 +84,31 @@ export class DetachedHeadError extends ObsyncError {}
 export class GitTimeoutError extends ObsyncError {}
 
 /**
+ * 连不上远端：DNS 解析失败、TCP 连不上、TLS 握手失败、连接被中途掐断。
+ *
+ * ## 为什么要单独一类（2026-10-02）
+ *
+ * 用户报的那条是：
+ *
+ * ```
+ * fatal: unable to access 'https://gitee.com/…': getaddrinfo() thread failed to start
+ * ```
+ *
+ * 这是 git 的网络传输层（libcurl）**连解析线程都没起来**时的原话 —— 没有类型的话
+ * 它就这么原样落在控制台里，用户看不出「是网络/代理的问题，还是插件坏了、还是令牌错了」。
+ * 而它的应对方式很明确：**查网络与代理**（不是查令牌，也不是重装插件）。
+ *
+ * 与 `GitTimeoutError` 分开：那个是「连上了但一直没动静」，这个是「压根没连上」。
+ * 两者都发生在网络上，但一个该查代理/防火墙，一个该查连接是否卡死 —— 混在一起
+ * 用户只能瞎试。
+ *
+ * 现实触发路径（按常见程度）：公司/校园网或本人的**代理**没被 git 看见（插件 0.1.8
+ * 之前会把代理变量丢掉，见 `gitChildEnv`）、安全软件/沙箱拦了 socketpair 与线程创建、
+ * 系统资源紧张（内存/句柄/线程耗尽）、以及单纯的断网。
+ */
+export class GitNetworkError extends ObsyncError {}
+
+/**
  * 把 git 层的错误翻译成用户可读文案。
  *
  * 在 `createSyncModule` 里注册进 `Notifier`，这样任何调用点
@@ -102,6 +127,7 @@ export function describeSyncError(err: unknown, t: LocaleStrings): string | unde
     if (err instanceof NoUpstreamError) return t.sync.noUpstream;
     if (err instanceof DetachedHeadError) return t.sync.detachedHead;
     if (err instanceof GitTimeoutError) return t.sync.gitTimeout;
+    if (err instanceof GitNetworkError) return t.sync.gitNetworkFailed;
     if (err instanceof ConflictError) return t.sync.conflictDetected(err.files.length);
     return undefined;
 }

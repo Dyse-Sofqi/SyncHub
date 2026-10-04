@@ -73,12 +73,6 @@ export const en = {
             images: "Image sync",
             general: "General",
         },
-        language: {
-            heading: "Language",
-            name: "Interface language",
-            desc: 'The language used by this plugin. "Follow Obsidian" uses the language you set in Obsidian.',
-            auto: "Follow Obsidian",
-        },
 
         token: {
             heading: "Access tokens",
@@ -105,7 +99,7 @@ export const en = {
             debugLoggingDesc: "Log detailed request and sync information to the developer console.",
             statusBarFullWidth: "Status bar spans the full width",
             statusBarFullWidthDesc:
-                "Stretch the status bar across the screen so the sync item can sit at the **far left** (otherwise there is no free space there). Turning this off restores Obsidian's own layout (a cluster in the bottom-right); the sync item stays **first** in that cluster — nothing is lost, it just no longer fills the whole strip.",
+                "Stretch the status bar across the screen so the sync item can sit at the far left (otherwise there is no free space there). Turning this off restores Obsidian's own layout (a cluster in the bottom-right); the sync item stays first in that cluster — nothing is lost, it just no longer fills the whole strip.",
         },
 
         installer: {
@@ -124,13 +118,19 @@ export const en = {
             selfHeading: "SyncHub itself",
             selfDesc:
                 "Update SyncHub itself. Only the new files are written; the running plugin is not reloaded — the new version takes effect after you restart Obsidian.",
-            /** Says what empty means, and what happens if the address is wrong — see the zh-cn note. */
+            /**
+             * Says what the default is, what happens when the mirror is down (automatic
+             * fallback to the official repo, announced), how to pin the official repo, and
+             * what happens if the address is wrong — see the zh-cn note.
+             */
             selfSource: "Self-update source",
             selfSourceDesc:
-                "Empty = the official repository (github.com/Dyse-Sofqi/SyncHub). If GitHub is slow " +
-                "or blocked, enter a mirror address — it is then used every time, with no automatic " +
-                "probing. Before writing, the remote manifest's id must be ob-sync, so a wrong " +
-                "address cannot overwrite another plugin.",
+                "Defaults to the Gitee mirror (gitee.com/sofqi/SyncHub); leaving it empty also " +
+                "uses that default. If the mirror is unavailable (for example Gitee's anonymous " +
+                "API is rate limited), the official repository is tried instead and you are told " +
+                "about the fallback. Enter github.com/Dyse-Sofqi/SyncHub to always use the " +
+                "official repository. Before writing, the remote manifest's id must be ob-sync, " +
+                "so a wrong address cannot overwrite another plugin.",
             selfSourcePlaceholder: "https://gitee.com/sofqi/SyncHub",
             mirrorDiscovery: "Discover Gitee mirrors",
             mirrorDiscoveryDesc: "When installing a GitHub plugin, look for a Gitee mirror first: a same-named repository, or a same-named repository under your own Gitee account (the latter needs a Gitee token). Downloads then use the mirror — faster in mainland China.",
@@ -138,24 +138,63 @@ export const en = {
 
         sync: {
             heading: "Vault sync",
-            enabled: "Enable vault sync",
+            /**
+             * The "Scheduled sync" row: **interval box + toggle**.
+             *
+             * Until 2026-10-02 that toggle said "Enable vault sync", which promised
+             * more than it did — the sync commands were never affected by it, only the
+             * timer was. The same day the three intervals (commit / push / pull) were
+             * merged into one period: the main interval always ran the complete chain,
+             * and the other two only invited the "does 0 block pushes?" misreading.
+             */
+            enabled: "Scheduled sync",
             enabledDesc:
-                "Let SyncHub sync this vault in the background. Turning it off stops the " +
-                "automatic commit / push / pull timers; the sync commands stay available " +
-                "(those are started by you).",
+                "Runs the complete chain in the background on the interval above (1–1440 minutes): " +
+                "commit -> pull -> push. Turning it off stops the timer (the interval is " +
+                "kept); the sync commands stay available.",
+            /** Unit suffix after the interval box (`<input> min <toggle>`). */
+            minutesUnit: "min",
+            /** Accessible label for the interval box (it has no visible label of its own). */
+            intervalAria: "Scheduled sync interval (minutes)",
+            /**
+             * The countdown badge after the "Scheduled sync" name (user request, 2026-10-02:
+             * "if scheduled sync is on, show a countdown to the next sync").
+             *
+             * The argument is an already formatted duration (`3:07` / `1:05:00`, see
+             * `formatCountdown`). When there is no timer (switch off, or suspended because the
+             * strategy is reset) the badge is empty and hidden, so no "no next run" wording is
+             * needed here.
+             */
+            countdown: (remaining: string) => `next sync ${remaining}`,
+            /** Shown instead while that round is actually running (then "0:00 left" would be wrong). */
+            countdownRunning: "syncing…",
             /**
              * Replacement description while the toggle is suspended (strategy = reset,
              * see `Automatics.start()`). Says both *why* it is greyed out and *how* to
              * resume — greying it out without an explanation reads as a broken plugin.
              */
             enabledSuspendedByReset:
-                "Paused: the pull integration strategy is reset, so every automatic sync " +
+                "Paused: the pull integration strategy is reset, so every scheduled sync " +
                 "would discard what was just committed. Switch back to merge or rebase to resume.",
             desktopOnly: "Vault sync needs system git and is only available on desktop.",
             /**
+             * "Open repository sync panel" (added 2026-10-02; on 2026-10-04 it was **merged into the
+             * remote URL row**, so the "Actions" section — which held only this button — and its
+             * heading were removed; that section cost a card plus a heading row).
+             *
+             * The panel already had three entry points (command palette, ribbon icon, status bar
+             * item) — just not the page where you configure it. With the merge, the description
+             * moved onto the button's tooltip (the row cannot hold two descriptions).
+             */
+            openView: "Open repository sync panel",
+            openViewDesc:
+                "The change list, commit, pull and push all live in this panel — the ribbon icon " +
+                "and the status bar item open the same one, as does the \"SyncHub: Open repository " +
+                "sync panel\" command.",
+            /**
              * Notes shown at the top of this page, right under the heading. Both are
              * traps that only bite under a *combination* of settings (reset strategy +
-             * automatic sync on; editing the same file on two devices), so they would go
+             * scheduled sync on; editing the same file on two devices), so they would go
              * unread if buried in a single option's description.
              *
              * The first one is the other half of the suspension logic in
@@ -163,26 +202,14 @@ export const en = {
              */
             notesHeading: "Notes",
             notes: [
-                "With the pull integration strategy set to reset, every automatic sync runs " +
-                    "commit -> pull -> push, and reset discards what was just committed. Automatic " +
+                "With the pull integration strategy set to reset, every scheduled sync runs " +
+                    "commit -> pull -> push, and reset discards what was just committed. Scheduled " +
                     "sync is therefore paused while reset is selected; it switches back on when " +
                     "you return to merge or rebase.",
                 "If a note was just changed on another device while you are editing it here, an " +
-                    "automatic pull may overwrite what you have. Consider turning automatic sync " +
+                    "automatic pull may overwrite what you have. Consider turning scheduled sync " +
                     "off while editing the same file on multiple devices.",
             ],
-            autoCommit: "Auto commit-and-sync interval (minutes)",
-            autoCommitDesc:
-                "Set to 0 to disable. This is not commit-only: each run does " +
-                "commit -> pull -> push, the same chain as the \"Sync now\" command.",
-            autoPush: "Auto push interval (minutes)",
-            autoPushDesc:
-                "Set to 0 to disable. This is an additional push timer; even at 0, " +
-                "pushes still happen as part of the commit-and-sync timer above.",
-            autoPull: "Auto pull interval (minutes)",
-            autoPullDesc:
-                "Set to 0 to disable. This is an additional pull timer; even at 0, " +
-                "pulls still happen as part of the commit-and-sync timer above.",
             commitMessage: "Commit message template",
             commitMessageDesc: "Supports {{date}}, {{hostname}}, {{numFiles}} and {{files}}.",
             strategy: "Pull integration strategy",
@@ -193,6 +220,32 @@ export const en = {
             strategyReset: "Reset (remote wins, local commits dropped)",
             gitPath: "Git executable path",
             gitPathDesc: "Leave empty to use git from PATH. Only needed on Windows when git is not on PATH.",
+            /**
+             * "Where does git come from" (added 2026-10-02).
+             *
+             * A missing git is the **first hurdle** for this feature (especially on Windows, where
+             * portable Node setups rarely ship git), and the plugin does not bundle it. The old copy
+             * only said "put the path in the settings" — it never said where to get one.
+             *
+             * This line sits on its own with a **clickable** link after it (`gitPathLink`, wired up in
+             * `settingsTab`): settings descriptions are plain text, so a bare `git-scm.com` would have
+             * to be copied into a browser by hand.
+             */
+            gitPathDownload: "SyncHub does not bundle git. If you do not have it yet, get it from the official download page:",
+            /** Link text for the download page (the URL itself is not translated). */
+            gitPathLink: "git-scm.com",
+            /**
+             * The "Browse…" next to `gitPath` (added 2026-10-02).
+             *
+             * It opens the system file dialog (`core/desktopFileDialog.ts`) — Obsidian's public
+             * API has no such thing, so it borrows the `electron.remote.dialog` that Obsidian
+             * itself uses. Outside the desktop app the button does nothing, which is why the
+             * text field beside it is **always** there.
+             */
+            gitPathBrowse: "Browse…",
+            gitPathBrowseTitle: "Select the git executable",
+            /** The "All files" filter entry — on non-Windows platforms git has no extension. */
+            gitPathBrowseAllFiles: "All files",
 
             // The .gitignore section: editable in place so users can see what is
             // currently ignored without leaving the settings page.
@@ -211,6 +264,88 @@ export const en = {
             gitignoreSavedNotice: "Saved .gitignore.",
             gitignoreSaveFailed:
                 "Could not save .gitignore — the file on disk still holds the previous content.",
+            /**
+             * "Stop git from tracking images" (2026-10-02).
+             *
+             * The user's words: "I want vault sync to not sync the images in the vault, because
+             * image sync already handles them." It lives in the **.gitignore section of the Vault
+             * sync page**: that is the file it edits, and that page is where you investigate "what
+             * went into git" (the note on the Image sync page points here).
+             *
+             * The description has to lead with *why adding a line to .gitignore is not enough* —
+             * that is the whole reason this action exists, and the easiest thing to get wrong:
+             * .gitignore does nothing for files git already tracks.
+             */
+            untrack: {
+                name: "Stop git from tracking images",
+                desc:
+                    "Adds the \"image folders to sync\" to .gitignore and makes git forget the " +
+                    "images already committed (no local file is touched). A .gitignore line alone " +
+                    "is not enough: it only affects untracked files, while tracked ones keep riding " +
+                    "along with every commit. Sync once when you are done.",
+                action: "Stop tracking",
+                checking: "Checking that these images are all on R2…",
+                needFolders:
+                    "First set specific image folders on the Image sync settings page (not the " +
+                    "whole vault) — \"the whole vault\" would mean git syncs nothing at all.",
+                needCloud:
+                    "Image sync is not configured yet (missing R2 account / bucket / secret). " +
+                    "Once the images leave git, R2 is their only copy — set that up and sync once " +
+                    "first.",
+                notUploaded:
+                    "{count} image(s) have not been synced to R2 yet. Upload them first (press " +
+                    "\"Sync now\") and come back — other devices rely on the cloud copy to restore " +
+                    "their local files after pulling this change.",
+                done: "Added {rules} ignore rule(s) and stopped tracking {files} file(s); press \"Sync now\" to commit this change.",
+                nothing: "These images were not tracked by git, and the ignore rules were already there.",
+                failed: "Could not finish \"stop tracking images\"; the repository may be half-changed — check the .gitignore above.",
+                modal: {
+                    title: "Stop git from tracking images",
+                    intro:
+                        "Image sync already mirrors these to Cloudflare R2, so this steps them out " +
+                        "of git — three things will happen:",
+                    steps: [
+                        "Write the rules into .gitignore (only the missing ones). New images stop entering git.",
+                        "Remove the matching tracked files from git's index (git rm -r --cached): no local file is touched, but the next commit records a deletion.",
+                        "The next sync (commit → pull → push) publishes that change to the remote.",
+                    ],
+                    /**
+                     * Rule shape (added 2026-10-02).
+                     *
+                     * The user asked "can .gitignore only hold folders? Not image formats?" — it can
+                     * hold both, and each shape has its own **precondition**, so they choose here and
+                     * the precondition sits right next to the choice.
+                     */
+                    modeLabel: "What the rules are based on",
+                    modeDesc:
+                        "The two cover different scopes, and picking wrong leaves things out — read the line under the choice first.",
+                    modeFolders: "Folders (the ones image sync mirrors)",
+                    modeExtensions: "Extensions (images anywhere in the vault)",
+                    foldersLabel: "Folders to stop tracking",
+                    foldersNote:
+                        "Exactly the scope image sync mirrors — whatever sits in those folders already " +
+                        "belongs to image sync (the images, and any other file in them).",
+                    extensionsLabel: "Image formats to ignore",
+                    extensionsNote:
+                        "Only images with these formats are ignored; other files still go into git. " +
+                        "The precondition: image sync must cover these images (usually \"the whole " +
+                        "vault\") — otherwise images outside its folders would leave git and R2 at the " +
+                        "same time, with neither system handling them.",
+                    warningHeading: "Two things to know first",
+                    warningOthers:
+                        "When other devices pull this change, git deletes those images from their " +
+                        "working tree — image sync then restores them from R2. So those devices need " +
+                        "image sync configured too, and before doing this the images must already be " +
+                        "on R2 (this step checks that for you).",
+                    warningHistory:
+                        "Images already written into history do not disappear: git simply stops " +
+                        "tracking them, the old objects stay in .git, and the repository does not get " +
+                        "smaller (that would need rewriting history, which this plugin does not do).",
+                    cancel: "Cancel",
+                    confirm: "Continue",
+                },
+            },
+
         },
 
         images: {
@@ -220,34 +355,52 @@ export const en = {
                 "Syncing only ever copies: every round fills the gaps on both sides (download what the " +
                     "cloud has extra, upload what the vault has extra). Nothing is deleted. Deletion is " +
                     "always something you start yourself — see the next item.",
-                "When you delete a managed image on this device, the plugin asks whether the cloud copy " +
+                "When you delete an image inside the folders you sync on this device, the plugin asks whether the cloud copy " +
                     "should go too. Deleting is irreversible (R2 has no recycle bin); choosing \"keep\" " +
                     "records a marker so the next sync will not download it back. That prompt can be changed " +
                     "in the \"Conflicts and deletion\" section.",
-                "Images inside the managed folders are usually tracked by git as well. The two paths are " +
+                "Images inside the folders you sync are usually tracked by git as well. The two paths are " +
                     "independent: git keeps version history, R2 keeps images out of the repository and makes " +
-                    "them linkable from outside. SyncHub will not touch your .gitignore.",
+                    "them linkable from outside. To keep them out of git entirely, use \"Stop tracking\" in " +
+                    "Vault sync → .gitignore: it appends the ignore rules and makes git forget the images " +
+                    "already committed (no local file is touched). SyncHub never edits .gitignore on its own.",
             ],
-            enabled: "Enable image sync",
+            /**
+             * The **master switch**, and it covers more than "automatic sync": the startup round,
+             * updating the cloud copy when you rename, and whether deleting a local image asks
+             * about the cloud copy all belong to it.
+             *
+             * Renamed from "Enable image sync" on 2026-10-02. The old name read like "image sync on/off",
+             * so "interval = 0" looked like "image sync is off" — while a round still runs **at startup**
+             * (the user hit exactly this and asked). The new name says "automatic", and both descriptions
+             * now spell the relationship out.
+             */
+            enabled: "Automatic image sync",
             enabledDesc:
-                "Let SyncHub sync images at startup and in the background. Turning this off stops all automatic " +
-                "syncing; the \"Sync now\" button on this page still works (that is you asking for it).",
-            folders: "Managed image folders",
+                "Lets SyncHub run a round at startup and on the interval below; when you rename or " +
+                "delete an image the cloud copy is handled right away too (renames are re-keyed, " +
+                "deletions follow the policy you picked under \"Conflicts and deletion\"). Turning it " +
+                "off stops all of that background work (it will not even ask about deleting the cloud " +
+                "copy); the manual \"Sync now\" button here still works (that is you asking for it).",
+            folders: "Image folders to sync",
             foldersDesc:
-                "One per line, as vault-relative paths (for example attachments). Only images inside these " +
-                "folders are processed, and deletions only ever happen inside them — this is the single " +
-                "boundary of what the plugin may touch. Use . for the whole vault; **the default is the " +
-                "repository root (whole vault)**: pick one with \"Browse…\" below, or press \"Restore " +
-                "default\" to come back to it.",
-            foldersPlaceholder: "attachments\nassets/images",
+                "Only images inside these folders are processed, and deletions only ever happen inside " +
+                "them — this is the single boundary of what the plugin may touch. Type a vault-relative " +
+                "path below (for example attachments) and press Enter to add it; suggestions appear as " +
+                "you type. \"Browse…\" picks one from the vault, \"Restore default\" goes back to the " +
+                "repository root (whole vault, also written as .). Added folders are listed below, with " +
+                "a trash button to remove each one.",
+            foldersPlaceholder: "attachments",
             foldersEmpty:
                 "No folder specified, so sync will not run. Type one (for example attachments), pick one " +
                 "with \"Browse…\", or press \"Restore default\" to go back to the repository root.",
             foldersBrowse: "Browse…",
             foldersReset: "Restore default",
+            /** The remove button on each added folder row (icon button, tooltip only). */
+            foldersRemove: "Remove",
             folderPickerPlaceholder: "Search folders…",
             folderPickerRoot: "Repository root (whole vault)",
-            folderPickerIncluded: "Already managed",
+            folderPickerIncluded: "Already in scope",
 
             connectionHeading: "Cloudflare R2 connection",
             accountId: "R2 account ID",
@@ -258,14 +411,14 @@ export const en = {
             bucket: "Bucket name",
             bucketDesc:
                 "Which bucket the images go into. Objects outside the prefix are never touched, but a " +
-                "**dedicated bucket** is the least surprising setup.",
+                "dedicated bucket is the least surprising setup.",
             accessKeyId: "Access Key ID",
             accessKeyIdDesc:
                 "Create it under R2's \"Manage API tokens\" with at least object read & write permission. " +
                 "This value is not a secret and will be synced to your other devices.",
             secretKey: "Secret Access Key",
             secretKeyDesc:
-                "The value shown **only once** when the token is created. It is kept on this machine only " +
+                "The value shown only once when the token is created. It is kept on this machine only " +
                 "(system keychain) — never written to data.json, never synced.",
             secretPlaceholder: "Paste the secret…",
             secretSave: "Save secret",
@@ -303,16 +456,35 @@ export const en = {
                 "What happens to the cloud backup when you delete an image from the vault and the cloud " +
                 "still has a copy: \"Ask each time\" opens one prompt; \"Always sync the cloud\" deletes " +
                 "it right away (R2 has no recycle bin — deletion is irreversible); \"Never sync the " +
-                "cloud\" leaves the cloud untouched — but that copy will be **downloaded back** on the " +
+                "cloud\" leaves the cloud untouched — but that copy will be downloaded back on the " +
                 "next sync (mirroring fills in both directions).",
             deleteRemoteAsk: "Ask each time",
             deleteRemoteAlways: "Always sync the cloud",
             deleteRemoteNever: "Never sync the cloud",
-            autoSync: "Automatic sync interval (minutes)",
+            /**
+             * The "Periodic sync" row: **number + unit + toggle** (second revision on 2026-10-02).
+             *
+             * The first revision only reworded "0 disables it"; the user then asked whether the
+             * minimum should be 5. Tightening that lower bound needs something else to express
+             * "off", hence the separate `autoSyncEnabled` field: the number has **no 0 meaning**
+             * and ranges 5–1440.
+             *
+             * Renamed from "Automatic sync interval (minutes)": the unit moved into a span after
+             * the box, and a row that now carries both a toggle and a period cannot be named
+             * "interval".
+             */
+            autoSync: "Periodic sync",
             autoSyncDesc:
-                "0 disables it (the default). Each run fills in whatever is missing on either side (uploads " +
-                "and downloads). Syncing never deletes anything — deletions only happen after you delete a " +
-                "local image and answer the prompt.",
+                "When on, runs a full comparison every N minutes (5–1440) and fills in whatever is " +
+                "missing on either side (uploads and downloads). Turning it off only stops the " +
+                "periodic run — with the switch above on, a round still runs at startup. Note that " +
+                "newly added or edited images are not uploaded right away: they wait for the next " +
+                "round (or \"Sync now\"). Only renames and deletions are handled on the spot. " +
+                "Syncing never deletes anything.",
+            /** Unit suffix after the interval box (`<input> min <toggle>`), same shape as the vault-sync page. */
+            minutesUnit: "min",
+            /** Accessible label for the interval box (it has no visible label of its own). */
+            intervalAria: "Periodic sync interval (minutes, 5–1440)",
 
             compressHeading: "Crop and compression defaults",
             compressQuality: "Default quality",
@@ -338,7 +510,7 @@ export const en = {
             syncing: "Syncing…",
             openManager: "Open the image manager",
             openManagerDesc:
-                "Lists every image in the managed folders by three states — local, cloud, linked — " +
+                "Lists every image in the folders you sync by three states — local, cloud, linked — " +
                 "so you can filter out orphans, not-yet-uploaded and cloud-only images, then sync, " +
                 "compress, rename or delete them in bulk.",
         },
@@ -445,7 +617,7 @@ export const en = {
         mirrorWarnHeading: "Check these two addresses yourself before confirming",
         mirrorWarnChecks:
             "The only evidence for calling this a mirror is that both manifests declare the same id. " +
-            "That proves it is the same plugin — it does **not** prove it is the same code, the same " +
+            "That proves it is the same plugin — it does not prove it is the same code, the same " +
             "author, or that it keeps up with the source: a fork, or anyone re-uploading under the same " +
             "id, passes this check too.",
         mirrorWarnRisk:
@@ -610,6 +782,16 @@ export const en = {
             `SyncHub ${version} downloaded — restart Obsidian to apply it`,
         selfCheckFailed: (reason: string) => `Could not check for SyncHub updates: ${reason}`,
         selfUpdateFailed: "Failed to update SyncHub",
+        /**
+         * Fallback notice. A fallback must be **said out loud** — a user who thinks
+         * they are on the mirror while the code came from the official repo is exactly
+         * the "unknown source" this module avoids.
+         */
+        selfSourceFallback: (from: string) =>
+            `The self-update source ${from} was unavailable; retried against the official repository (github.com/Dyse-Sofqi/SyncHub).`,
+        /** Appended to the status line (the notice disappears; the status line does not). */
+        selfCheckFellBack: (from: string) =>
+            `(${from} was unavailable, so the official repository was used)`,
     },
 
     sync: {
@@ -621,7 +803,23 @@ export const en = {
         statusPushing: "Pushing…",
         statusCommitting: "Committing…",
         notARepo: "This vault is not a git repository yet.",
-        gitNotFound: "Could not find the git executable. Set its path in settings.",
+        /**
+         * The message when git cannot be found (filled in 2026-10-02).
+         *
+         * It used to say only "set its path in settings" — which tells you how to point at git
+         * but never where to get one, the one thing a user without git actually needs. The
+         * message shows up in a `Notice` (plain text, no links), so the URL is spelled out.
+         */
+        gitNotFound: "Could not find the git executable. Install git first (git-scm.com), or put its full path in the settings.",
+        /**
+         * The panel's first-paint line while repository status is read.
+         *
+         * Added 2026-10-01 with the deferred-first-render work: Obsidian awaits `onOpen()`
+         * while restoring the layout, and reading status there costs 10 git subprocesses
+         * (see SourceControlView). Without it the panel sits empty for a few hundred ms
+         * and reads as broken.
+         */
+        loadingRepo: "Reading repository status…",
         gitAuthFailed:
             "Remote authentication failed. Check that the access token for this platform is valid and has the required scope.",
         /**
@@ -630,6 +828,29 @@ export const en = {
          */
         gitTimeout:
             "git produced no output for a long time, so this operation was aborted. Check your network (or proxy) and try again. If it keeps happening, the remote repository may be very large or may require credentials — for the latter, enter an access token in the settings.",
+        /**
+         * Cannot reach the remote (added 2026-10-02).
+         *
+         * The user's message was `getaddrinfo() thread failed to start` — libcurl could not even
+         * start its DNS resolver thread. Shown raw, it leaves you guessing between network, proxy,
+         * token and a broken plugin; this points at the network and the proxy (not the token, and
+         * not reinstalling anything).
+         */
+        gitNetworkFailed:
+            "Cannot reach the remote (name resolution or connection failed). Check your network and " +
+            "proxy — if the proxy comes from environment variables (HTTP_PROXY / HTTPS_PROXY), " +
+            "restart Obsidian once so the plugin picks them up; the connection test shows which step " +
+            "fails.",
+        /**
+         * Shown once when scheduled sync has failed several times **in a row** (2026-10-02).
+         *
+         * A single failure stays in the log (it usually heals next round), but a persistent one must
+         * not stay silent — nobody reads the console every day. `{count}` is the streak, `{reason}`
+         * is the classified cause. The trailing "it will retry" matters: without it the notice reads
+         * as "automatic sync is dead".
+         */
+        autoSyncFailedMany: (count: number, reason: string) =>
+            `Scheduled sync has failed ${count} times in a row: ${reason} (it will retry next round)`,
         /**
          * Deliberately separate from the line above: the token is fine, the
          * problem is the username the plugin sent.
@@ -647,7 +868,7 @@ export const en = {
         // means there is nothing new locally; you may still be behind.
         pushUpToDate: "Nothing to push (no new local commits).",
         pushNeedsCommit: (count: number) =>
-            `Push only sends **committed** content, and you have ${count} uncommitted change(s). ` +
+            `Push only sends committed content, and you have ${count} uncommitted change(s). ` +
             `Use "Commit" (or "Sync now") first.`,
         pushDonePending: (count: number) =>
             `Pushed to the remote. Note: ${count} change(s) are still uncommitted — pushing does not commit them.`,
@@ -690,11 +911,26 @@ export const en = {
         // things (local vs remote) and the buttons are only one word each.
         actSyncHint: "Commit → pull → push, in one chain",
         actCommitHint: "Commit all changes to the local repository (no push)",
-        actPushHint: "Pushes **committed** content only; it never commits for you",
+        actPushHint: "Pushes committed content only; it never commits for you",
+        /**
+         * The "nested repository" row (2026-10-04).
+         *
+         * The user's words: "why are all three entries in Changes folder paths, with no concrete
+         * changes, yet counted as changes?" They were plugin folders developed in place inside the
+         * vault, each carrying its own `.git`, so the vault recorded a pointer to another repository.
+         * These three strings answer: what it is, why it cannot go away, and what to do about it.
+         */
+        nestedRepoBadge: "nested repo",
+        nestedRepoHint:
+            "Rows marked \"nested repo\" are plugins/themes that carry their own .git (such as the " +
+            "ones you develop inside the vault): vault sync only records a pointer to them, never " +
+            "their file contents — so they cannot be staged and have no file-level diff. Use the " +
+            "button at the end of the row to stop tracking one (no local file is touched).",
+        nestedRepoUntrack: "Stop tracking this nested repository (remove from the index + add to .gitignore; no local file is touched)",
+        nestedRepoUntracked: "No longer tracking it; the directory and everything in it are untouched, and its own git still works.",
         actCommit: "Commit",
         actPull: "Pull",
         actPush: "Push",
-        actEditRemote: "Edit remote…",
         branchLabel: "Branch",
 
         // Sidebar detail view (see the zh-CN locale for why these exist).
@@ -720,11 +956,39 @@ export const en = {
         historyFailed: "Could not read the commit history.",
         commitOnRemote: "View this commit on the remote",
         actDiffCommit: "View this commit's changes",
-        remoteLabel: "Remote",
+        /**
+         * The panel's top row: the remote address (renamed from "Remote" on 2026-10-04 —
+         * that field is now an editable address input, and "Remote" alone does not say so).
+         */
+        remoteLabel: "Remote URL",
+        /**
+         * The change list's **format filter** (2026-10-04).
+         *
+         * The user's words: "I want the change list to offer filtering by file format, especially
+         * markdown, because note sync is mostly about syncing md documents." Options come from the
+         * formats actually present in this change set (see `changeFilterOptions`).
+         */
+        filterLabel: "Format",
+        filterAll: (count: number) => `All (${count})`,
+        filterMarkdown: (count: number) => `Markdown (${count})`,
+        filterNoExtension: "No extension",
+        /** Nothing matches the filter (e.g. no note changes this round). */
+        filterEmpty: "No changes with this format.",
         detachedHeadLabel: "Detached HEAD (not on any branch)",
         aheadOf: (count: number) => `${count} commit(s) ahead of the remote`,
         behindOf: (count: number) => `${count} commit(s) behind the remote`,
         inSyncWithRemote: "In sync with the remote",
+        /**
+         * "The committed part matches the remote, but the working tree still has uncommitted
+         * changes" (2026-10-04).
+         *
+         * The user's words: "when there are new changes the text still says 'in sync with the
+         * remote', only the colour differs — the wording is not accurate." `ahead = behind = 0`
+         * only means the **committed** part matches; the working tree may still hold changes,
+         * and saying "in sync" then makes people think they can shut down. This variant is
+         * **not** highlighted green (green follows `isFullyInSync`).
+         */
+        inSyncWithPendingChanges: "In sync with the remote, but uncommitted changes remain",
         noUpstreamHint:
             "This branch does not track a remote branch yet; pushing will set it up.",
         conflictHint:
@@ -745,6 +1009,21 @@ export const en = {
             renamed: "Contents unchanged; the file was only renamed.",
             tooLarge: "File is too large; content diff not shown.",
             truncated: "Too much content — only the beginning is shown.",
+            /**
+             * When the diff has **no target** (since 2026-10-04 the diff is a workspace tab,
+             * which Obsidian writes into `workspace.json`; if that state carries no target the
+             * tab is still open but has nothing to show).
+             */
+            noTarget: "This tab has no diff to show.",
+            /**
+             * View modes (2026-10-04): unified / side-by-side (like VS Code).
+             * Side-by-side puts deletions on the left and additions on the right, pairing them
+             * row by row — so when a change deletes two lines and adds three, the extra row has
+             * content only on the right and is obvious at a glance.
+             */
+            modeLabel: "View",
+            modeUnified: "Unified",
+            modeSideBySide: "Side by side",
             noNewline: "(no newline at end of file)",
             stats: (additions: number, deletions: number) => `+${additions} −${deletions}`,
         },
@@ -834,7 +1113,7 @@ export const en = {
             remoteFailed: 'Not configured — set it with the "SyncHub: Edit remote URL" command',
             platformOk: (host: string) => `${host}, access token configured`,
             platformNoToken: (host: string) =>
-                `${host}, **no access token configured** — public repositories will work, private ones will fail`,
+                `${host}, no access token configured — public repositories will work, private ones will fail`,
             platformUnknown:
                 "Host not recognised, so no token will be injected (private repositories fall back to the OS credential helper)",
             accessOk: (count: string) => `Reachable, read ${count} branch(es)`,
@@ -882,9 +1161,9 @@ export const en = {
             noPublicBase:
                 "No public base URL is configured, so a link cannot be built. Set a custom domain or r2.dev " +
                 "domain under Image sync settings.",
-            notInScope: "This image is not inside a managed image folder, so SyncHub will not sync it.",
+            notInScope: "This image is not inside a folder you sync, so SyncHub will not sync it.",
             notConfigured:
-                "Image sync is not configured yet. Fill in the R2 details and the managed image folders on " +
+                "Image sync is not configured yet. Fill in the R2 details and the image folders to sync on " +
                 "the Image sync settings page first.",
             editorOpenFailed: "Could not open the image editor",
             singleUploadFailed: "Uploading this image failed (the local save was not affected)",
@@ -894,7 +1173,7 @@ export const en = {
             remoteKept: (count: number) =>
                 `Kept ${count} cloud backup(s). The local copies are gone and will not be synced back.`,
             renameFailed: "Could not move the cloud copy to the new name",
-            deleteOutOfScope: "Not inside a managed image folder; SyncHub will not touch it",
+            deleteOutOfScope: "Not inside a folder you sync; SyncHub will not touch it",
         },
 
         deleteRemote: {
@@ -909,7 +1188,7 @@ export const en = {
             warningHeading: "Cloud deletions cannot be undone",
             warning:
                 "The local copies can most likely still be restored from the vault's trash, but the cloud " +
-                "has **no trash** — once deleted they are really gone (unless you have a copy elsewhere). " +
+                "has no trash — once deleted they are really gone (unless you have a copy elsewhere). " +
                 "Choosing \"Keep cloud backup\" leaves the cloud copy in place; it just will not be synced " +
                 "back to this device.",
             keep: "Keep cloud backup",
@@ -1031,7 +1310,17 @@ export const en = {
             clearSelection: "Clear selection",
             selectedCount: (count: number) => `${count} selected`,
             shown: (visible: number, total: number) => `Showing ${visible} / ${total}`,
-            empty: "No images in the managed folders.",
+            /**
+             * The rescan button (2026-10-01). Labelled "rescan" rather than
+             * "refresh" because it really re-reads the vault, re-lists the
+             * bucket and re-scans references (seconds, not milliseconds).
+             */
+            refreshList: "Rescan",
+            refreshHint:
+                "Re-reads local files and the cloud bucket (use it after changing images outside Obsidian, or right after a sync)",
+            /** Shift+click is invisible; without this line nobody finds it. */
+            selectRangeHint: "Shift + click selects a range",
+            empty: "No images in the folders you sync.",
             emptyFiltered: "No images match the current filters.",
             capped: (hidden: number) => `${hidden} more not shown — narrow the filters to see them.`,
 
@@ -1061,8 +1350,8 @@ export const en = {
             actionDeleteBoth: "Delete local + cloud",
             noSelection: "Select the images you want to act on first.",
             compressHint: (params: string) =>
-                `Compression uses the settings page values (quality / max edge = ${params}), **keeps the ` +
-                `original format**, and only writes back when the result is smaller.`,
+                `Compression uses the settings page values (quality / max edge = ${params}), keeps the ` +
+                `original format, and only writes back when the result is smaller.`,
 
             syncing: "Syncing the selected images…",
             syncDone: (uploaded: number, downloaded: number, failed: number) =>
@@ -1123,7 +1412,7 @@ export const en = {
             confirmLocalTitle: (count: number) => `Delete the local copies of ${count} image(s)?`,
             confirmLocalDesc:
                 "The local copies go to the trash (per your \"Settings → Files and links → Deleted files\" choice). " +
-                "The cloud copies stay — but they will **not be synced back to this device**: SyncHub records that " +
+                "The cloud copies stay — but they will not be synced back to this device: SyncHub records that " +
                 "you deleted them, otherwise the next sync would download them again.",
             confirmLocalOk: (count: number) => `Delete ${count} local copy/copies`,
 
@@ -1132,7 +1421,7 @@ export const en = {
                 "The local copies go to the trash and the cloud copies are really deleted. After this, neither side has them.",
             confirmBothWarningHeading: "Cloud deletion cannot be undone",
             confirmBothWarning:
-                "The local copies can most likely be restored from the trash, but R2 has **no trash** — once " +
+                "The local copies can most likely be restored from the trash, but R2 has no trash — once " +
                 "deleted they are gone (unless you have another copy elsewhere). Also, any links to them in your " +
                 "notes will become broken links.",
             confirmBothOk: (count: number) => `Delete ${count} (including cloud)`,
@@ -1143,7 +1432,7 @@ export const en = {
             notConfigured: (missing: string) =>
                 `Image sync is not configured yet; missing: ${missing}. Fill it in on the Image sync settings page.`,
             noFolders:
-                "No managed image folder is configured. Add one (for example attachments) on the Image sync settings page.",
+                "No folders to sync are configured. Add one (for example attachments) on the Image sync settings page.",
             authFailed:
                 "R2 rejected the request: the Access Key ID or Secret Access Key is wrong, or the token has no " +
                 "permission for this bucket.",
@@ -1155,6 +1444,9 @@ export const en = {
                 `Uploading ${path} failed (HTTP ${status}): ${detail}`,
             downloadFailed: (path: string, status: number, detail: string) =>
                 `Downloading ${path} failed (HTTP ${status}): ${detail}`,
+            copyFailed: (path: string, status: number, detail: string) =>
+                `Moving the cloud copy to ${path} failed (HTTP ${status}): ${detail}. ` +
+                `The local rename already succeeded; the next sync will upload it.`,
             deleteFailed: (path: string, status: number, detail: string) =>
                 `Deleting ${path} in the cloud failed (HTTP ${status}): ${detail}`,
             network: (detail: string) =>

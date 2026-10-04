@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { changeRows } from "../../src/features/sync/changeRows";
+import {
+    changeFilterOptions,
+    changeRows,
+    extensionOf,
+    isMarkdown,
+    matchesFilter,
+} from "../../src/features/sync/changeRows";
 import type { FileChange, RepoStatus } from "../../src/features/sync/types";
 
 /**
@@ -141,5 +147,84 @@ describe("changeRows", () => {
         );
 
         expect(rows).toHaveLength(3);
+    });
+});
+
+/**
+ * 格式筛选（2026-10-04 用户要求「更改列表提供修改文件的格式筛选，尤其是 md」）。
+ *
+ * 这一组是**纯函数**的用例：面板那边只负责把选项画出来并把选中的值传回来。
+ */
+describe("扩展名与筛选", () => {
+    const labels = {
+        all: (count: number) => `全部 (${count})`,
+        markdown: (count: number) => `Markdown (${count})`,
+        noExtension: "无扩展名",
+    };
+
+    function row(path: string): { path: string; status: "modified"; staged: boolean } {
+        return { path, status: "modified", staged: false };
+    }
+
+    it("extensionOf：小写、去点；隐藏文件不算扩展名", () => {
+        expect(extensionOf("notes/A.md")).toBe("md");
+        expect(extensionOf("attachments/图.PNG")).toBe("png");
+        expect(extensionOf("a/b/c.canvas")).toBe("canvas");
+        // `.gitignore` 的「扩展名」不是 gitignore —— 开头的点不算
+        expect(extensionOf(".gitignore")).toBe("");
+        expect(extensionOf("notes/README")).toBe("");
+        // 目录里的点不该被当成分隔符
+        expect(extensionOf("notes/2026.10/daily")).toBe("");
+    });
+
+    it("isMarkdown：md 与 markdown 都算，别的都不算", () => {
+        expect(isMarkdown(row("a.md"))).toBe(true);
+        expect(isMarkdown(row("a.MARKDOWN"))).toBe(true);
+        expect(isMarkdown(row("a.canvas"))).toBe(false);
+        expect(isMarkdown(row("a.mdx"))).toBe(false);
+    });
+
+    it("matchesFilter：all 恒真，md 只挑笔记，扩展名精确匹配", () => {
+        expect(matchesFilter(row("a.png"), "all")).toBe(true);
+        expect(matchesFilter(row("a.md"), "md")).toBe(true);
+        expect(matchesFilter(row("a.png"), "md")).toBe(false);
+        expect(matchesFilter(row("a.png"), "png")).toBe(true);
+        expect(matchesFilter(row("a.PNG"), "png")).toBe(true);
+        expect(matchesFilter(row("a.md"), "png")).toBe(false);
+    });
+
+    it("选项只列真实出现的格式，.md 并成一条，其余按数量倒序", () => {
+        const options = changeFilterOptions(
+            [
+                row("笔记.md"),
+                row("另一篇.markdown"),
+                row("图.png"),
+                row("图2.png"),
+                row("图3.png"),
+                row("data.json"),
+                row("LICENSE"),
+            ],
+            labels
+        );
+
+        expect(options).toEqual([
+            { value: "all", label: "全部 (7)" },
+            { value: "md", label: "Markdown (2)" },
+            { value: "png", label: ".png (3)" },
+            { value: "json", label: ".json (1)" },
+            { value: "no-extension", label: "无扩展名 (1)" },
+        ]);
+    });
+
+    it("没有笔记时**不出现** Markdown 选项（不给筛出空结果的入口）", () => {
+        const options = changeFilterOptions([row("图.png")], labels);
+
+        expect(options.map((option) => option.value)).toEqual(["all", "png"]);
+    });
+
+    it("数量相同按扩展名字母序 —— 顺序要稳定，不能随 Map 插入顺序抖", () => {
+        const options = changeFilterOptions([row("a.png"), row("b.json")], labels);
+
+        expect(options.map((option) => option.label)).toEqual(["全部 (2)", ".json (1)", ".png (1)"]);
     });
 });

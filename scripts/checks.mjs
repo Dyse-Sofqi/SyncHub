@@ -14,6 +14,9 @@
  * 3. **未使用的 i18n 键** —— 死键是信号：通常意味着漏接的本地化或没接线的功能。
  *    实测 4 个死键背后都是真缺口（撤销后无反馈、进度文案闲置、来源没显示…）。
  * 4. **CSS 类覆盖** —— 用了但没定义的类会静默丢样式；定义了没用的类是残留。
+ * 5. **移动端安全** —— 静态导入图里不能出现依赖 Node 的模块。
+ * 6. **设置项无人读取** —— 能改、能存，但功能代码从不读的字段。
+ * 7. **locale 里的 Markdown 加粗** —— 界面不渲染 Markdown，`**` 会原样显示成星号。
  */
 
 import fs from "node:fs";
@@ -202,10 +205,6 @@ function checkHardcodedCjk() {
      * 会的话就该进 locale；不会的话说明理由。
      */
     const ALLOWED = new Map([
-        [
-            "src/core/i18n/index.ts",
-            "语言下拉的选项标签 —— 本就该用各自的母语书写（English 同理）",
-        ],
         [
             "src/host/giteeHost.ts",
             "用于匹配 Gitee 限流响应体的检测词，不是给用户看的文案",
@@ -629,6 +628,126 @@ function checkUnreadSettings() {
     return { name: "设置项无人读取", detail: `${unread.length} 个未接线` };
 }
 
+// ── 7. locale 里的 Markdown 加粗 ───────────────────────────────────────────
+
+/**
+ * 取出源码里所有**字符串字面量**（注释里的不算），带行号。
+ *
+ * 逐字符扫：行注释与块注释直接丢弃，引号里的内容原样收下。之所以不用
+ * `stripComments` + 正则，是因为这里要的结果必须与「用户实际会看到什么」
+ * 一致 —— 注释里的 `**` 是写给读代码的人的强调，不是界面上会出现的星号。
+ */
+function stringLiterals(source) {
+    const out = [];
+    let i = 0;
+    let line = 1;
+    let state = "code";
+
+    while (i < source.length) {
+        const char = source[i];
+        const next = source[i + 1];
+
+        if (char === "\n") line++;
+
+        if (state === "code") {
+            if (char === "/" && next === "/") {
+                state = "line";
+                i += 2;
+                continue;
+            }
+            if (char === "/" && next === "*") {
+                state = "block";
+                i += 2;
+                continue;
+            }
+            if (char === '"' || char === "'" || char === "`") {
+                state = char;
+                out.push({ text: "", line });
+                i++;
+                continue;
+            }
+            i++;
+            continue;
+        }
+
+        if (state === "line") {
+            if (char === "\n") state = "code";
+            i++;
+            continue;
+        }
+
+        if (state === "block") {
+            if (char === "*" && next === "/") {
+                state = "code";
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+
+        // 字符串内部
+        if (char === "\\") {
+            out[out.length - 1].text += source.slice(i, i + 2);
+            if (next === "\n") line++;
+            i += 2;
+            continue;
+        }
+        if (char === state) {
+            state = "code";
+            i++;
+            continue;
+        }
+        out[out.length - 1].text += char;
+        i++;
+    }
+
+    return out;
+}
+
+/**
+ * 界面**不渲染 Markdown**：`Setting.setDesc`、`Notice`、tooltip、以及
+ * `.gitignore` 模板的正文都是纯文本，所以文案里写的加粗标记会原样显示成
+ * 星号（用户实测看到的就是这个，原话：「设置项里的说明文字除非能正常渲染
+ * md 格式，否则不要使用加粗 `**` 格式」）。
+ *
+ * 例外：`**` 作为**语法**合法出现的地方（gitignore 模板里以两个星号开头的
+ * 路径通配）可以留在 ALLOWED 里 —— 加进来必须写清它为什么不是加粗。
+ */
+function checkLocaleBold() {
+    const localeDir = path.join(SRC, "core/i18n/locales");
+    if (!fs.existsSync(localeDir)) return { name: "locale 加粗标记", skipped: true };
+
+    /** 允许保留的片段，附理由。目前为空 —— 有的话必须说明它不是加粗。 */
+    const ALLOWED = [];
+
+    const findings = [];
+    const allowed = [];
+    for (const file of walk(localeDir, ".ts")) {
+        for (const literal of stringLiterals(read(file))) {
+            if (!literal.text.includes("**")) continue;
+            const entry = `${relative(file)}:${literal.line}  ${literal.text.trim().slice(0, 70)}`;
+            const exempt = ALLOWED.find((rule) => rule.match(literal.text));
+            if (exempt) allowed.push(`${entry}  ← ${exempt.why}`);
+            else findings.push(entry);
+        }
+    }
+
+    if (findings.length > 0) {
+        failures.push(
+            `locale 里有 ${findings.length} 处 Markdown 加粗标记（界面是纯文本，会原样显示成星号）：\n      ` +
+                findings.join("\n      ") +
+                `\n      去掉 \`**\`（要强调就换措辞），或者确认那一处真的会按 Markdown 渲染。` +
+                `\n      确实该保留的（例如 gitignore 模板里两个星号开头的路径通配），加进 ALLOWED 并写清理由。`
+        );
+    }
+
+    return {
+        name: "locale 加粗标记",
+        detail: `${findings.length} 处待处理，${allowed.length} 处已豁免`,
+    };
+}
+
 // ── 跑 ──────────────────────────────────────────────────────────────────────
 
 const results = [
@@ -638,6 +757,7 @@ const results = [
     checkCssClasses(),
     checkMobileSafety(),
     checkUnreadSettings(),
+    checkLocaleBold(),
 ];
 
 console.log("SyncHub 项目自查\n");

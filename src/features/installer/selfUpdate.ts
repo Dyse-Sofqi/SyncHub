@@ -1,7 +1,7 @@
 import type { LocaleStrings } from "../../core/i18n";
 import { logger } from "../../core/logger";
 import type { ObsyncSettings } from "../../core/settings";
-import { parseRepoRef } from "../../host/repoRef";
+import { isSameRepo, parseRepoRef, repoWebUrl } from "../../host/repoRef";
 import type { RepoRef } from "../../host/types";
 import type { SelfUpdateCheck } from "./types";
 
@@ -29,18 +29,51 @@ import type { SelfUpdateCheck } from "./types";
  */
 
 /**
- * SyncHub 自己的仓库坐标。
+ * SyncHub 自己的**官方**仓库坐标（GitHub）。
  *
  * 写死在代码里，不从 manifest / authorUrl 推导 —— manifest 没有 repo 字段，
  * 而 `authorUrl` 是作者主页。也正因如此，`updateSelf` 在写盘前必须校验远端
  * manifest 的 id 是不是 `ob-sync`：这个常量万一指错了地方，拦住远比
  * 按错的 id 去解析目录、覆盖掉别的插件强。
+ *
+ * **它不再是默认来源**（2026-10-01）：默认走下面的 Gitee 镜像，而这里仍然是
+ * 「显式指定」时的一个合法地址（把设置里那一格改成它的地址即可）。
  */
 export const SELF_REPO: RepoRef = {
     host: "github",
     owner: "Dyse-Sofqi",
     repo: "SyncHub",
 };
+
+/**
+ * 指定的 **Gitee 镜像** —— 自身更新的默认来源（2026-10-01）。
+ *
+ * ## 为什么默认换成它
+ *
+ * `github.com` 在目标用户的网络里是**时段性阻断**的（见下面 `resolveSelfRepo`
+ * 的说明与 README）：默认走官方，意味着「检查更新」这个动作本身经常失败，
+ * 而失败的样子是「一直报错 / 一直转圈」，用户只能自己去翻设置页才知道有个来源
+ * 可以填。把默认改成镜像之后，开箱即用的那条路是通的。
+ *
+ * ## 它不是「镜像发现」那套
+ *
+ * 那套是自动探测 + 只提议 + 要确认（给用户装的插件用）；这里是**固定的默认来源**。
+ * 两者互不影响：`discoverGiteeMirrors` 关着也照样从这里更新自己。
+ */
+export const SELF_MIRROR: RepoRef = {
+    host: "gitee",
+    owner: "sofqi",
+    repo: "SyncHub",
+};
+
+/**
+ * 设置里「自身更新来源」的**默认值** = 上面那个镜像的完整地址。
+ *
+ * 用字符串是因为它就是输入框里那个值（人可读、可改、可以填成别的地址）。
+ * 它与 `SELF_MIRROR` 必须指向同一个仓库 —— `selfUpdate.test.ts` 里有一条
+ * 断言盯着这件事（两个常量漂开的话，默认值会变成一句好看的假话）。
+ */
+export const DEFAULT_SELF_SOURCE = "https://gitee.com/sofqi/SyncHub";
 
 /**
  * 我们自己的插件 id —— 必须与 `manifest.json` 的 `id` 一致。
@@ -72,21 +105,58 @@ export const SELF_PLUGIN_ID = "ob-sync";
  *
  * `source` 是设置里的「自身更新来源」（`settings.installer.selfUpdateSource`）：
  *
- * - **空串 → 官方 `SELF_REPO`**（默认，也是唯一「永远可用」的那个）；
- * - **填了 → 解析成 `RepoRef`**。写完整地址（`https://gitee.com/sofqi/SyncHub`）或
- *   `owner/repo` 简写都行；简写按 GitHub 解释，要 Gitee 就写全。
+ * - **空串（或全空白）→ `SELF_MIRROR`**，也就是那个默认的 Gitee 镜像。
+ *   空串表示「用默认」，而不是「用官方」—— 于是老 `data.json` 里那个空值
+ *   （当年空串表示官方）也会跟着走到镜像上，见 `normalizeSettings` 里的说明。
+ * - **填了 → 解析成 `RepoRef`**。写完整地址（`https://gitee.com/sofqi/SyncHub`、
+ *   `https://github.com/Dyse-Sofqi/SyncHub`）或 `owner/repo` 简写都行；
+ *   简写按 GitHub 解释，要 Gitee 就写全。
  *
  * 与「镜像发现」的区别很重要：那套是**自动探测 + 只提议、要用户确认**，每次都要
  * 探一次；这里是用户**写死的固定来源**，填一次就一直用它 —— 所以它不需要探测，
  * 也不该被 `discoverGiteeMirrors` 那个开关影响。
  *
- * 地址非法时 `parseRepoRef` 会抛 `InstallerError`，由调用方按错误路径报给用户。
- * **刻意不静默回退到官方**：那会让用户以为自己在走镜像，实际走的是官方（或反过来）。
+ * 地址非法时 `parseRepoRef` 会抛 `InstallerError`，由调用方按错误路径报给用户 ——
+ * **非法地址不静默改道**：那会让用户以为在用自己填的地址，实际用的是别的。
+ * （「这个来源**连不上**」是另一回事：那种情况会回退到官方仓库，但**每次都会说出来**，
+ * 见 `selfRepoAttempts` 与 `installer.selfSourceFallback`。）
  */
 export function resolveSelfRepo(source: string): RepoRef {
     const trimmed = source.trim();
-    if (trimmed.length === 0) return SELF_REPO;
+    if (trimmed.length === 0) return SELF_MIRROR;
     return parseRepoRef(trimmed, "github");
+}
+
+/**
+ * 自身更新的**尝试顺序**：设置里那个来源 → 官方仓库（2026-10-01）。
+ *
+ * ## 为什么要有回退
+ *
+ * 默认来源是 Gitee 镜像（国内可直连），但镜像会挂、会被匿名配额限流、也可能
+ * 落后到根本没有那次 release。没有回退时这些情况就是一条死路 —— 而官方仓库
+ * 还能用，用户却得自己发现并跑去改设置页。
+ *
+ * ## 为什么不静默回退
+ *
+ * 回退必须**说出来**（提示文案见 `installer.selfSourceFallback`）：用户以为在走镜像、
+ * 实际是从官方拉的，正是这个模块一直避免的「来源不明」。所以调用方每回退一次
+ * 就提示一次，并且提示里带上失败的那个地址。
+ *
+ * 配的那个来源**本来就是官方**时只有一次尝试 —— 回退到自己没有意义，还会白打一遍请求。
+ */
+export function selfRepoAttempts(configured: RepoRef): RepoRef[] {
+    if (isSameRepo(configured, SELF_REPO)) return [SELF_REPO];
+    return [configured, SELF_REPO];
+}
+
+/**
+ * 提示文案里怎么称呼一个来源：`gitee.com/sofqi/SyncHub`。
+ *
+ * 去掉 scheme 是为了在提示条里读起来像「一个地址」而不是「一个链接」
+ * （提示条里的文字不可点，写成 `https://…` 反而像漏了样式）。
+ */
+export function selfSourceLabel(ref: RepoRef): string {
+    return repoWebUrl(ref).replace(/^https?:\/\//, "");
 }
 
 /** 上次会话下载了新版本但还没重启时，记录的是哪个版本（空串 = 没有）。 */
@@ -138,8 +208,19 @@ export interface SelfStateInput {
  * 优先级：忙碌 > 待重启 > 未检查 > 出错 > 有更新 > 已是最新。
  * 「待重启」压在检查结果之上是刻意的：它讲的是**现在跑的**不是最新的那份，
  * 远端有没有更新的都要等重启之后再说。
+ *
+ * ## 回退过的来源要**跟在后面**（2026-10-01）
+ *
+ * 提示条几秒就没了，而「这次是从哪儿查的」是用户判断这条结论可不可信的依据 ——
+ * 所以它拼在状态行末尾，无论这一行是「有更新」「已是最新」还是「出错」。
+ * 只拼一次，且不改上面那套优先级。
  */
 export function describeSelfState(input: SelfStateInput, t: LocaleStrings): string {
+    return withFallbackNote(baseSelfState(input, t), input.check, t);
+}
+
+/** 状态行的主体（不含「回退过」那条附注）。 */
+function baseSelfState(input: SelfStateInput, t: LocaleStrings): string {
     if (input.busy === "checking") return t.installer.checking;
     if (input.busy === "updating") return t.installer.selfUpdating;
 
@@ -157,4 +238,14 @@ export function describeSelfState(input: SelfStateInput, t: LocaleStrings): stri
         );
     }
     return t.installer.selfUpToDate(input.currentVersion);
+}
+
+/** 把「回退过」附在状态行末尾（没有回退过时原样返回）。 */
+function withFallbackNote(
+    message: string,
+    check: SelfUpdateCheck | undefined,
+    t: LocaleStrings
+): string {
+    if (!check?.fellBackFrom) return message;
+    return `${message} ${t.installer.selfCheckFellBack(check.fellBackFrom)}`;
 }

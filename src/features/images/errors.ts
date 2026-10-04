@@ -36,6 +36,8 @@ export type ImageSyncErrorKind =
     | "uploadFailed"
     /** 下载失败。 */
     | "downloadFailed"
+    /** 服务端拷贝失败（改名时把云端那一份搬到新键）。 */
+    | "copyFailed"
     /** 删除远端对象失败。 */
     | "deleteFailed"
     /** 传输层失败（连不上、超时）。 */
@@ -56,6 +58,7 @@ export interface ImageSyncErrorDetail {
     listFailed: { status: number; detail: string };
     uploadFailed: { path: string; status: number; detail: string };
     downloadFailed: { path: string; status: number; detail: string };
+    copyFailed: { path: string; status: number; detail: string };
     deleteFailed: { path: string; status: number; detail: string };
     network: { detail: string };
     localReadFailed: { path: string; detail: string };
@@ -128,6 +131,10 @@ export function describeImageSyncError(
         case "downloadFailed": {
             const d = detail as ImageSyncErrorDetail["downloadFailed"];
             return e.downloadFailed(d.path, d.status, d.detail);
+        }
+        case "copyFailed": {
+            const d = detail as ImageSyncErrorDetail["copyFailed"];
+            return e.copyFailed(d.path, d.status, d.detail);
         }
         case "deleteFailed": {
             const d = detail as ImageSyncErrorDetail["deleteFailed"];

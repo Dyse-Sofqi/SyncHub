@@ -127,6 +127,20 @@ describe("桌面端启动", () => {
         expect(fake.vaultEvents.map((entry) => entry.event)).toContain("delete");
     });
 
+    /**
+     * 改名必须跟着搬云端那一份，否则下一轮同步会「重传新路径 + 把旧路径下载
+     * 回来」—— 库里出现两批同样的图片（2026-10-01 用户报的问题）。
+     *
+     * **文件夹改名也走这一个事件**：Obsidian 的适配器会为文件夹里的每个文件
+     * 各发一次 `rename`，所以这里挂一次就够了。
+     */
+    it("挂在 vault 的 rename 事件上（改名后云端那一份要跟着换键）", async () => {
+        const plugin = createPlugin(fake);
+        await plugin.onload();
+
+        expect(fake.vaultEvents.map((entry) => entry.event)).toContain("rename");
+    });
+
     it("加载时清掉「待重启」标记（否则重启完还会看到「重启后生效」）", async () => {
         const plugin = createPlugin(fake);
         setLoadedData(plugin, { installer: { pendingRestartVersion: "0.2.0" } });

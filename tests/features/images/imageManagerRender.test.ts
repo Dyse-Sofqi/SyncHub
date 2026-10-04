@@ -265,6 +265,8 @@ describe("ImageManagerView 渲染", () => {
                 t.presetLarge,
                 t.presetReset,
                 t.selectAll,
+                t.selectRangeHint,
+                t.refreshList,
                 t.actionSync,
                 t.actionCompress,
                 t.actionRename,
@@ -422,6 +424,220 @@ describe("行内的单文件重命名入口", () => {
         expect(textsOf(view.contentEl as unknown as ShimElement)).toContain(
             zhCN.images.manager.selectedCount(0)
         );
+    });
+});
+
+/**
+ * 列表的两个操作入口（2026-10-01）：**重新扫描**与 **shift+点击选一段**。
+ *
+ * ## 为什么单独钉住
+ *
+ * - 「重新扫描」是这个面板唯一能把**外面发生的变化**读进来的入口。少了它，
+ *   用户在文件管理器里加了图、或另一台设备刚同步完，就只能关掉标签页再打开
+ *   （那会丢掉筛选与选择）。所以这里验的是**它真的重扫**（新文件会出现、
+ *   云端会被重新列举），而不只是「按钮画出来了」。
+ * - shift+点击是个**看不出来**的手势：算错范围、把用户的选择吃掉、锚点漂移，
+ *   在界面上都只表现为「选中的是另一批」，而紧接着就是删除按钮 ——
+ *   所以每条语义各钉一条：替换、可反向、锚点不漂、算不出范围时不乱猜。
+ */
+describe("列表的重新扫描与 shift 多选", () => {
+    type Triggerable = { trigger(name: string, ...args: unknown[]): void };
+
+    const t = zhCN.images.manager;
+
+    function nodesOf(root: ShimElement): ShimElement[] {
+        const out: ShimElement[] = [root];
+        for (const child of root.children ?? []) out.push(...nodesOf(child));
+        return out;
+    }
+
+    function rowOf(view: ImageManagerView, path: string): ShimElement {
+        const row = withClass(view.contentEl as unknown as ShimElement, "obsync-image-row").find(
+            (candidate) => textsOf(candidate).includes(path)
+        );
+        if (!row) throw new Error(`列表里没有 ${path} 那一行`);
+        return row;
+    }
+
+    function findButton(view: ImageManagerView, label: string): ShimElement {
+        const button = nodesOf(view.contentEl as unknown as ShimElement).find(
+            (node) => node.tagName === "BUTTON" && node.text === label
+        );
+        if (!button) throw new Error(`没有找到按钮「${label}」`);
+        return button;
+    }
+
+    /** 那一行的勾选框（第一个 `input`）。 */
+    function checkboxOf(view: ImageManagerView, path: string): ShimElement {
+        const checkbox = nodesOf(rowOf(view, path)).find((node) => node.tagName === "INPUT");
+        if (!checkbox) throw new Error(`${path} 那一行没有勾选框`);
+        return checkbox;
+    }
+
+    /** 点某一行的**空白处**（真实事件会冒泡到行上；垫片不冒泡，所以直接点行）。 */
+    function clickRow(
+        view: ImageManagerView,
+        path: string,
+        options: { shift?: boolean } = {}
+    ): void {
+        (rowOf(view, path) as unknown as Triggerable).trigger("click", {
+            shiftKey: options.shift === true,
+            target: { closest: () => null },
+        });
+    }
+
+    /** 当前勾选了哪些行（按列表从上到下）。 */
+    function selectedPaths(view: ImageManagerView): string[] {
+        return withClass(view.contentEl as unknown as ShimElement, "obsync-image-row-selected")
+            .map((row) => textsOf(row).find((text) => text.startsWith("images/")))
+            .filter((path): path is string => path !== undefined);
+    }
+
+    /**
+     * 四张图，按路径排序就是 a → b → c → d。
+     *
+     * `d` 故意大得多（600 KB）：这样「大图」快捷筛选能把 a/b/c 挤出去，
+     * 用来构造「锚点已经不在列表里」那种时序。
+     */
+    async function openList(): Promise<{ h: Harness; view: ImageManagerView }> {
+        const h = createHarness();
+        for (const name of ["a", "b", "c"]) h.vault.seed(`images/${name}.png`, { bytes: 100 });
+        h.vault.seed("images/d.png", { bytes: 600 * 1024 });
+        const view = h.open();
+        await waitForRows(view, "images/d.png");
+        return { h, view };
+    }
+
+    function listRequestCount(h: Harness): number {
+        return h.r2.requests.filter((request) => "list-type" in request.query).length;
+    }
+
+    it("「重新扫描」真的重扫：库外新增的图片会冒出来，云端也会重新列举一次", async () => {
+        const { h, view } = await openList();
+        const listsBefore = listRequestCount(h);
+
+        // 库外（文件管理器 / 另一台设备）加了图：面板此刻还不知道
+        h.vault.seed("images/新加的.png", { bytes: 100 });
+        expect(textsOf(view.contentEl as unknown as ShimElement)).not.toContain("images/新加的.png");
+
+        (findButton(view, t.refreshList) as unknown as Triggerable).trigger("click");
+        await waitForRows(view, "images/新加的.png");
+
+        expect(listRequestCount(h)).toBe(listsBefore + 1);
+    });
+
+    it("shift+点击：从锚点到这一行**整段**被选中", async () => {
+        const { view } = await openList();
+
+        clickRow(view, "images/b.png");
+        expect(selectedPaths(view)).toEqual(["images/b.png"]);
+
+        clickRow(view, "images/d.png", { shift: true });
+
+        expect(selectedPaths(view)).toEqual(["images/b.png", "images/c.png", "images/d.png"]);
+        expect(textsOf(view.contentEl as unknown as ShimElement)).toContain(t.selectedCount(3));
+    });
+
+    /**
+     * 反向也成立：锚点在下面、shift+点的是上面那一行。
+     * 这条与上一条是同一个函数的两个方向，而方向写反（`slice` 起止颠倒）时
+     * 界面上只会表现为「什么都没选中」—— 看起来像手势没生效。
+     */
+    it("反向也成立：shift+点锚点**上面**的行", async () => {
+        const { view } = await openList();
+
+        clickRow(view, "images/d.png");
+        clickRow(view, "images/b.png", { shift: true });
+
+        expect(selectedPaths(view)).toEqual(["images/b.png", "images/c.png", "images/d.png"]);
+    });
+
+    /**
+     * **替换**而不是并集。底部那排按钮里有删除，而并集语义下「选中的只增不减」：
+     * 连点两次 shift 会把两段都留下，多出来的正好是不可逆操作的对象。
+     */
+    it("shift+点击是**替换**：之前单击选上的会被这一段取代", async () => {
+        const { view } = await openList();
+
+        clickRow(view, "images/a.png");
+        clickRow(view, "images/b.png"); // 两次单击都是「勾选」，两张都在选中集里
+        expect(selectedPaths(view)).toEqual(["images/a.png", "images/b.png"]);
+
+        // 锚点现在是 b（最后一次单击的落点）
+        clickRow(view, "images/d.png", { shift: true });
+
+        expect(selectedPaths(view)).toEqual(["images/b.png", "images/c.png", "images/d.png"]);
+    });
+
+    /**
+     * **锚点不漂**：算完范围之后锚点保持原样，于是再 shift+点一下更近的行，
+     * 范围会缩回去（仍然从同一个起点算）。没有这一条，shift 只能越选越多，
+     * 选错了只能「清空选择」重来。
+     */
+    it("锚点不漂：再 shift+点一下更近的行，范围从同一个起点缩回去", async () => {
+        const { view } = await openList();
+
+        clickRow(view, "images/a.png");
+        clickRow(view, "images/d.png", { shift: true });
+        expect(selectedPaths(view)).toEqual([
+            "images/a.png",
+            "images/b.png",
+            "images/c.png",
+            "images/d.png",
+        ]);
+
+        clickRow(view, "images/b.png", { shift: true });
+
+        expect(selectedPaths(view)).toEqual(["images/a.png", "images/b.png"]);
+    });
+
+    /**
+     * 锚点被筛选挤出去了（a 是 100 字节，而「大图」只留 ≥500 KB 的 d）。
+     * 这时「从哪儿到哪儿」根本算不出来 —— 不能随便挑一个起点糊弄过去，
+     * 所以退化成「只选这一行」。
+     */
+    it("锚点已经不在列表里（筛选变了）→ 只选这一行，不猜范围", async () => {
+        const { view } = await openList();
+
+        clickRow(view, "images/a.png"); // 锚点 = a
+        (findButton(view, t.presetLarge) as unknown as Triggerable).trigger("click");
+        expect(textsOf(rowOf(view, "images/d.png"))).toContain("images/d.png");
+
+        clickRow(view, "images/d.png", { shift: true });
+
+        expect(selectedPaths(view)).toEqual(["images/d.png"]);
+        expect(textsOf(view.contentEl as unknown as ShimElement)).toContain(t.selectedCount(1));
+    });
+
+    /**
+     * 勾选框自己也要认 shift —— 它是「选中一段」时最自然的落点。
+     *
+     * 这里断言 `preventDefault` 真的被调了：真实浏览器里 click 的默认动作就是
+     * 把这一格勾上（随后还会发 `change`），不取消的话会变成「先单选一下、
+     * 再把一段选上」，而垫片里没有原生行为，所以只能这样把它钉住。
+     */
+    it("直接在勾选框上 shift+点击也选一段（并取消那一次原生勾选）", async () => {
+        const { view } = await openList();
+        clickRow(view, "images/b.png"); // 锚点 = b
+
+        let prevented = false;
+        (checkboxOf(view, "images/c.png") as unknown as Triggerable).trigger("click", {
+            shiftKey: true,
+            preventDefault: () => {
+                prevented = true;
+            },
+        });
+
+        expect(prevented).toBe(true);
+        expect(selectedPaths(view)).toEqual(["images/b.png", "images/c.png"]);
+    });
+
+    it("勾选框本身仍然是一次普通勾选（单击语义没变）", async () => {
+        const { view } = await openList();
+
+        (checkboxOf(view, "images/c.png") as unknown as Triggerable).trigger("change");
+
+        expect(selectedPaths(view)).toEqual(["images/c.png"]);
     });
 });
 

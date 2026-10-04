@@ -443,6 +443,79 @@ describe("getObject", () => {
     });
 });
 
+/**
+ * 服务端 COPY：本地改名之后云端那一份要换键，而内容**不该**再走一遍带宽。
+ *
+ * 断言落在协议细节上：`x-amz-copy-source` 的值（`/桶/键`，键要按段编码）、
+ * 空请求体、以及它**必须参与签名**（漏签就是一个没有解释的 403）。
+ */
+describe("copyObject", () => {
+    it("PUT 到新键 + x-amz-copy-source 指向旧键，且请求体是空的", async () => {
+        r2.objects.set("images/旧 名.png", object(12, "etag-old"));
+
+        const result = await client().copyObject("images/旧 名.png", "images/new.png");
+
+        expect(result).toEqual({ etag: "etag-old" });
+        const request = r2.last();
+        expect(request.method).toBe("PUT");
+        expect(request.url).toBe(
+            "https://abc123.r2.cloudflarestorage.com/notes/images/new.png"
+        );
+        // 源地址是 `/桶/键`，键里的空格与中文都要编码（不能原样出现）
+        expect(request.headers["x-amz-copy-source"]).toBe(
+            "/notes/images/%E6%97%A7%20%E5%90%8D.png"
+        );
+        expect(request.headers["x-amz-content-sha256"]).toBe(EMPTY_PAYLOAD_SHA256);
+        // 新对象真的到位了（假服务端按 S3 的形状处理 COPY）
+        expect(r2.objects.get("images/new.png")!.size).toBe(12);
+    });
+
+    it("x-amz-copy-source **参与签名**（不签的话 R2 直接 403）", async () => {
+        r2.objects.set("images/a.png", object(1, "e"));
+
+        await client().copyObject("images/a.png", "images/b.png");
+
+        expect(r2.last().headers["authorization"]).toContain(
+            "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date"
+        );
+    });
+
+    /**
+     * 源不存在 = **正常结论**，不是失败。
+     *
+     * 本地改名的那张图可能从没传过（新加的图、或者这台设备的清单丢过）。
+     * 报成错误会让用户每次改名都看到一个没有意义的弹窗。
+     */
+    it("源对象不存在时返回 undefined（云端本来就没有这一份）", async () => {
+        await expect(client().copyObject("images/gone.png", "images/new.png")).resolves.toBeUndefined();
+    });
+
+    it("403 报鉴权失败", async () => {
+        r2.override = () => ({ status: 403 });
+
+        await expect(client().copyObject("images/a.png", "images/b.png")).rejects.toMatchObject({
+            kind: "authFailed",
+        });
+    });
+
+    it("其它错误报 copyFailed，带上目标路径与状态码", async () => {
+        r2.override = () => ({ status: 400, text: '{"message":"InvalidRequest"}' });
+
+        await expect(client().copyObject("images/a.png", "images/b.png")).rejects.toMatchObject({
+            kind: "copyFailed",
+            params: { path: "images/b.png", status: 400, detail: "InvalidRequest" },
+        });
+    });
+
+    it("响应体里读不到 ETag 时给空结果（调用方沿用清单里那个值）", async () => {
+        r2.objects.set("images/a.png", object(1, "e"));
+        r2.override = (request) =>
+            request.method === "PUT" ? { status: 200, text: "<CopyObjectResult/>" } : undefined;
+
+        await expect(client().copyObject("images/a.png", "images/b.png")).resolves.toEqual({});
+    });
+});
+
 describe("deleteObject", () => {
     it("204 视为成功", async () => {
         r2.objects.set("images/a.png", object(1, "e"));

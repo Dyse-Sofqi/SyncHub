@@ -85,6 +85,47 @@
     font-weight: 400;
 }
 
+/* 确认弹窗里的步骤列表（`.obsync-steps`，见 `ConfirmUntrackImagesModal`）。
+ *
+ * 这一条**刻意不限定在 `.obsync-settings` 下**：弹窗挂在 body 上，不在设置页容器里
+ * ——（顺带记一笔：`.obsync-diag-list` 那几条是限定在设置页里的，所以预览之外的
+ * 弹窗里其实吃不到样式，那是既有的小瑕疵，不在这次范围内）。类名自带 `obsync-` 前缀，
+ * 不加作用域也不会污染别处。 */
+.obsync-steps {
+    margin: 0.5em 0 0.9em;
+    padding-left: 1.4em;
+}
+
+.obsync-steps li {
+    margin: 0.3em 0;
+}
+
+/* 「嵌套仓库」那一行（2026-10-04）：
+ *
+ * - `.obsync-nested-hint` 是更改列表上方那句解释（它回答的是「为什么这条消不掉」，
+ *   所以它得比普通说明更靠近列表，而不是塞进组标题下面）；
+ * - `.obsync-nested-badge` 沿用 `.obsync-badge-kind` 的「分类信息」观感，只把
+ *   `margin-left` 交给徽标本身（它跟在路径后面，不是跟在一段文字后面）。 */
+.obsync-nested-hint {
+    margin: 0.2em 0 0.6em;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+    line-height: 1.5;
+}
+
+.obsync-nested-badge {
+    margin-left: 0.6em;
+}
+
+/* 仓库同步面板工具栏上的倒计时（2026-10-04）。
+ *
+ * 与设置页那个徽标同一套外观（`.obsync-countdown` 负责等宽数字与配色），
+ * 这里只管它在工具条里的位置：它排在「刷新」之后，侧边栏窄时跟着换行。 */
+.obsync-view-countdown {
+    align-self: center;
+    margin-left: 0.4em;
+}
+
 /* ── 弹窗里的状态/警告行（AddRepoModal / BindExistingModal 共用） ──────── */
 .obsync-modal-status {
     opacity: 0.8;
@@ -125,20 +166,27 @@
 }
 
 /*
- * 设置页「仓库同步」标题下的注意事项。
+ * 设置页「仓库同步」/「图片同步」标题下的注意事项。
  *
- * 刻意比 `setting-item-description`（小而灰）**重**一档：那两段说的是
+ * 刻意比 `setting-item-description`（小而灰）**重**一档：那几段说的是
  * 「这样配会丢东西」，扫过去没看见就等于没写 —— 而灰字正是「扫过去看不见」
  * 的原因，所以正文用正常色而不是 `--text-muted`。
  *
  * 但也不用 `mod-warning` 的橙色：那是「现在就出错了」，而这里是「别这么配」，
- * 喊太响会让人以为插件已经出问题。左侧竖线足够把它和普通描述区分开。
+ * 喊太响会让人以为插件已经出问题。
+ *
+ * 2026-10-02：从「一段带左竖线的裸文字」改成**一张淡色卡片**。原因是同一页
+ * 下面每一节都收进了卡片（见 `.obsync-group`），裸文字反而成了唯一没有容器
+ * 的东西，看着像漏画了一块。强调色只用**很淡的一层底 + 左竖线**，
+ * 音量仍比警告低。
  */
 .obsync-settings .obsync-sync-notes,
 .obsync-settings .obsync-image-notes {
-    margin: 0.5em 0 1em;
-    padding: 0.5em 0 0.5em 0.9em;
-    border-left: 3px solid var(--background-modifier-border);
+    margin: 0.5em 0 1.25em;
+    padding: 0.7em 1em 0.7em 0.9em;
+    border-radius: var(--setting-items-radius, var(--radius-m, 8px));
+    background-color: var(--background-secondary-alt, var(--background-secondary));
+    border-left: 3px solid var(--text-accent);
 }
 
 .obsync-settings .obsync-sync-notes-heading,
@@ -182,10 +230,19 @@
  * `.setting-item-control` 是 `flex` 且默认**不换行**，于是控件会被压扁或溢出。
  * 允许换行，是为了「窄的时候掉到第二行」，而不是「把控件挤没」。
  */
+.obsync-actions {
+    /* 上下留白收一档（2026-10-04 用户指出「按钮栏 padding 有些大了，以至于侧边栏窄一点
+       就不得不自适应换行」）。默认 `16px` 上下 + 左右内边距在侧边栏里是实打实的宽度：
+       六个控件（含一个下拉）本来就贴着换行的边缘，省下来的每一像素都算数。 */
+    padding: var(--size-4-2, 8px) 0;
+}
+
 .obsync-actions .setting-item-control {
     flex-wrap: wrap;
     justify-content: flex-end;
-    gap: var(--size-4-2, 8px);
+    /* 间隙照 ziping 那条按钮排（`gap: 4px`）：原来的 8px 在侧边栏里太散，
+       六个控件一排更容易提前换行（2026-10-04 用户要求「参考 ziping 的按钮间隙」）。 */
+    gap: var(--size-4-1, 4px);
 }
 
 /* 「立即同步」要的是**右侧**这个位置，而不只是「排在后面」：面板够宽时用
@@ -377,8 +434,25 @@
    都是可读的，而自己挑一个绿/红去写文字，在某个主题上必然有一边读不清。
    色块叠在主题背景上，两种模式都成立。 */
 
-.obsync-diff-modal {
-    width: min(1080px, 92vw);
+/* 差异**标签页**（2026-10-04 从弹窗改成主工作区标签页 —— 用户原话：
+   「点击查看diff页面时，应该以标签页形式打开而不是模态框，模态框太小了」）。
+
+   改成标签页之后**两处「弹窗时代」的高度限制都要拿掉**：
+
+   - 原来那条「把弹窗撑到 1080px」的规则是为了撑开弹窗（弹窗默认宽度按「一两个设置项」
+     定，而 diff 行很长）。标签页的宽度由用户自己拉，正是这次改动的意义。
+   - `.obsync-diff-body` 原来的 `max-height: 68vh` 是给弹窗留的（弹窗不能比屏幕高）。
+     在标签页里它变成了「内容框只占屏幕的七成高、下面空一片，而框里还有一条自己的
+     滚动轴」—— 用户第二次反馈的原话就是这个：「边框的高度被限制了，以至于没有充分
+     利用标签页的空间，出现了滚动轴」。
+
+   所以现在：内容区跟着标签页自然铺开（整个标签页滚一条轴，和读笔记一样），
+   横向溢出仍由外层接住（`white-space: pre` 的长行）。
+   （旧类名不在这里写出来：自查脚本扫的是**原始文件**，注释里出现类名会被算成
+   「定义了但没用到」。） */
+.obsync-diff-view {
+    padding: var(--size-4-8, 2em) var(--size-4-8, 2em);
+    overflow-x: auto;
 }
 
 .obsync-diff-target {
@@ -390,10 +464,101 @@
 }
 
 .obsync-diff-body {
-    max-height: 68vh;
-    overflow: auto;
+    /* 没有 `max-height`：**高度由内容决定**，整页滚一条轴。
+       加回来就会重演「框里有滚动轴、框下空一片」。 */
     border: 1px solid var(--background-modifier-border);
     border-radius: var(--radius-s, 4px);
+}
+
+/* ── 差异：视图模式切换（统一 / 双栏对照） ────────────────────────────────
+   两个按钮、当前那个带 `is-active`。选择器写成两个类（`.obsync-diff-modes .x`），
+   理由与标签栏那一条相同：`<button>` 会被 Obsidian 的基础样式套上边框与底色。 */
+.obsync-diff-modes {
+    display: flex;
+    align-items: center;
+    gap: 0.35em;
+    margin-bottom: 0.6em;
+}
+
+.obsync-diff-modes-label {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+    margin-right: 0.2em;
+}
+
+.obsync-diff-modes .obsync-diff-mode {
+    padding: 0.2em 0.7em;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s, 4px);
+    background: transparent;
+    box-shadow: none;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+    height: auto;
+}
+
+.obsync-diff-modes .obsync-diff-mode:hover {
+    background: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+
+.obsync-diff-modes .obsync-diff-mode.is-active {
+    background: var(--text-selection, var(--background-modifier-hover));
+    color: var(--text-normal);
+    font-weight: 600;
+}
+
+/* ── 差异：双栏对照 ────────────────────────────────────────────────────────
+   四列网格（旧行号 / 旧内容 / 新行号 / 新内容）。左右两个「行号 + 内容」组用同一条
+   列定义，行号列所以天然对齐；两个内容列 `minmax(0, 1fr)` 才不会被子元素撑破。
+
+   这一模式**允许折行**（`pre-wrap` + `overflow-wrap: anywhere`）：栏宽只有一半，
+   像打包后的 `main.js` 那种一行几万字符的内容不折行就没法看了。折行不会破坏对齐 ——
+   每一行是网格里的一行，两侧各行其高，行号仍落在自己那一行的开头。 */
+.obsync-diff-sbs {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller, 0.85em);
+}
+
+.obsync-diff-sbs-row {
+    display: contents;
+}
+
+.obsync-diff-sbs .obsync-diff-lineno {
+    /* 右栏的行号列多一条分隔线：两栏之间的分界靠它，不然整片内容连成一块 */
+    border-right: none;
+}
+
+.obsync-diff-sbs-left,
+.obsync-diff-sbs-right {
+    padding-inline: 0.4em;
+}
+
+.obsync-diff-sbs-right {
+    border-left: 1px solid var(--background-modifier-border);
+}
+
+.obsync-diff-sbs .obsync-diff-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* 补出来的空单元格：画一条淡竖线，表示「这一边没有对应的行」 */
+.obsync-diff-sbs-empty {
+    background: repeating-linear-gradient(
+        135deg,
+        transparent,
+        transparent 5px,
+        var(--background-modifier-border) 5px,
+        var(--background-modifier-border) 6px
+    );
+}
+
+.obsync-diff-sbs-note {
+    color: var(--text-faint);
+    font-style: italic;
 }
 
 .obsync-diff-section + .obsync-diff-section {
@@ -511,45 +676,65 @@
     color: var(--text-faint);
 }
 
-/* ── 设置页：标签栏 ────────────────────────────────────────────────────────
-   Obsidian 的 PluginSettingTab 没有内建分页，这里自绘一条。 */
-.obsync-settings .obsync-tabs {
+/* ── 标签栏（设置页与仓库同步面板共用） ────────────────────────────────────
+   Obsidian 的 PluginSettingTab 没有内建分页，这里自绘一条。
+   2026-10-04 起**不再限定在 `.obsync-settings` 下**：侧边栏的仓库同步面板也要
+   同一条（那里把「更改 / 最近提交」分成标签组，免得长列表互相挤占滚动位置）。
+   类名自带 `obsync-` 前缀，不加作用域也不会污染别处。
+
+   形状照 MDRazor 设置页那一条（用户要求「参考一下 MDRazor 的设置页标签组样式」）：
+   **只有当前那一个像张卡片**，其余是纯文字 —— 圆角只在上两个角、被选中的那个与
+   下面那条分隔线咬合（`margin-bottom: -1px` + 去掉自己的下边框）。
+
+   选择器写成 `.obsync-tabs .obsync-tab`（两个类）而**不是**一个类，是踩过之后
+   定的：这些标签是 `<button>`，Obsidian 的 app.css 里有 `.vertical-tab-content button`
+   这类「一个类 + 元素」的规则（边框 + `--interactive-normal` 底色）。同权重下按加载
+   顺序我这边能赢，但它是 0-1-1、我原来只有 0-1-0 —— **一个都没盖住**：预览里每个
+   标签都带着一圈边框和浅底，跟 MDRazor 完全不是一个样子。 */
+.obsync-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.25em;
-    margin-bottom: 1.25em;
+    gap: 2px;
+    margin-bottom: 12px;
     border-bottom: 1px solid var(--background-modifier-border);
-    padding-bottom: 0.5em;
 }
 
-.obsync-settings .obsync-tab {
+.obsync-tabs .obsync-tab {
     display: inline-flex;
     align-items: center;
     gap: 0.4em;
+    padding: 6px 10px;
+    margin-bottom: -1px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--radius-m, 6px) var(--radius-m, 6px) 0 0;
     background: transparent;
-    border: none;
     box-shadow: none;
     color: var(--text-muted);
-    padding: 0.35em 0.9em;
-    border-radius: var(--radius-s, 4px);
-    cursor: pointer;
     font-size: var(--font-ui-small);
+    font-weight: 400;
     height: auto;
+    /* 双击标签不该选中文字（它是个控件，不是一段文本） */
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: pointer;
 }
 
-.obsync-settings .obsync-tab:hover {
+.obsync-tabs .obsync-tab:hover {
     background: var(--background-modifier-hover);
     color: var(--text-normal);
 }
 
-.obsync-settings .obsync-tab.is-active {
-    background: var(--background-modifier-hover);
-    color: var(--text-accent);
+.obsync-tabs .obsync-tab.is-active {
+    color: var(--text-normal);
+    background: var(--background-secondary);
+    border-color: var(--background-modifier-border);
     font-weight: 600;
+    box-shadow: none;
 }
 
 /* 标签上的计数：普通项弱化，有可更新时用强调色 */
-.obsync-settings .obsync-tab-count {
+.obsync-tab-count {
     padding: 0 0.4em;
     border-radius: 999px;
     background: var(--background-modifier-border);
@@ -558,9 +743,94 @@
     font-weight: 400;
 }
 
-.obsync-settings .obsync-tab-count.is-update {
+.obsync-tab-count.is-update {
     background: var(--interactive-accent, #7f6df2);
     color: var(--text-on-accent, #fff);
+}
+
+/* ── 远端地址那一行（设置页） ───────────────────────────────────────────────
+   2026-10-04：标题与输入框同一行、输入框宽度自适应，**右侧还并进了「打开仓库同步面板」
+   按钮**（用户要求合并成一行）。
+
+   默认的 `Setting` 布局是「标题占一列、控件占固定宽度的一列」——桌面路径、仓库地址这类
+   值挤在那几百像素里只能看见开头一截。所以这里改成：标题按内容取宽，控件吃满剩下的
+   空间（`flex: 1` + `min-width: 0`，后者让输入框能真正收缩而不溢出）；
+   输入框自己 `flex: 1`（**不是 `width: 100%`** —— 那会把旁边的按钮挤出去）。 */
+.obsync-remote-row {
+    /* 标题与输入框**垂直居中**。面板里 `.obsync-metrics` 那一族行是
+       `align-items: flex-start`（多行说明要顶对齐），而这一行两边都只有一行内容。 */
+    align-items: center;
+}
+
+.obsync-remote-row .setting-item-info {
+    flex: 0 0 auto;
+    margin-right: 0.75em;
+}
+
+.obsync-remote-row .setting-item-control {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.obsync-remote-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--font-ui-smaller, 0.85em);
+}
+
+/* ── 仓库同步面板：更改列表的格式筛选 ───────────────────────────────────────
+   紧挨着列表的一行，要**轻**：它是个辅助控件，不该比列表本身更抢眼
+   （2026-10-04 用户要求按格式筛，尤其 md）。 */
+.obsync-change-filter {
+    align-items: center;
+    border-top: none;
+    padding: 0.4em 0;
+}
+
+.obsync-change-filter .setting-item-name {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+    font-weight: 400;
+}
+
+/* 「状态摘要 + 下次同步胶囊」那一行（2026-10-04 用户要求把胶囊下移到这里）：
+   一句话与一个胶囊同一行、垂直居中；侧边栏窄时允许换行（胶囊掉到第二行也比被挤没了好）。 */
+.obsync-state-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5em;
+    margin-bottom: 0.4em;
+}
+
+/* 摘要那句话在**段落**里（app.css 的 `p` 有自己的上下外边距），而胶囊是行内块 ——
+   不把外边距清掉的话，文字盒比胶囊高出一截，"垂直居中"看着还是歪的
+   （2026-10-04 用户要求「与远端一致的文本应该垂直居中，才能和下次同步胶囊对齐」）。 */
+.obsync-state-row .obsync-remote-state {
+    margin: 0;
+    line-height: 1.4;
+}
+
+/* ── 仓库同步面板：标签组 ───────────────────────────────────────────────────
+   面板窄，标签栏的上下留白与内边距比设置页收一点（垂直空间是稀缺的）；
+   其余形状与设置页同一条（见上面的 `.obsync-tabs`）。
+   两个面板**都渲染、只显示当前那个**：隐藏的那个不占高度，于是长列表不再互相
+   挤占滚动位置，而每轮重绘的 git 调用与以前完全一致。 */
+.obsync-view-tabs {
+    margin: 0.6em 0 0.5em;
+    gap: 2px;
+}
+
+.obsync-view-tabs .obsync-tab {
+    padding: 4px 8px;
+}
+
+.obsync-view-tabpanel {
+    display: none;
+}
+
+.obsync-view-tabpanel.is-active {
+    display: block;
 }
 
 /* ── 设置页：区块头部栏（标题 + 说明 + 主操作同一行） ────────────────────── */
@@ -621,15 +891,324 @@
     border-color: var(--interactive-accent, #7f6df2);
 }
 
-/* 三个操作按钮贴左，不跟在 Obsidian 的默认行为后面推到最右 ——
-   代码框是全宽的，而这一行没有名称/描述，按钮推到最右会离框太远，
-   看不出它们是给上面那个框用的。 */
-.obsync-settings .obsync-gitignore-actions {
+/* ── 设置页：控件另起一行的设置行（`.obsync-stacked`） ─────────────────────
+ *
+ * git 可执行文件路径那一行长这样：
+ *
+ *     git 可执行文件路径
+ *     留空使用系统 PATH 中的 git。…
+ *     [ C:\Program Files\Git\cmd\git.exe          ] [浏览…]
+ *
+ * ## 为什么不用块级元素自己搭
+ *
+ * 与 `.gitignore` 那个代码框不同，这里要的是**原生的输入框与按钮**：它们的
+ * 外观（颜色 / 焦点环 / 圆角）挂在 app.css 的 `.setting-item-control` 下面，
+ * 搬出去就得把那一整套再抄一遍。所以控件留在 `Setting` 里，只把**那一行**折成
+ * 上下两段 —— 这正是 Obsidian 自己在窄容器里干的事（app.css 的
+ * `@container (max-width: 400px)` 给 `.setting-item` 加 `flex-direction: column`），
+ * 这里只是让它在这一行上**一直**这样。
+ * ## 为什么选择器写得这么长
+ *
+ * styles.css 里另有一条 `.obsync-settings .setting-item { align-items: center }`
+ * （给「跟踪列表」那一页的两行文字配图标用的），它比 `.obsync-settings .obsync-stacked`
+ * **更靠后**、特异性又相同，于是把这里的 `align-items` 盖掉了 —— 实测表现是
+ * 「名称与控件都缩成内容宽，整行看着像居中」。多带一个 `.setting-item` 把特异性
+ * 提到 (0,3,0) 就不跟顺序较劲了。
+ */
+.obsync-settings .setting-item.obsync-stacked {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.obsync-settings .setting-item.obsync-stacked .setting-item-info {
+    margin-inline-end: 0;
+    /* 即使哪天 `align-items` 又被别处盖回 `center`，也保证是左对齐满宽。 */
+    width: 100%;
+}
+
+.obsync-settings .setting-item.obsync-stacked .setting-item-control {
+    width: 100%;
+    /* 输入框吃掉剩余宽度，按钮保持自然大小（`flex-wrap` 留给窄屏）。 */
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: var(--size-4-2, 8px);
+}
+
+.obsync-settings .setting-item.obsync-stacked .setting-item-control input[type="text"],
+.obsync-settings .setting-item.obsync-stacked .setting-item-control input[type="number"] {
+    flex: 1 1 12em;
+    min-width: 0;
+}
+
+/* 同一行里带输入框的动作行（图片同步页的「输入路径 + 浏览… + 恢复默认」）：
+ * 与纯按钮行相反 —— 这一行的控件要占满整行，输入框再吃掉剩余宽度。 */
+.obsync-settings .obsync-inline-field .setting-item-control {
+    flex: 1 1 auto;
+    width: 100%;
+}
+
+.obsync-settings .obsync-inline-field .setting-item-control input[type="text"] {
+    flex: 1 1 12em;
+    min-width: 0;
+}
+
+/* 输入框与按钮同行时，窄面板里最容易发生的坏形态是「框被按钮挤成一条竖线」——
+   给它一个下限，宁可让按钮换行（上面那条 `flex-wrap` 已经允许了）。 */
+.obsync-settings .obsync-folders-input {
+    min-width: 8em;
+}
+
+/* ── 设置页：文件夹候选下拉（`.obsync-path-suggest`） ──────────────────────
+ *
+ * 挂在输入框那一行的 `.setting-item` 上，绝对定位到它的下方；`mousedown`
+ * 选中（见 `renderImages`：`click` 之前输入框会先 blur，早收就点不到）。
+ * 卡片（`.setting-items`）没有 `overflow: hidden`，所以不会被裁掉。 */
+.obsync-settings .obsync-inline-field {
+    position: relative;
+}
+
+.obsync-settings .obsync-path-suggest {
+    /* 默认收起，加 `is-open` 才显示 —— 用类而不是内联 `style.display`：
+       社区审核的 `obsidianmd/no-static-styles-assignment` 会拦后者。 */
+    display: none;
+    position: absolute;
+    z-index: var(--layer-menu, 30);
+    inset-inline: 0;
+    top: 100%;
+    max-height: 15em;
+    overflow-y: auto;
+    padding: var(--size-2-1, 2px);
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s, 4px);
+    box-shadow: var(--shadow-s, 0 2px 8px rgb(0 0 0 / 20%));
+}
+
+.obsync-settings .obsync-path-suggest.is-open {
+    display: block;
+}
+
+.obsync-settings .obsync-path-suggest-item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--size-4-2, 8px);
+    padding: var(--size-2-2, 4px) var(--size-4-2, 8px);
+    border-radius: var(--radius-s, 4px);
+    cursor: pointer;
+}
+
+.obsync-settings .obsync-path-suggest-item.is-active,
+.obsync-settings .obsync-path-suggest-item:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.obsync-settings .obsync-path-suggest-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.obsync-settings .obsync-suggestion-meta {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+}
+
+/* 已加入的文件夹那一行：名称就是路径（等宽更好核对），删除按钮在右端。 */
+.obsync-settings .obsync-folder-row .setting-item-name {
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller, 0.85em);
+}
+
+/* 「git 从哪儿来」的链接（2026-10-02 加，2026-10-04 起并进 git 路径那一行的**描述**里，
+   不再单独占一段 —— 于是这里只剩链接自身的样式）。
+   链接用主题的强调色并带下划线：它在一段灰色说明文字里，不加这两样就看不出可点。 */
+.obsync-settings .obsync-git-path a {
+    color: var(--text-accent);
+    text-decoration: underline;
+}
+
+/* 「定时同步」名称后面的倒计时徽标（2026-10-02）。
+ *
+ * 三处都改过默认形状，每一处都是实测/截图后调的：
+ *
+ * ① **与标题同一条基线**。`.obsync-badge` 的 `vertical-align: middle` 对齐的是
+ *    「基线 + 半个 x-height」，而药丸比标题行高（20.4px vs 16.9px）—— 实测药丸
+ *    文字比标题**低 1.9px**，用户的原话是「矮了标题一截」。改成 `baseline`：文字
+ *    底边严格对齐（实测 0.02px 内），而且它是按字体度量算的，换主题也不会偏。
+ * ② **行高压到接近字体高**：`line-height: 1.6` 是给列表里那些独立徽标的，
+ *    在这一行会把整行撑高。压到 1 并用 `padding` 给药丸厚度，文字正好被框住。
+ * ③ **有颜色才叫醒目**。`.obsync-badge` 只给形状，颜色由变体类给 —— 不给就是
+ *    一行普通文字（用户的原话是「不够醒目」）。这里用强调色文字 + 强调色的淡底，
+ *    比填充式的 `.obsync-badge-update`（那个表示「有更新」）轻，又能一眼看出
+ *    它是活的信息。
+ *
+ * 等宽数字是必需的：每秒都在变的字宽会让整行跟着抖（`3:11` → `3:09` 宽度不同）。
+ *
+ * 2026-10-04：**不再限定在 `.obsync-settings` 下** —— 仓库同步面板工具栏上那个倒计时
+ * 也要同一套（用户原话：「下次同步也应该做成像设置页一样的显眼一点」；此前它只吃到
+ * `.obsync-badge` 的形状，没有强调色，所以看着就是一行灰字）。 */
+.obsync-countdown {
+    vertical-align: baseline;
+    line-height: 1;
+    padding: 0.2em 0.5em;
+    color: var(--text-accent);
+    font-weight: var(--font-medium, 500);
+    background-color: var(--background-modifier-border); /* 兜底（老 Chromium） */
+    background-color: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+    font-variant-numeric: tabular-nums;
+}
+
+.obsync-countdown:empty {
+    display: none;
+}
+
+/* 工具条上的按钮与分支下拉：**去掉阴影**，改用一条细边 + 悬停换底色
+   （2026-10-04 用户要求「参考一下 ziping 插件按钮的样式，去掉按钮的阴影」）。
+   Obsidian 的 `button` / `select` 默认带 `--input-shadow`，在侧边栏这种浅底上看着像
+   浮起来一层；ziping 那种扁平的样子与面板的观感更一致。
+
+   选择器要写到 `.obsync-actions` 下面（两个类）：这些是 `<button>` / `<select>`，
+   单类选择器压不过 app.css 里 `.vertical-tab-content button` 那类「一个类 + 元素」的规则
+   —— 标签栏那次就是这么栽的。 */
+.obsync-actions button,
+.obsync-actions select {
+    box-shadow: none;
+    border: 1px solid var(--background-modifier-border);
+}
+
+/* 悬停换底色 —— **但要把主按钮（立即同步）排除掉**。
+ *
+ * 它是 `setCta()` 出来的（`mod-cta`：强调色填充 + `--text-on-accent` 的文字），
+ * 一视同仁地给 `--background-secondary` 会让它变成「浅底 + 浅字」—— 悬停时整颗按钮
+ * 糊成一片（2026-10-04 用户截图指出）。主按钮悬停要用**自己的**深一档强调色。 */
+.obsync-actions button:hover:not(.mod-cta),
+.obsync-actions select:hover {
+    background-color: var(--background-secondary);
+}
+
+.obsync-actions button.mod-cta {
+    /* 强调色填充的按钮不需要那圈边框：加上去像描了边 */
+    border-color: transparent;
+}
+
+.obsync-actions button.mod-cta:hover {
+    background-color: var(--interactive-accent-hover, var(--interactive-accent));
+}
+
+/* 动作按钮**贴左**，不跟在 Obsidian 的默认行为后面推到最右。
+ *
+ * 这一行没有名称与描述，而 `.setting-item-info` 是 `flex: 1` —— 空盒子会把
+ * 控件一路顶到最右，离上面那个代码框/文本框很远，看不出这些按钮是给它的。
+ * （原先只写了 `justify-content: flex-start`，那一句在信息区占满剩余空间时
+ * 其实**没有任何效果** —— 实测按钮仍贴在最右。必须把信息区拿掉。）
+ *
+ * `.setting-item-info` 之所以要 `display: none` 而不是 `flex: 0`：它里面还有
+ * 空的名称/描述节点，留着会占掉 gap 与一行高度。 */
+.obsync-settings .obsync-inline-actions .setting-item-info {
+    display: none;
+}
+
+.obsync-settings .obsync-inline-actions .setting-item-control {
+    flex: 0 0 auto;
     justify-content: flex-start;
 }
 
-.obsync-settings .obsync-gitignore-actions .setting-item-control {
+/* ── 设置页：设置组（Obsidian 1.13 的 `.setting-group`） ───────────────────
+ *
+ * ## 为什么
+ *
+ * Obsidian 1.13 起**一条 `Setting` 自己就是一张卡片**（app.css 里
+ * `.setting-item` 带 `--setting-items-background` 底色与 `--setting-items-radius`
+ * 圆角）。照原样一条条画出来，「仓库同步」与「图片同步」这两页各自会变成
+ * 十几张紧紧挨着的卡片：没有层次，每一行都在同样大声地喊 —— 用户的原话是
+ * 「图中展示的布局样式是丑陋的」。
+ *
+ * 官方自己的设置页把**相关**的几条装进 `.setting-group > .setting-items`：
+ * 整组只有一张卡片，组内用发丝线分隔。这里就用同一套 DOM 结构（不是 API，
+ * 只是类名，见 `settingsTab.openGroup`）——
+ *
+ *   - 1.13 以上：直接得到原生观感，主题里的 `--setting-items-*` 变量照常生效；
+ *   - 1.13 以下：这几个类没有样式，退化成原来的逐行排布，不会坏。
+ *
+ * 所以下面这些规则只补「原生没管」的几件事，**不重画卡片本身**。
+ */
+
+/* 组内的**非 Setting 内容**（`.gitignore` 代码框、结果区、说明段）需要自己
+   缩进：行的左右内边距长在 `.setting-item` 上，不会传给兄弟节点。
+   用 `margin-inline` 而不是给容器加内边距 —— 后者会让行**再**缩进一次。 */
+.obsync-settings .obsync-group > .setting-items > :not(.setting-item) {
+    margin-inline: var(--setting-items-padding-x, var(--size-4-4));
+}
+
+/*
+ * 组内某一行的**上一条不是设置行**时，不画那条分隔线。
+ *
+ * app.css 的分隔线规则是「每一行上方画一条，第一行除外」，而它的「第一行」用的是
+ * `:first-child`。组里只要有一个**不可见**的兄弟排在前面，真正显示在最上面的那一行
+ * 就不是 `:first-child` 了 —— 图片同步页「操作」组里那个**空的结果区**
+ * （`.obsync-diagnostics:empty` 是 `display: none`）正好是这个角色：于是
+ * 「打开图片管理」上方凭空多出一条悬空的线，看着像张卡片被从中间切开
+ * （用户截图指出的那一条）。
+ *
+ * 判据换成「上一条是不是设置行」：说明段 / 代码框 / 结果区之后的第一行不画，
+ * 行与行之间照旧画。线的位置、颜色与左右内缩仍由 app.css 给，这里只决定画不画。
+ */
+.obsync-settings
+    .obsync-group
+    > .setting-items
+    > :not(.setting-item)
+    + .setting-item::before {
+    content: none;
+}
+
+/* 组内「全宽块级输入」的外壳（`.gitignore` 代码框、图片文件夹那一格）——
+   缩进落在它身上，框自己仍然是满宽。显式写成块级：这层壳只是给缩进用的，
+   不该带任何行内盒的行为。
+
+   为什么要有这层壳：组内的行内边距长在 `.setting-item` 上，不会传给兄弟节点；
+   而框的宽度是内联写死的 `100%`，直接给它 `margin-inline` 会溢出。 */
+.obsync-settings .obsync-block-wrap {
+    display: block;
+}
+
+/* 组标题那一行可以挂动作按钮（`openSection`）：「一句说明 + 一个按钮」于是
+   不必单独占一整行 —— 那种行没有名称，控件被顶到最右，就是截图里那条
+   左半边空着的横条。 */
+.obsync-settings .obsync-group-heading {
+    align-items: center;
+}
+
+/* 标题行里**要让信息区吃掉剩余宽度**，按钮才会被推到最右。
+   app.css 给 `.setting-item-heading .setting-item-info` 写了 `flex-grow: 0`
+   （标题本该自己一行、不撑开），照它来就变成「标题后面紧跟着三个按钮、
+   右边空一大块」—— 而这一行是有动作的，与纯标题不同。 */
+.obsync-settings .obsync-group-heading .setting-item-info {
+    flex-grow: 1;
+    margin-inline-end: var(--size-4-4);
+}
+
+/* 标题行上的按钮不参与压缩：说明再长也不该把按钮挤成两行。 */
+.obsync-settings .obsync-group-heading .setting-item-control {
     flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--size-4-2, 8px);
+}
+
+/* 「定时同步」那一行的单位后缀（`<input> 分钟 <开关>`）。它是框的说明而不是
+   控件，所以弱化一档，别跟框里那个数字抢视线；`white-space: nowrap` 是防
+   窄窗口下「分钟」被拆成两行。 */
+.obsync-settings .obsync-unit {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+    white-space: nowrap;
+}
+
+/* 节与节之间的呼吸。原生只给了 `.setting-group + .setting-group`，
+   而这两页的组之间隔着标题行（或注意事项），于是那一对选择器永远不匹配。 */
+.obsync-settings .obsync-group + .setting-item-heading {
+    margin-top: 1.75em;
 }
 
 /* ── 设置页：跟踪列表 ────────────────────────────────────────────────────── */
@@ -680,10 +1259,21 @@
     opacity: 0.85;
 }
 
-/* ── 连接测试结果 ───────────────────────────────────────────────────────── */
+/* ── 连接测试 / 图片同步的结果 ───────────────────────────────────────────── */
 
+/* 还没点过动作时不留空档（结果区就在卡片里，空着会多出一条间距）。 */
 .obsync-settings .obsync-diagnostics:empty {
     display: none;
+}
+
+/* 结果落在设置组内部：左右缩进由 `.obsync-group` 那条规则给，这里只管
+   上下与行距 —— 它是一段「刚发生的事」，贴着自己那张卡片的内边距即可。 */
+.obsync-settings .obsync-diagnostics {
+    margin-block: 0.5em 0.25em;
+}
+
+.obsync-settings .obsync-diagnostics > p {
+    margin: 0.3em 0;
 }
 
 .obsync-settings .obsync-diag-list {
@@ -1090,6 +1680,13 @@ body.obsync-status-bar-full-width .status-bar:has(.obsync-status-bar-item) {
     font-size: var(--font-ui-smaller, 0.8em);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
+}
+
+/* 「重新扫描」推到最右：它和左边那几项不是一类东西（左边是「选中了什么」，
+   它是「重新读一遍」），隔开才不会在扫的时候被误当成批量动作。
+   窄标签页里它换行也无所谓 —— `flex-wrap` 由 Obsidian 的按钮样式给出。 */
+.obsync-image-rescan {
+    margin-left: auto;
 }
 
 /* ── 表格 ── */

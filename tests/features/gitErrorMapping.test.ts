@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { mapError } from "../../src/features/sync/simpleGitManager";
+import { gitChildEnv, mapError } from "../../src/features/sync/simpleGitManager";
 import {
     GitAuthError,
     GitBinaryMissingError,
     GitCredentialUsernameRejectedError,
+    GitNetworkError,
     GitNotRepoError,
     GitTimeoutError,
     PushRejectedError,
@@ -158,5 +159,185 @@ describe("mapError 的分类", () => {
         // 早期版本把中文文案写进 message，导致英文界面冒出中文。
         expect(mapped.message).toContain("pulling (merge)");
         expect(mapped.message).not.toMatch(/[\u4e00-\u9fff]/);
+    });
+});
+
+/**
+ * 「连不上远端」这一类（2026-10-02，用户报来的一条实际警告）。
+ *
+ * 用户的原话是：
+ *
+ * ```
+ * [SyncHub] auto sync failed st: fatal: unable to access 'https://gitee.com/…':
+ * getaddrinfo() thread failed to start
+ * ```
+ *
+ * 没有这一类的后果不是「少一句好话」，而是**方向指错**：这句话既不含令牌、也不含
+ * 仓库问题，却会被当成「插件坏了」或「令牌不对」——用户会去重装、去重配令牌，而
+ * 真正该看的是网络与代理。
+ */
+describe("mapError：网络层失败", () => {
+    it("getaddrinfo 解析线程起不来（用户实际报的那条）", () => {
+        const raw =
+            "fatal: unable to access 'https://gitee.com/sofqi/plugin-test.git/': " +
+            "getaddrinfo() thread failed to start\nPushing to https://gitee.com/sofqi/plugin-test.git";
+
+        expect(mapError(gitFailed(raw), "pushing")).toBeInstanceOf(GitNetworkError);
+    });
+
+    it("域名解析失败 / 连不上 / 连接被重置", () => {
+        for (const raw of [
+            "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+            "fatal: unable to access 'https://gitee.com/o/r.git/': Failed to connect to gitee.com port 443: Connection refused",
+            "fatal: unable to access 'https://github.com/o/r.git/': Recv failure: Connection was reset",
+            "fatal: unable to access 'https://github.com/o/r.git/': schannel: failed to receive handshake",
+            "fatal: unable to access 'https://github.com/o/r.git/': Couldn't connect to server",
+        ]) {
+            expect(mapError(gitFailed(raw), "pushing"), raw).toBeInstanceOf(GitNetworkError);
+        }
+    });
+
+    it("**HTTP 状态码不是网络问题** —— 403/404 不能被吞进这一类", () => {
+        // 这是这条判据最容易写错的地方：`unable to access` 同样是 403 的开头
+        // （Gitee 的「用户名不被支持」原文），把它算成网络失败会让用户去查
+        // 一个没问题的网络，而真正要改的是凭据里的用户名。
+        const raw =
+            'remote: Username, "oauth2" or "gitee.com" is supported as username when using access token to pull or push the repository\n' +
+            "fatal: unable to access 'https://gitee.com/owner/repo.git/': The requested URL returned error: 403";
+
+        expect(mapError(gitFailed(raw), "pushing")).not.toBeInstanceOf(GitNetworkError);
+    });
+
+    it("网络失败要排在鉴权之前（连不上时 git 还会补一句「读不到用户名」）", () => {
+        const raw =
+            "fatal: could not read Username for 'https://gitee.com': terminal prompts disabled\n" +
+            "fatal: unable to access 'https://gitee.com/o/r.git/': getaddrinfo() thread failed to start";
+
+        expect(mapError(gitFailed(raw), "pushing")).toBeInstanceOf(GitNetworkError);
+    });
+});
+
+/**
+ * 交给 git 子进程的环境（2026-10-02 修的一个真 bug）。
+ *
+ * `simpleGit().env(name, value)` 是**替换**环境而不是追加：simple-git 把
+ * `_executor.env` 原样交给 `child_process.spawn` 的 `env`。修之前我们只设了两个
+ * 非交互开关，于是 git 子进程里**没有 PATH、没有代理变量、没有 USERPROFILE** ——
+ * 表现是「本机终端里好、插件里坏」，而且只在有代理/自定义凭据助手时才现形。
+ */
+describe("gitChildEnv", () => {
+    it("父进程的环境打底（代理、PATH、USERPROFILE 都在）", () => {
+        const env = gitChildEnv({
+            PATH: "C:\\Windows\\System32",
+            USERPROFILE: "C:\\Users\\me",
+            HTTPS_PROXY: "http://127.0.0.1:7890",
+        });
+
+        expect(env.PATH).toBe("C:\\Windows\\System32");
+        expect(env.USERPROFILE).toBe("C:\\Users\\me");
+        // 代理是这一类里最要紧的：国内访问 GitHub 大多靠它
+        expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:7890");
+    });
+
+    it("我们的非交互开关盖在最上面（父进程设了也拦不住）", () => {
+        const env = gitChildEnv({ GIT_TERMINAL_PROMPT: "1", GCM_INTERACTIVE: "always" });
+
+        expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+        expect(env.GCM_INTERACTIVE).toBe("never");
+        // 非交互子进程不该为合并提交开编辑器（stdio 是管道，等不到人）
+        expect(env.GIT_MERGE_AUTOEDIT).toBe("no");
+    });
+
+    it("**删掉 simple-git 会拒绝的那批变量** —— 留着的话整条命令都跑不起来", () => {
+        // 实测报错：`Use of "GIT_PAGER" is not permitted without enabling
+        // allowUnsafePager`。simple-git 3.36 没有暴露那个开关，所以唯一做法是不传。
+        // 这份清单是 2026-10-02 逐个实测出来的（同一批里 HTTPS_PROXY、ALL_PROXY、
+        // VISUAL、SSH_AUTH_SOCK 等是**放行**的，必须留着）。
+        const env = gitChildEnv({
+            PATH: "C:\\Windows",
+            GIT_PAGER: "cat",
+            PAGER: "cat",
+            GIT_EDITOR: "vim",
+            EDITOR: "vim",
+            GIT_SEQUENCE_EDITOR: "vim",
+            GIT_ASKPASS: "askpass",
+            SSH_ASKPASS: "askpass",
+            GIT_SSH: "ssh.exe",
+            GIT_SSH_COMMAND: "ssh -v",
+            GIT_EXTERNAL_DIFF: "difftool",
+            GIT_TEMPLATE_DIR: "C:\\templates",
+            GIT_CONFIG_GLOBAL: "C:\\other-gitconfig",
+            GIT_CONFIG_SYSTEM: "C:\\system-gitconfig",
+            GIT_PROXY_COMMAND: "proxy.exe",
+        });
+
+        for (const name of [
+            "GIT_PAGER",
+            "PAGER",
+            "GIT_EDITOR",
+            "EDITOR",
+            "GIT_SEQUENCE_EDITOR",
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "GIT_EXTERNAL_DIFF",
+            "GIT_TEMPLATE_DIR",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_PROXY_COMMAND",
+        ]) {
+            expect(env[name], name).toBeUndefined();
+        }
+        expect(env.PATH).toBe("C:\\Windows");
+    });
+
+    it("放行的变量仍然继承（代理、ssh agent、编辑器兜底）", () => {
+        const env = gitChildEnv({
+            HTTPS_PROXY: "http://127.0.0.1:7890",
+            ALL_PROXY: "socks5://127.0.0.1:1080",
+            NO_PROXY: "localhost",
+            SSH_AUTH_SOCK: "/tmp/agent.sock",
+            SSL_CERT_FILE: "C:\\certs\\ca.pem",
+        });
+
+        expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:7890");
+        expect(env.ALL_PROXY).toBe("socks5://127.0.0.1:1080");
+        expect(env.NO_PROXY).toBe("localhost");
+        expect(env.SSH_AUTH_SOCK).toBe("/tmp/agent.sock");
+        expect(env.SSL_CERT_FILE).toBe("C:\\certs\\ca.pem");
+    });
+
+    it("**删掉「指定另一个仓库」的变量** —— 否则插件会静默操作错的仓库", () => {
+        // 用户从终端启动 Obsidian 时可能带着 GIT_DIR（或在一个 git --git-dir 的
+        // shell 里）。继承它之后命令全都会「成功」，但动的是别的仓库。
+        const env = gitChildEnv({
+            PATH: "C:\\Windows",
+            GIT_DIR: "D:\\other-repo\\.git",
+            GIT_WORK_TREE: "D:\\other-repo",
+            GIT_INDEX_FILE: "D:\\other\\.git\\index",
+            GIT_OBJECT_DIRECTORY: "D:\\other\\.git\\objects",
+            GIT_ALTERNATE_OBJECT_DIRECTORIES: "D:\\a\\.git\\objects",
+            GIT_COMMON_DIR: "D:\\other\\.git",
+        });
+
+        for (const name of [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+        ]) {
+            expect(env[name], name).toBeUndefined();
+        }
+        expect(env.PATH).toBe("C:\\Windows");
+    });
+
+    it("undefined 的环境项不会变成字符串 \"undefined\"", () => {
+        const env = gitChildEnv({ FOO: undefined, BAR: "1" });
+
+        expect("FOO" in env).toBe(false);
+        expect(env.BAR).toBe("1");
     });
 });

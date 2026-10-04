@@ -35,6 +35,33 @@ export interface GitManager {
     /** 取消暂存。 */
     unstage(paths: string[]): Promise<void>;
 
+    /**
+     * 让 git **不再跟踪**这些路径（`git rm -r --cached`）—— 工作区文件保留。
+     *
+     * 与 `unstage` 的区别是根本性的：那是「撤回暂存」，文件仍被跟踪、下次提交照旧带上；
+     * 这是「退出跟踪」，下次提交会记下一条删除。用来把图片文件夹交给 `.gitignore` 管
+     * （见 `features/sync/imagesIgnore.ts` 的文件头）。
+     */
+    untrack(paths: string[]): Promise<void>;
+
+    /**
+     * 当前**已被跟踪**的所有路径（`git ls-files`）。
+     *
+     * 「按扩展名忽略图片」要用它：`.gitignore` 只管未跟踪的文件，所以必须知道
+     * 哪些已跟踪的图片得摘索引，而这只能问 git（自己扫库会漏掉「已删除但仍在
+     * 索引里」之类的状态，也分不清索引里的路径大小写）。
+     */
+    listTracked(): Promise<string[]>;
+
+    /**
+     * 这批路径里，哪些在索引里记的是**嵌套仓库**（gitlink，模式 `160000`）。
+     *
+     * 用户在库的插件目录里就地开发插件时，那些目录各自带 `.git`，库就把它们记成了
+     * 一个「指针」—— 这种行暂存不掉、没有文件级差异、会永远挂在「更改」里，
+     * 面板要靠这个方法认出它们并给出「不再跟踪」的出口。
+     */
+    nestedRepoPaths(paths: string[]): Promise<string[]>;
+
     /** 创建提交。没有可提交内容时返回 false 而不是报错。 */
     commit(message: string): Promise<boolean>;
 

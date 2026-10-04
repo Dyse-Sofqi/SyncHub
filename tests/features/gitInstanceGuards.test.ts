@@ -38,8 +38,14 @@ vi.mock("simple-git", () => ({
         const env: Record<string, string> = {};
         captured.env.push(env);
         const instance: Record<string, unknown> = {
-            env(name: string, value: string) {
-                env[name] = value;
+            /**
+             * 两种调用形状都要支持，与 simple-git 一致（2026-10-02）：
+             * 对象形式**替换**整个环境，单键形式往现有对象里加 —— 我们用的是对象形式
+             * （见 `gitChildEnv`），替身只认单键的话，验到的就是 `[object Object]`。
+             */
+            env(name: string | Record<string, string>, value?: string) {
+                if (typeof name === "object") Object.assign(env, name);
+                else env[name] = value ?? "";
                 return instance;
             },
             async getRemotes() {

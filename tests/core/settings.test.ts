@@ -5,6 +5,7 @@ import {
     SETTINGS_VERSION,
     normalizeSettings,
 } from "../../src/core/settings";
+import { DEFAULT_SELF_SOURCE } from "../../src/features/installer/selfUpdate";
 
 describe("availableUpdateKey（身份键）", () => {
     it("带 kind 前缀 —— 插件 id 与主题目录名是两个命名空间", () => {
@@ -36,19 +37,109 @@ describe("normalizeSettings", () => {
         expect(normalizeSettings("garbage")).toEqual(expected);
     });
 
+    /**
+     * 默认的提交信息模板（2026-10-02 用户要求加上文件数）。
+     *
+     * 钉住它，是因为它出现在**用户永远看得到的地方**：库里每一条自动提交的信息
+     * 都是这句话。换措辞是有意的产品决定，不该被顺手改掉。
+     *
+     * 后半段钉的是另一半事实：**改默认值不动老数据**。模板属于用户可编辑的设置，
+     * `mergeWithDefaults` 让存着的值优先 —— 老库升级后仍是它们自己的模板。
+     */
+    it("默认的提交信息模板带文件数，但不会改写老库里存着的模板", () => {
+        expect(DEFAULT_SETTINGS.sync.commitMessage).toBe(
+            "vault backup: {{date}} ({{numFiles}} files)"
+        );
+        // 没有这一项时补上默认值
+        expect(normalizeSettings({ version: 8, sync: {} }).sync.commitMessage).toBe(
+            DEFAULT_SETTINGS.sync.commitMessage
+        );
+        // 老库里存着旧模板 → 原样保留
+        expect(
+            normalizeSettings({
+                version: 8,
+                sync: { commitMessage: "vault backup: {{date}}" },
+            }).sync.commitMessage
+        ).toBe("vault backup: {{date}}");
+    });
+
     it("保留用户已设置的值", () => {
         const settings = normalizeSettings({
-            language: "zh-cn",
             debugLogging: true,
-            sync: { autoCommitMinutes: 15 },
+            sync: { commitMessage: "我的模板" },
         });
 
-        expect(settings.language).toBe("zh-cn");
         expect(settings.debugLogging).toBe(true);
-        expect(settings.sync.autoCommitMinutes).toBe(15);
+        expect(settings.sync.commitMessage).toBe("我的模板");
         // 同一层里没提到的字段要被补上，而不是整层被替换
-        expect(settings.sync.commitMessage).toBe(DEFAULT_SETTINGS.sync.commitMessage);
         expect(settings.sync.gitPath).toBe("");
+        expect(settings.sync.intervalMinutes).toBe(DEFAULT_SETTINGS.sync.intervalMinutes);
+    });
+
+    /**
+     * 老 `data.json` 里还留着 `language`（那个设置项 2026-10-01 删了）。
+     *
+     * 它不需要迁移代码就**自动消失**：`mergeWithDefaults` 只保留默认值里存在的
+     * 键。但这条断言还是要有 —— 它守的是「那个设置项真的没了」，而不是
+     * 「代码里没人读它了」。
+
+     * 顺带说明为什么它该消失：界面语言一律跟随 Obsidian，留一个能与 Obsidian
+     * 不一致的开关只会让「界面语言不对」变成用户自己造得出来的状态。
+     */
+    it("丢掉已经删掉的 `language` 字段（界面语言跟随 Obsidian）", () => {
+        const settings = normalizeSettings({ language: "zh-cn" }) as unknown as Record<
+            string,
+            unknown
+        >;
+
+        expect("language" in settings).toBe(false);
+    });
+
+    /**
+     * **自身更新的默认来源是 Gitee 镜像**（2026-10-01）。
+     *
+     * 这一组盯的是「已经装过插件的人也会跟着走镜像」：当年这个字段默认是空串
+     * （空串表示官方仓库），所以老 `data.json` 里存着的正是空串 —— 不把它收敛到
+     * 新默认，「默认改走镜像」对老用户**一个都不生效**。
+     */
+    describe("自身更新来源的默认值", () => {
+        it("出厂设置就是 Gitee 镜像地址", () => {
+            expect(DEFAULT_SETTINGS.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+        });
+
+        it("老数据里的空串被收敛到默认（当年空串 = 官方）", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: "" },
+            });
+
+            expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+        });
+
+        it("全空白也算「用默认」", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: "   " },
+            });
+
+            expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+        });
+
+        it("类型不对（手改坏了）也回落到默认，而不是留一个空值", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: 42 },
+            });
+
+            expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+        });
+
+        it("用户填了别的地址就原样保留（默认只在没填时生效）", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: "https://github.com/Dyse-Sofqi/SyncHub" },
+            });
+
+            expect(settings.installer.selfUpdateSource).toBe(
+                "https://github.com/Dyse-Sofqi/SyncHub"
+            );
+        });
     });
 
     it("补齐新增的嵌套设置项，不需要写迁移代码", () => {
@@ -65,12 +156,10 @@ describe("normalizeSettings", () => {
 
     it("丢弃类型不匹配的旧值", () => {
         const settings = normalizeSettings({
-            language: 42,
             showNotices: "yes",
             installer: { enabled: "true" },
         });
 
-        expect(settings.language).toBe(DEFAULT_SETTINGS.language);
         expect(settings.showNotices).toBe(DEFAULT_SETTINGS.showNotices);
         expect(settings.installer.enabled).toBe(DEFAULT_SETTINGS.installer.enabled);
     });
@@ -93,17 +182,103 @@ describe("normalizeSettings", () => {
     it("钳制越界或非法的数值", () => {
         const settings = normalizeSettings({
             installer: { autoCheckDelaySeconds: -10 },
-            sync: {
-                autoCommitMinutes: 99999,
-                autoPushMinutes: Number.NaN,
-                autoPullMinutes: 12.7,
-            },
+            version: 7,
+            sync: { intervalMinutes: 99999 },
         });
 
         expect(settings.installer.autoCheckDelaySeconds).toBe(0);
-        expect(settings.sync.autoCommitMinutes).toBe(24 * 60);
-        expect(settings.sync.autoPushMinutes).toBe(0);
-        expect(settings.sync.autoPullMinutes).toBe(13);
+        expect(settings.sync.intervalMinutes).toBe(24 * 60);
+    });
+
+    /**
+     * 周期里**没有「0 = 关闭」**（2026-10-02 起）—— 开与关只由 `enabled` 表达。
+     *
+     * 落进一个 0 会变成「开着却永不触发」的假状态，所以 0 / 负数 / 非数字都收敛
+     * 到默认值（而不是钳到 1：每分钟自动提交一次比「用默认值」更糟）。
+     */
+    it("周期是 0 / 负数 / 非数字时收敛到默认值", () => {
+        for (const bad of [0, -5, Number.NaN]) {
+            const settings = normalizeSettings({
+                version: 7,
+                sync: { intervalMinutes: bad },
+            });
+            expect(settings.sync.intervalMinutes).toBe(DEFAULT_SETTINGS.sync.intervalMinutes);
+        }
+    });
+
+    /**
+     * v6 → v7（2026-10-02）：三个自动间隔合成一个「定时同步」周期。
+     *
+     * 这一组守的是**升级不会自己跑起来**：老模型里「开关开着 + 三个间隔全是 0」
+     * 的实际行为是什么都不做，而新模型里一旦开着就会每 N 分钟提交并推送 ——
+     * 迁移不能替用户把前者变成后者。
+     */
+    describe("v6 → v7：三个间隔合成一个周期", () => {
+        it("老的主间隔（完整链路那条）原样接过来，开关照旧", () => {
+            const settings = normalizeSettings({
+                version: 6,
+                sync: {
+                    enabled: true,
+                    autoCommitMinutes: 30,
+                    autoPushMinutes: 30,
+                    autoPullMinutes: 30,
+                },
+            });
+
+            expect(settings.sync.intervalMinutes).toBe(30);
+            expect(settings.sync.enabled).toBe(true);
+        });
+
+        it("三个都是 0 时开关置回关 —— 否则升级后立刻每 10 分钟跑一次", () => {
+            const settings = normalizeSettings({
+                version: 6,
+                sync: {
+                    enabled: true,
+                    autoCommitMinutes: 0,
+                    autoPushMinutes: 0,
+                    autoPullMinutes: 0,
+                },
+            });
+
+            expect(settings.sync.enabled).toBe(false);
+            expect(settings.sync.intervalMinutes).toBe(DEFAULT_SETTINGS.sync.intervalMinutes);
+        });
+
+        it("「只拉取」的老配置不会变成「开始推送」", () => {
+            // 这台设备当初刻意避开推送 —— 取最小正数当新周期就会让它开始推。
+            const settings = normalizeSettings({
+                version: 6,
+                sync: {
+                    enabled: true,
+                    autoCommitMinutes: 0,
+                    autoPushMinutes: 0,
+                    autoPullMinutes: 30,
+                },
+            });
+
+            expect(settings.sync.enabled).toBe(false);
+        });
+
+        it("已经是 v7 的数据一个字段都不碰（旧字段只是残留）", () => {
+            const settings = normalizeSettings({
+                version: 7,
+                sync: { enabled: true, intervalMinutes: 45, autoCommitMinutes: 0 },
+            });
+
+            expect(settings.sync.intervalMinutes).toBe(45);
+            expect(settings.sync.enabled).toBe(true);
+        });
+
+        it("升级后**不再有**那三个旧字段（旧的 data.json 残留会被丢掉）", () => {
+            const settings = normalizeSettings({
+                version: 6,
+                sync: { enabled: true, autoCommitMinutes: 30, autoPushMinutes: 5 },
+            }) as unknown as { sync: Record<string, unknown> };
+
+            expect("autoCommitMinutes" in settings.sync).toBe(false);
+            expect("autoPushMinutes" in settings.sync).toBe(false);
+            expect("autoPullMinutes" in settings.sync).toBe(false);
+        });
     });
 
     it("返回的设置**不与 DEFAULT_SETTINGS 共享嵌套对象**（改它不会污染默认值）", () => {
@@ -124,16 +299,16 @@ describe("normalizeSettings", () => {
             frozen: false,
             installedAt: 0,
         });
-        first.sync.autoCommitMinutes = 99;
+        first.sync.intervalMinutes = 99;
 
         // 默认值本身没被改动
         expect(DEFAULT_SETTINGS.installer.tracked).toEqual([]);
-        expect(DEFAULT_SETTINGS.sync.autoCommitMinutes).toBe(0);
+        expect(DEFAULT_SETTINGS.sync.intervalMinutes).toBe(10);
 
         // 再读一次也看不到上一次的写入
         const second = normalizeSettings({});
         expect(second.installer.tracked).toEqual([]);
-        expect(second.sync.autoCommitMinutes).toBe(0);
+        expect(second.sync.intervalMinutes).toBe(10);
     });
 
     it("始终写入当前设置版本号", () => {
@@ -141,8 +316,8 @@ describe("normalizeSettings", () => {
     });
 
     it("不把数组误当成嵌套对象合并", () => {
-        const settings = normalizeSettings({ language: ["zh-cn"] });
-        expect(settings.language).toBe(DEFAULT_SETTINGS.language);
+        const settings = normalizeSettings({ showNotices: ["true"] });
+        expect(settings.showNotices).toBe(DEFAULT_SETTINGS.showNotices);
     });
 
     it("空白仓库默认不参与自动更新检查", () => {
@@ -642,8 +817,13 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
         expect(DEFAULT_SETTINGS.images.deleteRemotePolicy).toBe("ask");
     });
 
-    it("默认：自动同步关闭（它真的读写文件与网络，不该自己跑起来）", () => {
-        expect(DEFAULT_SETTINGS.images.autoSyncMinutes).toBe(0);
+    it("默认：按周期同步关着（它真的读写文件与网络，不该自己跑起来）", () => {
+        // 2026-10-02（v8）起「关」是**独立的开关**，不是「间隔为 0」：
+        // 数字里没有 0 的含义，范围 5–1440。
+        expect(DEFAULT_SETTINGS.images.autoSyncEnabled).toBe(false);
+        // 而周期本身有个合理默认值 —— 用户打开开关的那一刻就该看到一个数字，
+        // 不是一个 0。
+        expect(DEFAULT_SETTINGS.images.autoSyncMinutes).toBe(10);
     });
 
     it("默认：总开关开着，但没配好之前它什么也不做", () => {
@@ -667,6 +847,7 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
                 compressQuality: 60,
                 compressMaxEdge: 2400,
                 autoSyncMinutes: 30,
+                autoSyncEnabled: true,
                 enabled: false,
                 deleteRemotePolicy: "never",
             },
@@ -684,6 +865,7 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
             compressQuality: 60,
             compressMaxEdge: 2400,
             autoSyncMinutes: 30,
+            autoSyncEnabled: true,
             enabled: false,
             deleteRemotePolicy: "never",
         });
@@ -749,6 +931,76 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
         expect(settings.images.autoSyncMinutes).toBe(24 * 60);
         expect(settings.images.compressQuality).toBe(100);
         expect(settings.images.compressMaxEdge).toBe(20_000);
+    });
+
+    /**
+     * 「按周期同步」的周期下限是 **5**（2026-10-02 用户提出）。
+     *
+     * 与 `compressQuality` 下限 10 同源：每 1 分钟跑一轮整库比对没有意义，
+     * 而用户多半是手滑拖到底。低于下限（含 0 / 负数 / 非数字）收敛到**默认值**
+     * 而不是钳到 5 —— 5 分钟一轮比默认值更激进，不该是「填错」的结果。
+     */
+    it("周期低于 5（含 0 / 负数 / 非数字）收敛到默认值，而不是钳到 5", () => {
+        for (const bad of [0, 1, 4, -10, Number.NaN]) {
+            const settings = normalizeSettings({
+                version: 8,
+                images: { autoSyncEnabled: true, autoSyncMinutes: bad },
+            });
+            expect(settings.images.autoSyncMinutes).toBe(DEFAULT_SETTINGS.images.autoSyncMinutes);
+        }
+
+        // 5 本身是合法的
+        expect(
+            normalizeSettings({ version: 8, images: { autoSyncMinutes: 5 } }).images.autoSyncMinutes
+        ).toBe(5);
+    });
+
+    /**
+     * v7 → v8：「按周期同步」的开关从「间隔为 0」拆成独立字段。
+     *
+     * 守的是**升级不会自己跑起来**：老模型里 `autoSyncMinutes === 0` 就是关闭，
+     * 而那正是绝大多数存量库的状态。
+     */
+    describe("v7 → v8：开关从「间隔为 0」拆出来", () => {
+        it("旧周期 > 0：接过来，并把开关置为开", () => {
+            const settings = normalizeSettings({
+                version: 7,
+                images: { autoSyncMinutes: 30 },
+            });
+
+            expect(settings.images.autoSyncEnabled).toBe(true);
+            expect(settings.images.autoSyncMinutes).toBe(30);
+        });
+
+        it("旧周期 = 0（默认，绝大多数）：开关置为关，周期留默认值", () => {
+            const settings = normalizeSettings({
+                version: 7,
+                images: { enabled: true, autoSyncMinutes: 0 },
+            });
+
+            expect(settings.images.autoSyncEnabled).toBe(false);
+            expect(settings.images.autoSyncMinutes).toBe(DEFAULT_SETTINGS.images.autoSyncMinutes);
+        });
+
+        it("已经是 v8 的数据一个字段都不碰", () => {
+            const settings = normalizeSettings({
+                version: 8,
+                images: { autoSyncEnabled: false, autoSyncMinutes: 45 },
+            });
+
+            expect(settings.images.autoSyncEnabled).toBe(false);
+            expect(settings.images.autoSyncMinutes).toBe(45);
+        });
+
+        it("旧数据里那些低于 5 的周期也会被抬到默认值（不会钳到 5 那样更激进）", () => {
+            const settings = normalizeSettings({
+                version: 7,
+                images: { autoSyncMinutes: 2 },
+            });
+
+            expect(settings.images.autoSyncEnabled).toBe(true);
+            expect(settings.images.autoSyncMinutes).toBe(DEFAULT_SETTINGS.images.autoSyncMinutes);
+        });
     });
 
     it("质量下限是 10 而不是 1（质量 1 的 jpeg 基本不可看，而用户多半是手滑拖到底）", () => {
@@ -910,9 +1162,17 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
             expect(settings.images.deleteRemotePolicy).toBe("never");
         });
 
-        it("版本号升到 6", () => {
-            expect(SETTINGS_VERSION).toBe(6);
-            expect(v5({}).version).toBe(6);
+        /**
+         * 版本号是**写死的**：加迁移时这一步会红，逼人回来看一眼
+         * 「新迁移接在所有旧迁移后面了吗」。
+         *
+         * 2026-10-02 从 6 提到 7（`migrateV6ToV7`：三个间隔合成一个「定时同步」周期），
+         * 同一天又提到 8（`migrateV7ToV8`：图片那条「按周期同步」的开关从间隔里拆出来）。
+         * 两个都必须排在 v5 → v6 之后（与上面的链条用例同一个理由）。
+         */
+        it("版本号升到 8", () => {
+            expect(SETTINGS_VERSION).toBe(8);
+            expect(v5({}).version).toBe(8);
         });
     });
 });

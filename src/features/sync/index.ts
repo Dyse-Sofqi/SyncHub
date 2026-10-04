@@ -30,6 +30,15 @@ export interface SyncModule {
     stop(): void;
     /** 设置变化后调用（间隔/gitPath 变了要重起定时器与实例）。 */
     reload(): void;
+    /**
+     * 打开「仓库同步」面板。
+     *
+     * 一行转发到 `deps.openSourceControlView()`（真正开视图的是主类，它才拿得到
+     * `WorkspaceLeaf`）。放在模块接口上是**给设置页用的**：那一页的「打开仓库同步
+     * 面板」按钮只需要一个能调的东西，而不该知道主类内部怎么开视图
+     * （2026-10-02 加）。
+     */
+    openView(): void;
 }
 
 export interface SyncDeps {
@@ -83,9 +92,7 @@ export function createSyncModule(deps: SyncDeps): SyncModule | undefined {
         // 只在设置页把开关灰掉是不够的 —— 库里**已经**存着 enabled + reset 的用户
         // 根本不会去动设置页，定时器会照跑，而 UI 看起来一切正常。
         syncStrategy: deps.getSettings().sync.syncStrategy,
-        autoCommitMinutes: deps.getSettings().sync.autoCommitMinutes,
-        autoPushMinutes: deps.getSettings().sync.autoPushMinutes,
-        autoPullMinutes: deps.getSettings().sync.autoPullMinutes,
+        intervalMinutes: deps.getSettings().sync.intervalMinutes,
     }));
 
     return {
@@ -110,6 +117,10 @@ export function createSyncModule(deps: SyncDeps): SyncModule | undefined {
             });
             automatics.restart();
             void service.refresh();
+        },
+
+        openView(): void {
+            deps.openSourceControlView();
         },
     };
 }

@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { App } from "obsidian";
 import { createdSettings, openedModals, resetCreatedSettings, resetOpenedModals } from "../stubs/obsidian";
-import { normalizeSettings, type ObsyncSettings } from "../../src/core/settings";
+import { DEFAULT_SETTINGS, normalizeSettings, type ObsyncSettings } from "../../src/core/settings";
 import { zhCN } from "../../src/core/i18n/locales/zh-cn";
 import { Notifier } from "../../src/core/notice";
 import { SecretStore } from "../../src/core/secretStore";
@@ -27,11 +27,14 @@ import { createFakeApp, type FakeApp } from "../helpers/fakeApp";
  * 只有「仓库同步页」的用例需要构造特定的拉取策略，其余页面用默认值就够。
  * @param sync 同步模块的替身。不传时 `this.obsync.sync` 是 undefined ——
  * 那正是移动端 / 装配失败时的状态，「仓库同步页」必须能扛住它。
+ * @param images 图片同步模块的替身。不传时 `this.obsync.images` 是 undefined ——
+ * 「操作」那一节会走「没装配出服务」的分支（只画一行说明）。
  */
 function createTab(
     fake: FakeApp,
     raw: Record<string, unknown> = {},
-    sync?: unknown
+    sync?: unknown,
+    images?: unknown
 ): ObsyncSettingsTab {
     const settings = normalizeSettings(raw);
     const notifier = new Notifier({ getShowNotices: () => true, getT: () => zhCN });
@@ -47,6 +50,7 @@ function createTab(
         isSyncAvailable: true,
         secretStore: new SecretStore(fake.app),
         sync,
+        images,
         // `commit()` 会调这两个。**必须真的记一笔**：不记的话
         // 「拨了开关有没有生效」这件事就验不了 —— 而设置页最容易犯的错正是
         // 「改了值但没落盘 / 没重算派生状态」（那表现为「拨了没用」）。
@@ -63,9 +67,138 @@ function createTab(
             service: {} as InstallerService,
             checker: {} as UpdateChecker,
         },
+        openImageManager(): void {},
     };
 
     return new ObsyncSettingsTab(plugin as never);
+}
+
+/**
+ * 设置页正在编辑的那份设置对象。
+ *
+ * 两页都要用，所以放在模块作用域（原先它只在「图片同步页」那个 describe 里，
+ * 于是「仓库同步页」的用例读不到设置 —— 而那正是「拨了开关有没有生效」要验的东西）。
+ */
+function settingsOf(tab: ObsyncSettingsTab): ObsyncSettings {
+    return (tab as unknown as { obsync: { settings: ObsyncSettings } }).obsync.settings;
+}
+
+/**
+ * 同步模块的替身：只实现 `.gitignore` 一节与连接测试用到的那几个方法，
+ * 并把写入记下来。
+ */
+function createSyncStub(initial?: string) {
+    const stub = {
+        writes: [] as string[],
+        opened: 0,
+        /** 「打开仓库同步面板」被点了几次（2026-10-02 加的按钮）。 */
+        viewOpened: 0,
+        /** 下一次自动同步的时刻（`Automatics.nextRunAt()` 的替身，倒计时读它）。 */
+        nextRunAt: undefined as number | undefined,
+        /** 同步是否正在进行（倒计时这时改说「正在同步…」）。 */
+        busy: false,
+        automatics: {
+            nextRunAt(): number | undefined {
+                return stub.nextRunAt;
+            },
+        },
+        /** `openGitignore` 的返回值 —— false 模拟「Obsidian 打不开它」。 */
+        openResult: true,
+        /** 设了就让读失败。 */
+        readError: undefined as Error | undefined,
+        /** 设了就让写失败（模拟磁盘/权限问题）。 */
+        writeError: undefined as Error | undefined,
+        /** `untrackPaths` 收到的路径（「让 git 不再跟踪图片」那一步）。 */
+        untracked: [] as string[][],
+        /** `listTrackedPaths()` 返回的已跟踪路径（「按扩展名」靠它找图片）。 */
+        tracked: [] as string[],
+        /** 远端地址（「远端地址」那一行读它、改它）。 */
+        remoteUrl: "https://github.com/owner/repo.git" as string | undefined,
+        /** `setRemoteUrl` 收到的地址（就地编辑远端那一条用例看它）。 */
+        savedRemotes: [] as string[],
+        /** `service.refresh()` 被调了几次（远端改完要强制刷新）。 */
+        refreshes: 0,
+        git: {
+            async getRemoteUrl(): Promise<string | undefined> {
+                return stub.remoteUrl;
+            },
+            async setRemoteUrl(url: string): Promise<void> {
+                stub.savedRemotes.push(url);
+                stub.remoteUrl = url;
+            },
+        },
+        content: initial,
+        openView(): void {
+            stub.viewOpened += 1;
+        },
+        service: {
+            get isBusy(): boolean {
+                return stub.busy;
+            },
+            async readGitignore(): Promise<string | undefined> {
+                if (stub.readError) throw stub.readError;
+                return stub.content;
+            },
+            async writeGitignore(value: string): Promise<void> {
+                if (stub.writeError) throw stub.writeError;
+                stub.writes.push(value);
+                stub.content = value;
+            },
+            async openGitignore(): Promise<boolean> {
+                stub.opened += 1;
+                return stub.openResult;
+            },
+            async untrackPaths(paths: string[]): Promise<void> {
+                stub.untracked.push([...paths]);
+            },
+            async listTrackedPaths(): Promise<string[]> {
+                return [...stub.tracked];
+            },
+            async diagnose() {
+                return { ok: true, checks: [] };
+            },
+            async refresh(): Promise<void> {
+                stub.refreshes += 1;
+            },
+        },
+    };
+    return stub;
+}
+
+/** 图片同步服务的替身：三个动作各返回一个固定结果。 */
+function createImagesStub(options: {
+    /** R2 配好了没（`isConfigured()`）—— 没配好时「停止跟踪图片」必须拒绝执行。 */
+    configured?: boolean;
+    /** 下一轮清单里**待上传**的条目数（大于 0 时同样拒绝执行）。 */
+    pendingUploads?: number;
+    /** 让 `plan()` 抛错（列不出远端清单）。 */
+    planError?: Error;
+} = {}) {
+    const pending = options.pendingUploads ?? 0;
+    return {
+        service: {
+            isConfigured(): boolean {
+                return options.configured ?? true;
+            },
+            async testConnection() {
+                return { ok: true };
+            },
+            async plan() {
+                if (options.planError) throw options.planError;
+                return {
+                    truncated: false,
+                    entries: Array.from({ length: pending }, (_unused, index) => ({
+                        path: `attachments/${index}.png`,
+                        action: "upload" as const,
+                        reason: "local-new" as const,
+                    })),
+                };
+            },
+            async run() {
+                return { uploaded: 0, downloaded: 0, failed: 0, errors: [], truncated: false };
+            },
+        },
+    };
 }
 
 function renderInstallerPage(tab: ObsyncSettingsTab): void {
@@ -295,6 +428,10 @@ describe("设置页 · 仓库同步页", () => {
         cls?: string;
         text?: string;
         children?: ShimEl[];
+        /** `createEl` 记下的标签名（大写，与真实 DOM 一致）。 */
+        tagName?: string;
+        /** `createEl({ attr })` 记下的属性 —— 断言链接的 `href` 用。 */
+        attrs?: Record<string, string>;
     };
 
     function renderSyncPage(tab: ObsyncSettingsTab): void {
@@ -304,6 +441,35 @@ describe("设置页 · 仓库同步页", () => {
     function childrenOf(tab: ObsyncSettingsTab): ShimEl[] {
         const container = (tab as unknown as { containerEl: { children: unknown[] } }).containerEl;
         return container.children as ShimEl[];
+    }
+
+    /**
+     * 在节点树里**递归**找。
+     *
+     * 设置行自 2026-10-02 起收进了 `.setting-group > .setting-items`（见
+     * `settingsTab.openGroup`），于是代码框、结果区、提示段都不再是
+     * `containerEl` 的直接子节点 —— 只看一层会全部找不到。
+     */
+    function findAll(root: ShimEl, predicate: (el: ShimEl) => boolean): ShimEl[] {
+        const out: ShimEl[] = [];
+        const walk = (el: ShimEl): void => {
+            for (const child of el.children ?? []) {
+                if (predicate(child)) out.push(child);
+                walk(child);
+            }
+        };
+        walk(root);
+        return out;
+    }
+
+    /** 某个节点落在哪一组里（找不到就是不在任何组里）。 */
+    function groupOf(tab: ObsyncSettingsTab, target: ShimEl): ShimEl | undefined {
+        const container = (tab as unknown as { containerEl: ShimEl }).containerEl;
+        const contains = (el: ShimEl): boolean =>
+            el === target || (el.children ?? []).some((child) => contains(child));
+        return findAll(container, (el) => el.cls === "setting-items").find((group) =>
+            (group.children ?? []).some((child) => contains(child))
+        );
     }
 
     it("渲染不抛错，且注意事项紧跟在「仓库同步」标题下面", () => {
@@ -337,6 +503,498 @@ describe("设置页 · 仓库同步页", () => {
         expect(list?.children?.map((item) => item.text)).toEqual(zhCN.settings.sync.notes);
     });
 
+    /**
+     * 分节：相关的设置行收进**同一张卡片**。
+     *
+     * 由来（2026-10-02）：Obsidian 1.13 起一条 `Setting` 自己就是一张卡片，
+     * 于是这一页变成十几张紧挨着的卡片 —— 没有层次，每一行都在同样大声地喊。
+     * 用户的原话是「图中展示的布局样式是丑陋的」。
+     */
+    describe("分节（.setting-group）", () => {
+        it("同一节里的几行落在同一组，跨节的落在不同组", () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+
+            const el = (name: string): ShimEl =>
+                createdSettings.find((setting) => setting.name === name)!.settingEl as unknown as ShimEl;
+
+            // 定时同步、提交模板、整合策略是「怎么同步」那一组
+            const basics = groupOf(tab, el(zhCN.settings.sync.enabled));
+            expect(basics).toBeDefined();
+            expect(groupOf(tab, el(zhCN.settings.sync.commitMessage))).toBe(basics);
+            expect(groupOf(tab, el(zhCN.settings.sync.strategy))).toBe(basics);
+
+            // git 路径自 2026-10-04 起**提到「连接测试」之前**（它是测试能通过的前提），
+            // 所以不再属于「怎么同步」那一组
+            expect(groupOf(tab, el(zhCN.settings.sync.gitPath))).not.toBe(basics);
+
+            // 但「忽略规则」与「连接测试」是**另外两节**（各自一节一张卡片）
+            expect(groupOf(tab, el(zhCN.settings.sync.gitignoreHeading))).not.toBe(basics);
+            expect(groupOf(tab, el(zhCN.sync.diagnoseHeading))).not.toBe(basics);
+        });
+
+        /**
+         * 这一页的结构约定（2026-10-04 用户的话）：
+         *
+         * **「连接测试」之前的每一项都必须是「测试能通过」的充要条件。**
+         *
+         * 连接测试查的就是这两件事 —— git 能不能跑（git 可执行文件路径）、远端能不能连
+         * （远端地址）。别的一律排在它后面，免得用户为了「为什么连不上」先滑过一堆
+         * 与连接无关的设置。
+         */
+        it("「连接测试」之前只有两个前提项：远端地址与 git 可执行文件路径", async () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+            await flush();
+
+            const before = createdSettings
+                .slice(0, createdSettings.findIndex((s) => s.name === zhCN.sync.diagnoseHeading))
+                .map((setting) => setting.name)
+                // 标题行、注意事项之后的区块标题不算设置项
+                .filter((name) => name && name !== zhCN.settings.sync.heading);
+
+            expect(before).toEqual([
+                zhCN.sync.remoteLabel,
+                zhCN.settings.sync.gitPath,
+            ]);
+        });
+
+        /**
+         * 「打开仓库同步面板」按钮（2026-10-02）。
+         *
+         * 用户的原话：「仓库同步设置页下，应该添加打开仓库同步视图的按钮」——
+         * 面板本来有三个入口（命令面板 / 侧栏图标 / 状态栏），唯独这一页没有，
+         * 而这里恰恰是用户会想「让我看一眼现在什么状态」的地方。
+         */
+        it("「打开仓库同步面板」按钮与远端地址同一行（2026-10-04 合并）", async () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+            await flush();
+
+            const remote = createdSettings.find(
+                (setting) => setting.name === zhCN.sync.remoteLabel
+            );
+            expect(remote, "页面上没有远端地址那一行").toBeDefined();
+            // 同一个 `Setting` 上：一个输入框 + 一个按钮 —— 原先那个只剩一个按钮的
+            // 「操作」一节已经并进来了
+            expect(remote!.texts).toHaveLength(1);
+            expect(remote!.buttons.map((button) => button.text)).toEqual([
+                zhCN.settings.sync.openView,
+            ]);
+            // 说明文字改挂 tooltip（那一行放不下两段描述）
+            expect(remote!.buttons[0]!.tooltip).toBe(zhCN.settings.sync.openViewDesc);
+
+            // 页面上的区块第一位仍然是「注意事项」之后紧接着这一行
+            const children = (tab as unknown as { containerEl: ShimEl }).containerEl.children ?? [];
+            const notesIndex = children.findIndex((child) => child.cls === "obsync-sync-notes");
+            expect(notesIndex).toBeGreaterThanOrEqual(0);
+        });
+
+        it("点「打开仓库同步面板」→ 调到同步模块上那个入口", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(createFakeApp(), {}, sync);
+            renderSyncPage(tab);
+            await flush();
+
+            const remote = createdSettings.find(
+                (setting) => setting.name === zhCN.sync.remoteLabel
+            )!;
+            remote.buttons[0]!.click();
+
+            expect(sync.viewOpened).toBe(1);
+        });
+
+        /**
+         * 没有同步模块时按钮点了也不抛 —— 钉的是 `this.obsync.sync?.openView()` 上
+         * 那个可选链。
+         *
+         * 真机上这一页只在桌面端渲染（`isSyncAvailable` 与模块一起为假），所以这条
+         * 在这个替身里构造的情形只是为了让「少了 `?.`」立刻变成红：那时点一下就是
+         * `TypeError: Cannot read properties of undefined`。
+         */
+        it("没有同步模块时按钮点了也不抛（可选链那一层）", () => {
+            const tab = createTab(createFakeApp());
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.openView
+            );
+            expect(() => row?.buttons[0]?.click()).not.toThrow();
+        });
+
+        /**
+         * 「连接测试」在这一页的**顶部区域**（2026-10-02 用户要求：「放到最上边展示」）。
+         *
+         * 与图片同步页把「操作」提到最前同一条理由：它是动作，而下面两节是配一次
+         * 就不再翻的设置。位置是「注意事项之后」（现在它上面多了「操作」那一节，
+         * 面板入口比它更常用 —— 见上一条用例），并且在「定时同步」之前。
+         */
+        it("「连接测试」排在所有设置组之前，且紧跟注意事项", () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+
+            const children = (tab as unknown as { containerEl: ShimEl }).containerEl.children ?? [];
+            const notesIndex = children.findIndex((child) => child.cls === "obsync-sync-notes");
+            const firstGroupIndex = children.findIndex(
+                (child) => child.cls === "setting-group obsync-group"
+            );
+            expect(notesIndex).toBeGreaterThanOrEqual(0);
+            // 第一个设置组就是「连接测试」那一组：它的标题行在建组时最先登记
+            expect(firstGroupIndex).toBeGreaterThan(notesIndex);
+
+            const indexOf = (name: string): number =>
+                createdSettings.findIndex((setting) => setting.name === name);
+            expect(indexOf(zhCN.sync.diagnoseHeading)).toBeLessThan(
+                indexOf(zhCN.settings.sync.enabled)
+            );
+            // 「忽略规则」仍排在它后面
+            expect(indexOf(zhCN.sync.diagnoseHeading)).toBeLessThan(
+                indexOf(zhCN.settings.sync.gitignoreHeading)
+            );
+        });
+
+        /**
+         * 远端地址（2026-10-04 用户要求：「远端地址应该在仓库同步的设置页中设置才对，
+         * 移到测试连接之前展示」）。
+         *
+         * 位置是关键的一半：**先填地址，再测连接** —— 连接测试测的正是这个地址。
+         */
+        describe("远端地址", () => {
+            it("排在「连接测试」之前，且在「注意事项」与「打开面板」之后", async () => {
+                const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+                renderSyncPage(tab);
+                await flush();
+
+                const indexOf = (name: string): number =>
+                    createdSettings.findIndex((setting) => setting.name === name);
+
+                expect(indexOf(zhCN.sync.remoteLabel)).toBeGreaterThanOrEqual(0);
+                // 先填地址，再测连接
+                expect(indexOf(zhCN.sync.remoteLabel)).toBeLessThan(
+                    indexOf(zhCN.sync.diagnoseHeading)
+                );
+                // 不抢「打开仓库同步面板」的位置
+                expect(indexOf(zhCN.settings.sync.openView)).toBeLessThan(
+                    indexOf(zhCN.sync.remoteLabel)
+                );
+            });
+
+            it("就地改地址：失焦保存 + 强制刷新（与面板那一行同一份行为）", async () => {
+                const stub = createSyncStub("# 规则\n");
+                const tab = createTab(createFakeApp(), {}, stub);
+                renderSyncPage(tab);
+                await flush();
+
+                const row = createdSettings.find(
+                    (setting) => setting.name === zhCN.sync.remoteLabel
+                );
+                const input = row!.texts[0]!.inputEl as unknown as {
+                    value: string;
+                    trigger?: (name: string) => void;
+                };
+                expect(input.value).toBe(stub.remoteUrl);
+
+                input.value = "https://gitee.com/other/repo.git";
+                input.trigger!("blur");
+                await flush();
+
+                expect(stub.savedRemotes).toEqual(["https://gitee.com/other/repo.git"]);
+                expect(stub.refreshes).toBe(1);
+            });
+
+            it("带令牌的地址回显脱敏（这一页同样显示在屏幕上）", async () => {
+                const stub = createSyncStub("# 规则\n");
+                stub.remoteUrl = "https://user:secret-token@github.com/owner/repo.git";
+                const tab = createTab(createFakeApp(), {}, stub);
+                renderSyncPage(tab);
+                await flush();
+
+                const row = createdSettings.find(
+                    (setting) => setting.name === zhCN.sync.remoteLabel
+                );
+                const value = (
+                    row!.texts[0]!.inputEl as unknown as { value: string }
+                ).value;
+                expect(value).not.toContain("secret-token");
+                expect(value).toContain("github.com/owner/repo.git");
+            });
+        });
+
+        it("节标题是组内的标题行（原生 `.setting-item-heading`），不是又一张卡片", () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+
+            const heading = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.gitignoreHeading
+            );
+            expect(heading).toBeDefined();
+
+            // 标题行直属于 `.setting-group`，**不在** `.setting-items` 里 ——
+            // 这正是原生结构：标题在卡片外、行在卡片内。放错了标题会变成一张
+            // 单独的空卡片（那正是这次要修掉的形态）。
+            const group = findAll(
+                (tab as unknown as { containerEl: ShimEl }).containerEl,
+                (el) => el.cls === "setting-group obsync-group"
+            ).find((candidate) =>
+                (candidate.children ?? []).includes(heading!.settingEl as unknown as ShimEl)
+            );
+            expect(group).toBeDefined();
+        });
+
+        it("「填默认内容」那排按钮贴左（`obsync-inline-actions`）", () => {
+            // 没有名称/描述的行，`.setting-item-info` 会把控件一路顶到最右，
+            // 离上面那个代码框很远 —— 看不出按钮是给它的。
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+
+            const row = createdSettings.find((setting) =>
+                setting.buttons.some((button) => button.text === zhCN.settings.sync.gitignoreRestore)
+            );
+            expect(row?.classes).toContain("obsync-inline-actions");
+        });
+
+        it("「连接测试」的说明与按钮在**同一行**，按钮不再单占一条空卡片", () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+
+            const heading = createdSettings.find(
+                (setting) =>
+                    setting.name === zhCN.sync.diagnoseHeading &&
+                    setting.buttons.some((button) => button.text === zhCN.sync.diagnoseRun)
+            );
+            expect(heading).toBeDefined();
+            // 说明挂在这一行上（而不是页面上一段裸 `<p>` + 一条只有按钮的卡片）
+            expect(heading?.desc).toBe(zhCN.sync.diagnoseDesc);
+            expect(heading?.classes).toContain("obsync-group-heading");
+        });
+
+        it("结果区在那一组里，且在动作按钮**下面**", () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+            renderSyncPage(tab);
+
+            const container = (tab as unknown as { containerEl: ShimEl }).containerEl;
+            const results = findAll(container, (el) => el.cls === "obsync-diagnostics");
+            expect(results).toHaveLength(1);
+            expect(groupOf(tab, results[0]!)).toBeDefined();
+        });
+    });
+
+    /**
+     * 「定时同步」那一行（2026-10-02 重做）。
+     *
+     * 之前是「一个总开关」+「三个间隔」，两处都能表达关，而默认又是
+     * 「开着 + 全 0」（拨到哪边都不动）—— 读起来像重复的设置项。
+     * 现在：**周期框 + 单位 + 开关同一行**，开关是唯一的开 / 关，
+     * 周期里没有「0 = 关闭」。
+     */
+    describe("定时同步那一行", () => {
+        /** 落盘计数（`commit()` 会 +1）。 */
+        function saveCount(tab: ObsyncSettingsTab): number {
+            return (tab as unknown as { obsync: { saved: number } }).obsync.saved;
+        }
+
+        /**
+         * 「定时同步」名称后面那个倒计时徽标。
+         *
+         * 用户的原话：「如果仓库同步里的定时同步是开启的状态，请显示距离下次同步的
+         * 倒计时」。开着才显示（关掉 / 策略为「重置」挂起时没有定时器），而且**每秒**
+         * 都在走 —— 所以这里用假时钟推着它走，而不是只看一眼初值。
+         */
+        describe("倒计时", () => {
+            function badge() {
+                const row = createdSettings.find(
+                    (setting) => setting.name === zhCN.settings.sync.enabled
+                )!;
+                const nameEl = row.nameEl as unknown as { children?: Array<{ text?: string }> };
+                return nameEl.children!.find((child) =>
+                    (child as { cls?: string }).cls?.includes("obsync-countdown")
+                ) as { text?: string } | undefined;
+            }
+
+            beforeEach(() => {
+                vi.useFakeTimers();
+            });
+            afterEach(() => {
+                vi.useRealTimers();
+            });
+
+            it("定时同步开着时显示「下次同步 M:SS」，并且每秒递减", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.nextRunAt = Date.now() + 90_000;
+                const tab = createTab(createFakeApp(), {}, sync);
+                renderSyncPage(tab);
+
+                expect(badge()?.text).toBe(zhCN.settings.sync.countdown("1:30"));
+
+                await vi.advanceTimersByTimeAsync(1_000);
+                expect(badge()?.text).toBe(zhCN.settings.sync.countdown("1:29"));
+
+                await vi.advanceTimersByTimeAsync(60_000);
+                expect(badge()?.text).toBe(zhCN.settings.sync.countdown("0:29"));
+            });
+
+            it("超过一小时时带上小时那一段", () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.nextRunAt = Date.now() + 3 * 3600_000 + 5 * 60_000;
+                const tab = createTab(createFakeApp(), {}, sync);
+                renderSyncPage(tab);
+
+                expect(badge()?.text).toBe(zhCN.settings.sync.countdown("3:05:00"));
+            });
+
+            it("没有定时器（关掉 / 挂起）时徽标是空的（CSS 的 :empty 把它收起来）", () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.nextRunAt = undefined;
+                const tab = createTab(createFakeApp(), {}, sync);
+                renderSyncPage(tab);
+
+                expect(badge()?.text).toBe("");
+            });
+
+            it("正在同步时改说「正在同步…」（这时「还剩 0:00」是错的）", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.nextRunAt = Date.now() + 30_000;
+                const tab = createTab(createFakeApp(), {}, sync);
+                renderSyncPage(tab);
+                expect(badge()?.text).toBe(zhCN.settings.sync.countdown("0:30"));
+
+                sync.busy = true;
+                await vi.advanceTimersByTimeAsync(1_000);
+                expect(badge()?.text).toBe(zhCN.settings.sync.countdownRunning);
+            });
+
+            /**
+             * 关掉这一页之后**不再刷新**：那个 interval 守着的是已经脱离文档的节点，
+             * 不清掉就是每开合一次泄漏一个。
+             */
+            it("关闭设置页后停止刷新", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.nextRunAt = Date.now() + 90_000;
+                const tab = createTab(createFakeApp(), {}, sync);
+                renderSyncPage(tab);
+
+                const before = badge()?.text;
+                tab.hide();
+                await vi.advanceTimersByTimeAsync(5_000);
+
+                expect(badge()?.text).toBe(before);
+            });
+        });
+
+        it("周期框在开关**前面**，中间是单位；初始值来自设置", () => {
+            const tab = createTab(createFakeApp(), { sync: { intervalMinutes: 25 } });
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            );
+            expect(row).toBeDefined();
+            expect(row!.texts[0]?.value).toBe("25");
+            // 1–1440：0 在新模型里没有含义
+            expect(row!.texts[0]?.inputEl.min).toBe("1");
+            expect(row!.texts[0]?.inputEl.max).toBe(String(24 * 60));
+            // 顺序：先框、后开关（控件按调用顺序进 `.setting-item-control`）
+            expect(row!.controls.map((control) => control.constructor.name)).toEqual([
+                "TextComponent",
+                "ToggleComponent",
+            ]);
+            // 单位是框后面那个 span
+            const unit = (
+                row!.controlEl.children as unknown as Array<{ cls?: string; text?: string }>
+            ).find((child) => child.cls === "obsync-unit");
+            expect(unit?.text).toBe(zhCN.settings.sync.minutesUnit);
+        });
+
+        it("改周期会写进设置并落盘", async () => {
+            const tab = createTab(createFakeApp());
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            );
+            await row!.texts[0]!.type("30");
+
+            expect(settingsOf(tab).sync.intervalMinutes).toBe(30);
+            expect(saveCount(tab)).toBe(1);
+        });
+
+        it("0 / 非法值被忽略（不会把周期写成 0）", async () => {
+            const tab = createTab(createFakeApp(), { sync: { intervalMinutes: 25 } });
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            );
+            await row!.texts[0]!.type("0");
+            await row!.texts[0]!.type("abc");
+
+            expect(settingsOf(tab).sync.intervalMinutes).toBe(25);
+        });
+
+        /**
+         * 出界的输入**不能在框里留着一个不生效的数字**。
+         *
+         * 用户的原话：「按周期同步如果输入 0-4 的值不会被视觉修正是吗？这不合理吧」
+         * —— 同一个毛病「仓库同步」页的周期也有。现在失焦会把显示对齐回生效值；
+         * 为什么修在失焦而不是 onChange，见 `addNumberField` 的说明。
+         */
+        it("出界的输入：失焦时把框里的显示对齐回生效值", async () => {
+            const tab = createTab(createFakeApp(), { sync: { intervalMinutes: 25 } });
+            renderSyncPage(tab);
+
+            const field = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            )!.texts[0]!;
+
+            await field.type("0");
+            expect(settingsOf(tab).sync.intervalMinutes).toBe(25);
+
+            field.inputEl.trigger?.("blur");
+            expect(field.value).toBe("25");
+
+            // 合法值照旧立即生效，失焦不改它
+            await field.type("45");
+            expect(settingsOf(tab).sync.intervalMinutes).toBe(45);
+            field.inputEl.trigger?.("blur");
+            expect(field.value).toBe("45");
+        });
+
+        it("开关默认是**关**（新装不该自己跑起来）", () => {
+            const tab = createTab(createFakeApp());
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            );
+            expect(row!.toggles[0]?.value).toBe(false);
+            expect(DEFAULT_SETTINGS.sync.enabled).toBe(false);
+        });
+
+        it("拨开开关会写进设置，且**不改动**周期", async () => {
+            const tab = createTab(createFakeApp(), { sync: { intervalMinutes: 25 } });
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            );
+            await row!.toggles[0]!.toggle(true);
+
+            expect(settingsOf(tab).sync.enabled).toBe(true);
+            expect(settingsOf(tab).sync.intervalMinutes).toBe(25);
+        });
+
+        it("策略为「重置」时两个控件都灰掉（周期也跟着没用）", () => {
+            const tab = createTab(createFakeApp(), { sync: { syncStrategy: "reset" } });
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.enabled
+            );
+            expect(row?.toggles[0]?.disabled).toBe(true);
+            expect(row?.texts[0]?.disabled).toBe(true);
+        });
+    });
+
     it("策略为「重置」时总开关被禁用，描述说明为什么", () => {
         const fake = createFakeApp();
         const tab = createTab(fake, { sync: { syncStrategy: "reset" } });
@@ -361,14 +1019,192 @@ describe("设置页 · 仓库同步页", () => {
 
     it("开关被禁用时**值不被改写** —— 改回「合并」后才会自动恢复", () => {
         const fake = createFakeApp();
-        const tab = createTab(fake, { sync: { enabled: true, syncStrategy: "reset" } });
+        // 写 `version: 7`：不然 v6 → v7 迁移会按「老数据里开关开着但周期是 0」
+        // 把开关置回关（那是对老数据的正确处置，但会盖掉这条用例要验的东西）。
+        const tab = createTab(fake, {
+            version: 7,
+            sync: { enabled: true, intervalMinutes: 10, syncStrategy: "reset" },
+        });
 
         renderSyncPage(tab);
 
         const row = createdSettings.find((setting) => setting.name === zhCN.settings.sync.enabled);
         // 灰掉的是「能不能拨」，不是「值是多少」。若这里被写成 setValue(false)，
-        // 用户改回 merge 之后自动同步就再也不会自己恢复 —— 而文案承诺了会。
+        // 用户改回 merge 之后定时同步就再也不会自己恢复 —— 而文案承诺了会。
         expect(row?.toggles[0]?.value).toBe(true);
+    });
+
+    /**
+     * git 可执行文件路径那一行（2026-10-02）。
+     *
+     * 用户要求「输入框应该单独一行，并提供浏览按钮打开资源管理器」。两件事都要钉：
+     * ① 形状 —— 名称/描述与控件上下两行（`.obsync-stacked`），输入框与按钮同一行；
+     * ② 「浏览…」真的走到系统对话框，并把选中的路径写回设置 **与那个框**。
+     *
+     * `window.electron` 是**替身**：真机上它由 Obsidian 注入
+     * （`electron.remote.dialog`，Obsidian 自己开文件框用的就是它，见
+     * `core/desktopFileDialog.ts`）。这里注入一个假的，验的是「我们怎么用它」。
+     */
+    describe("git 可执行文件路径", () => {
+        type FakeElectron = {
+            remote: {
+                dialog: {
+                    showOpenDialog?: (options: unknown) => Promise<unknown>;
+                    showOpenDialogSync?: (options: unknown) => string[] | undefined;
+                };
+            };
+        };
+
+        function installFakeElectron(dialog: FakeElectron["remote"]["dialog"]): void {
+            (globalThis as unknown as { window: { electron?: unknown } }).window.electron = {
+                remote: { dialog },
+            };
+        }
+
+        afterEach(() => {
+            delete (globalThis as unknown as { window: { electron?: unknown } }).window.electron;
+        });
+
+        function gitPathRow() {
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.gitPath
+            );
+            expect(row, "页面上没有 git 路径那一行").toBeDefined();
+            return row!;
+        }
+
+        it("输入框与「浏览…」同一行，且整行排在名称/描述下面", () => {
+            const tab = createTab(createFakeApp());
+            renderSyncPage(tab);
+
+            const row = gitPathRow();
+            expect(row.classes.join(" ")).toContain("obsync-stacked");
+            // 第二个类**单独加**（`setClass` 一次只能给一个类名，见替身里的说明）——
+            // `obsync-git-path` 挂在元素上，描述里那个下载链接的样式用它
+            expect(
+                (row.settingEl as unknown as { cls?: string }).cls ?? ""
+            ).toContain("obsync-git-path");
+            expect(row.texts[0]?.placeholder).toBe("C:\\Program Files\\Git\\cmd\\git.exe");
+            expect(row.buttons.map((button) => button.text)).toEqual([
+                zhCN.settings.sync.gitPathBrowse,
+            ]);
+        });
+
+        /**
+         * 「去哪儿装 git」那半句 —— 缺 git 是这条链路最常见的第一道坎，而插件不捆绑它
+         * （2026-10-02 加）。
+         *
+         * 2026-10-04 用户两次要求：先是「SyncHub 不捆绑 git 的那句提示，放到留空使用
+         * 系统 PATH 那条提示后面展示」（并进同一段描述，别分成两段像另一项设置），
+         * 随后是「那句应该换行显示」—— 所以现在是**同一段描述 + 一个 `<br>`**。
+         *
+         * 钉三件事：两句在同一段里、中间确实换了行、以及那个链接是**可点的、指向官方
+         * 下载页**（提示的全部意义就在那个网址上）。
+         */
+        it("「不捆绑 git」并进 git 路径那一行的描述并**换行**，链接指向官方下载页", () => {
+            const tab = createTab(createFakeApp());
+            renderSyncPage(tab);
+
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.gitPath
+            );
+            expect(row, "页面上没有 git 可执行文件路径那一行").toBeDefined();
+            // 描述**只剩 PATH 那句**：下载那句是同一个元素里的另一个文本节点
+            expect(row!.desc).toBe(zhCN.settings.sync.gitPathDesc);
+
+            const children = (row!.descEl as unknown as ShimEl).children ?? [];
+            // `<br>` 在中间 —— 换行是用户明确要求的（同一段里不换行会被读成半句话）
+            expect(children[0]?.tagName).toBe("BR");
+            expect(children[1]?.text).toBe(zhCN.settings.sync.gitPathDownload);
+
+            const link = children.find((child) => child.tagName === "A");
+            expect(link, "描述里没有链接").toBeDefined();
+            expect((link!.attrs as Record<string, string>).href).toBe(
+                "https://git-scm.com/downloads"
+            );
+            expect(link!.text).toBe(zhCN.settings.sync.gitPathLink);
+            // `_blank`：交给系统浏览器打开，而不是把设置弹窗导航走
+            expect((link!.attrs as Record<string, string>).target).toBe("_blank");
+
+            // 不再单独占一段（原来那个 `.obsync-git-download` 段落已并进来）
+            expect(
+                findAll(
+                    (tab as unknown as { containerEl: ShimEl }).containerEl,
+                    (child) => child.cls === "setting-item-description obsync-git-download"
+                )
+            ).toHaveLength(0);
+        });
+
+        /**
+         * 找不到 git 时那句提示也要能指路。
+         *
+         * 原文案是「请在设置中指定路径」—— 只说了「怎么指」，没说「去哪儿弄」，
+         * 而后者才是缺 git 的人唯一需要的信息。
+         */
+        it("「找不到 git」的文案里带上下载地址", () => {
+            expect(zhCN.sync.gitNotFound).toContain("git-scm.com");
+        });
+
+        it("点「浏览…」→ 用系统对话框挑文件 → 写回设置与输入框", async () => {
+            const calls: unknown[] = [];
+            installFakeElectron({
+                showOpenDialog: async (options) => {
+                    calls.push(options);
+                    return { canceled: false, filePaths: ["C:\\Git\\cmd\\git.exe"] };
+                },
+            });
+
+            const fake = createFakeApp();
+            const tab = createTab(fake);
+            renderSyncPage(tab);
+
+            await gitPathRow().buttons[0]!.click();
+
+            expect(settingsOf(tab).sync.gitPath).toBe("C:\\Git\\cmd\\git.exe");
+            // 输入框要跟着变：否则用户以为没挑上
+            expect(gitPathRow().texts[0]?.inputEl.value).toBe("C:\\Git\\cmd\\git.exe");
+            // 桌面上的路径可能带空格，所以只挑文件、不带 `openDirectory`
+            expect(calls[0]).toMatchObject({ properties: ["openFile", "dontAddToRecent"] });
+        });
+
+        it("用户取消时什么都不改", async () => {
+            installFakeElectron({
+                showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+            });
+
+            const tab = createTab(createFakeApp(), { sync: { gitPath: "C:\\old\\git.exe" } });
+            renderSyncPage(tab);
+
+            await gitPathRow().buttons[0]!.click();
+
+            expect(settingsOf(tab).sync.gitPath).toBe("C:\\old\\git.exe");
+        });
+
+        /**
+         * 开不了对话框的环境（移动端 / 将来的 Electron 换掉 `remote`）：
+         * 按钮点了什么都不做，**不能抛**。旁边那个输入框一直在，路径照旧能填。
+         */
+        it("没有 electron（移动端）时点了不抛错、不改设置", async () => {
+            const tab = createTab(createFakeApp(), { sync: { gitPath: "C:\\old\\git.exe" } });
+            renderSyncPage(tab);
+
+            await expect(gitPathRow().buttons[0]!.click()).resolves.toBeUndefined();
+            expect(settingsOf(tab).sync.gitPath).toBe("C:\\old\\git.exe");
+        });
+
+        it("对话框抛错时也不抛（只当作没挑）", async () => {
+            installFakeElectron({
+                showOpenDialog: async () => {
+                    throw new Error("remote is gone");
+                },
+            });
+
+            const tab = createTab(createFakeApp(), { sync: { gitPath: "C:\\old\\git.exe" } });
+            renderSyncPage(tab);
+
+            await expect(gitPathRow().buttons[0]!.click()).resolves.toBeUndefined();
+            expect(settingsOf(tab).sync.gitPath).toBe("C:\\old\\git.exe");
+        });
     });
 
     /**
@@ -379,37 +1215,6 @@ describe("设置页 · 仓库同步页", () => {
      * 只验「渲染不抛错」等于没验 —— 一个连不上任何东西的输入框看起来完全一样。
      */
     describe(".gitignore 一节", () => {
-        /** 同步模块的替身：只实现这一节用到的那三个方法，并把写入记下来。 */
-        function createSyncStub(initial?: string) {
-            const stub = {
-                writes: [] as string[],
-                opened: 0,
-                /** `openGitignore` 的返回值 —— false 模拟「Obsidian 打不开它」。 */
-                openResult: true,
-                /** 设了就让读失败。 */
-                readError: undefined as Error | undefined,
-                /** 设了就让写失败（模拟磁盘/权限问题）。 */
-                writeError: undefined as Error | undefined,
-                content: initial,
-                service: {
-                    async readGitignore(): Promise<string | undefined> {
-                        if (stub.readError) throw stub.readError;
-                        return stub.content;
-                    },
-                    async writeGitignore(value: string): Promise<void> {
-                        if (stub.writeError) throw stub.writeError;
-                        stub.writes.push(value);
-                        stub.content = value;
-                    },
-                    async openGitignore(): Promise<boolean> {
-                        stub.opened += 1;
-                        return stub.openResult;
-                    },
-                },
-            };
-            return stub;
-        }
-
         /** 状态徽标挂在标题那一行的 `nameEl` 上。 */
         function statusText(): string | undefined {
             const setting = createdSettings.find(
@@ -420,14 +1225,13 @@ describe("设置页 · 仓库同步页", () => {
         }
 
         /**
-         * 代码框是**挂在页面上的块级 `textarea`**，不是 `Setting` 的控件
+         * 代码框是**块级 `textarea`**，不是 `Setting` 的控件
          * （放进 `.setting-item-control` 只有右侧几百像素宽，读不了规则清单）。
-         * 所以它从 `containerEl.children` 里按类名找，而不是从 `createdSettings`。
+         * 所以它从节点树里按类名找，而不是从 `createdSettings`。
          */
         function gitignoreArea(tab: ObsyncSettingsTab): TextAreaEl {
-            const container = (tab as unknown as { containerEl: { children: TextAreaEl[] } })
-                .containerEl;
-            const found = container.children.find((child) => child.cls === "obsync-gitignore");
+            const container = (tab as unknown as { containerEl: ShimEl }).containerEl;
+            const found = findAll(container, (child) => child.cls === "obsync-gitignore")[0];
             expect(found, "页面上没有找到 .gitignore 代码框").toBeDefined();
             return found as unknown as TextAreaEl;
         }
@@ -444,10 +1248,11 @@ describe("设置页 · 仓库同步页", () => {
                 .find((button) => button.text === zhCN.settings.sync.gitignoreSave)!;
         }
 
-        it("代码框是块级 textarea **直接挂在页面上**，不是 `Setting` 的控件", () => {
+        it("代码框是块级 textarea，**不在** `Setting` 的控件区里", () => {
             // 用户原话：「.gitignore的编辑框只占了右侧有限空间，太丑了，应该全宽才对」。
             // `.setting-item-control` 在 Obsidian 的设置页里只有右侧几百像素宽，
             // 12 行的规则清单挤在里面根本没法读 —— 所以它必须是块级元素。
+            // 2026-10-02 起它挪进了设置组（左右缩进由组给），但**仍然不是**控件。
             const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
 
             renderSyncPage(tab);
@@ -456,6 +1261,8 @@ describe("设置页 · 仓库同步页", () => {
             expect(area.tagName).toBe("TEXTAREA");
             // 一个 `Setting` 控件都没占：它不可能被塞进某个控件区
             expect(createdSettings.flatMap((setting) => setting.textAreas)).toHaveLength(0);
+            // 它在设置组的行容器里 —— 于是代码框与上面那行说明、下面那排按钮同一张卡片
+            expect(groupOf(tab, area as unknown as ShimEl)).toBeDefined();
         });
 
         /**
@@ -649,6 +1456,328 @@ describe("设置页 · 仓库同步页", () => {
             ).toBeUndefined();
         });
     });
+
+    /**
+     * 「让 git 不再跟踪图片」（2026-10-02）。
+     *
+     * 用户的原话是：「我希望仓库同步不同步仓库里的图片，因为图片已经交给图片同步干了」。
+     *
+     * 这个动作有**三道闸**，每一道挡的都是一种真会丢东西的情形 —— 所以测试重点不是
+     * 「能不能跑通」，而是「该拒绝的时候真的拒绝了、而且拒绝的理由是对的」：
+     *
+     * 1. 图片文件夹得是具体的（「整个库」=让 git 什么都不同步）；
+     * 2. 图片同步得配好（否则图片从 git 里摘出去就没有第二个家）；
+     * 3. 每一张都已在 R2 上（别的设备拉取这次改动时，靠云端把本地那份补回来）。
+     */
+    describe("让 git 不再跟踪图片", () => {
+        const copy = zhCN.settings.sync.untrack;
+
+        /** 找到那一行的按钮并点下去。 */
+        async function clickUntrack(): Promise<void> {
+            const button = createdSettings
+                .flatMap((setting) => setting.buttons)
+                .find((candidate) => candidate.text === copy.action);
+            expect(button, "页面上没有找到「停止跟踪」按钮").toBeDefined();
+            await button!.click();
+            await flush();
+        }
+
+        /**
+         * 弹窗里的所有文本：**标题也要**（`titleEl` 不在 `contentEl` 里 —— 真机就是
+         * 这样，只走 `contentEl` 的话标题永远断言不到）。
+         */
+        function modalTexts(modal: { contentEl: unknown; titleEl: unknown }): string[] {
+            const walk = (node: unknown): string[] => {
+                const el = node as { text?: string; children?: unknown[] };
+                return [...(el.text ? [el.text] : []), ...(el.children ?? []).flatMap(walk)];
+            };
+            return [modal.titleEl, modal.contentEl].flatMap((el) => walk(el));
+        }
+
+        /** 把通知记下来（三道闸的拒绝理由都要能断言）。 */
+        function spyNotices(tab: ObsyncSettingsTab) {
+            const notices = { warn: [] as string[], info: [] as string[], success: [] as string[] };
+            const notifier = (
+                tab as unknown as {
+                    obsync: {
+                        notifier: {
+                            warn: (message: string) => void;
+                            info: (message: string) => void;
+                            success: (message: string) => void;
+                        };
+                    };
+                }
+            ).obsync.notifier;
+            notifier.warn = (message) => notices.warn.push(message);
+            notifier.info = (message) => notices.info.push(message);
+            notifier.success = (message) => notices.success.push(message);
+            return notices;
+        }
+
+        it("那一行在 `.gitignore` 一节里：名称、描述、按钮都在", () => {
+            const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"), createImagesStub());
+
+            renderSyncPage(tab);
+
+            const row = createdSettings.find((setting) => setting.name === copy.name);
+            expect(row).toBeDefined();
+            expect(row!.desc).toBe(copy.desc);
+            expect(row!.buttons.map((button) => button.text)).toEqual([copy.action]);
+        });
+
+        it("图片文件夹配成「整个库」→ 不拒绝，而是默认用**按扩展名**那种规则", async () => {
+            // 默认设置里图片文件夹就是 [""]（整个库）。这种配置下「按文件夹」等于让
+            // git 什么都不同步，所以按钮改成默认选「按扩展名」—— 这正是用户问
+            // 「不能写图片格式吗」时想要的那种形状。
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(createFakeApp(), {}, sync, createImagesStub());
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+
+            expect(notices.warn).toEqual([]);
+            expect(openedModals).toHaveLength(1);
+            expect(sync.writes).toEqual([]);
+            // 弹窗里列的是扩展名，不是文件夹
+            const texts = modalTexts(openedModals[0]!);
+            expect(texts).toContain(copy.modal.extensionsLabel);
+            expect(texts.some((text) => text.includes("*.png"))).toBe(true);
+        });
+
+        it("图片文件夹为空（用户把默认值删了）→ 拒绝，并指去图片同步页", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: [] } },
+                sync,
+                createImagesStub()
+            );
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+
+            expect(notices.warn).toEqual([copy.needFolders]);
+            expect(sync.writes).toEqual([]);
+            expect(openedModals).toHaveLength(0);
+        });
+
+        it("图片同步没配好（缺 R2 凭据）→ 拒绝：那些图片没有第二个家", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: ["attachments"] } },
+                sync,
+                createImagesStub({ configured: false })
+            );
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+
+            expect(notices.warn).toEqual([copy.needCloud]);
+            expect(sync.writes).toEqual([]);
+            expect(openedModals).toHaveLength(0);
+        });
+
+        it("还有图片没传到 R2 → 拒绝，并把数量说出来", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: ["attachments"] } },
+                sync,
+                createImagesStub({ pendingUploads: 3 })
+            );
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+
+            expect(notices.warn).toEqual([copy.notUploaded.replace("{count}", "3")]);
+            expect(sync.writes).toEqual([]);
+            expect(openedModals).toHaveLength(0);
+        });
+
+        it("列不出远端清单（网络/凭据）→ 拒绝，不能默认「云端都有」", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: ["attachments"] } },
+                sync,
+                createImagesStub({ planError: new Error("offline") })
+            );
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+
+            // reportError 走 fallback 文案（替身里 warn 没被调用，但绝不能执行）
+            expect(sync.writes).toEqual([]);
+            expect(sync.untracked).toEqual([]);
+            expect(notices.warn).toEqual([]);
+        });
+
+        it("三道闸都过了 → 先弹确认框，**确认之前什么都不改**", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: ["attachments"] } },
+                sync,
+                createImagesStub()
+            );
+            spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+
+            expect(openedModals).toHaveLength(1);
+            // 关键：还没点「继续」，仓库与文件都没动
+            expect(sync.writes).toEqual([]);
+            expect(sync.untracked).toEqual([]);
+
+            // 弹窗里要把三步与两条警告都写出来（用户问的就是「流程是什么」）
+            const texts = modalTexts(openedModals[0]!);
+            expect(texts).toContain(copy.modal.title);
+            for (const step of copy.modal.steps) expect(texts).toContain(step);
+            expect(texts).toContain(copy.modal.warningOthers);
+            expect(texts).toContain(copy.modal.warningHistory);
+            // 要停止跟踪的文件夹列出来了
+            expect(texts.some((text) => text.includes("attachments"))).toBe(true);
+        });
+
+        it("确认之后：写 .gitignore + 摘索引 + 汇报数量，并把代码框刷新成磁盘上的新内容", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: ["attachments", "assets/img"] } },
+                sync,
+                createImagesStub()
+            );
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await flush();
+            await clickUntrack();
+
+            // 点弹窗里的「继续」
+            const confirm = createdSettings
+                .flatMap((setting) => setting.buttons)
+                .filter((button) => button.text === copy.modal.confirm)
+                .at(-1)!;
+            await confirm.click();
+            await flush();
+
+            expect(sync.writes[0]).toBe("# 规则\nattachments/\nassets/img/\n");
+            expect(sync.untracked).toEqual([["attachments", "assets/img"]]);
+            expect(notices.success).toEqual([copy.done.replace("{rules}", "2").replace("{files}", "2")]);
+
+            // 代码框必须显示刚写下去的规则：它是**失焦即保存**的，停在旧内容上
+            // 意味着用户下一次编辑会把新规则整份覆盖掉。
+            const area = findAll(
+                (tab as unknown as { containerEl: ShimEl }).containerEl,
+                (child) => child.cls === "obsync-gitignore"
+            )[0] as unknown as { value: string } | undefined;
+            expect(area?.value).toBe("# 规则\nattachments/\nassets/img/\n");
+        });
+
+        it("重复点一次：规则already在、索引里也没有 → 不重复加，只说明情况", async () => {
+            const sync = createSyncStub("attachments/\n");
+            const tab = createTab(
+                createFakeApp(),
+                { images: { folders: ["attachments"] } },
+                sync,
+                createImagesStub()
+            );
+            const notices = spyNotices(tab);
+
+            renderSyncPage(tab);
+            await clickUntrack();
+            await createdSettings
+                .flatMap((setting) => setting.buttons)
+                .filter((button) => button.text === copy.modal.confirm)
+                .at(-1)!
+                .click();
+            await flush();
+
+            // 没写文件（内容没变），但索引那一步照走（幂等）
+            expect(sync.writes).toEqual([]);
+            expect(sync.untracked).toEqual([["attachments"]]);
+            // 先有「正在确认…」那条即时反馈，再有结论
+            expect(notices.info).toEqual([copy.checking, copy.nothing]);
+        });
+
+        /**
+         * 「按扩展名」那条路（2026-10-02 加）。
+         *
+         * 它与「按文件夹」的差别在于**摘索引的名单从哪来**：文件夹模式直接给 git 几个
+         * 文件夹；扩展名模式得先问 git「哪些文件已被跟踪」，再挑出图片 —— 只摘图片，
+         * 笔记一个都不能碰（多摘一个就是「git 不管这篇笔记了」，而且没有任何提示）。
+         */
+        describe("按扩展名", () => {
+            /** 点弹窗里的「继续」。 */
+            async function confirmModal(): Promise<void> {
+                await createdSettings
+                    .flatMap((setting) => setting.buttons)
+                    .filter((button) => button.text === copy.modal.confirm)
+                    .at(-1)!
+                    .click();
+                await flush();
+            }
+
+            it("确认之后：写扩展名规则，且只摘图片、不碰笔记", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.tracked = [
+                    "attachments/a.png",
+                    "notes/cover.PNG",
+                    "assets/photo.jpg",
+                    "notes/note.md",
+                    "notes/diagram.excalidraw.md",
+                ];
+                const tab = createTab(createFakeApp(), {}, sync, createImagesStub());
+                const notices = spyNotices(tab);
+
+                renderSyncPage(tab);
+                await flush();
+                await clickUntrack();
+                await confirmModal();
+
+                // 规则：小写 + 大写各一条（Linux 上 git 区分大小写）
+                const written = sync.writes[0]!;
+                expect(written.startsWith("# 规则\n")).toBe(true);
+                expect(written).toContain("*.png\n");
+                expect(written).toContain("*.PNG\n");
+                expect(written).toContain("*.jpg\n");
+                // 笔记一个都没进规则
+                expect(written).not.toContain("notes/");
+
+                // 摘索引：只有图片（.PNG 也要命中 —— 比较不区分大小写）
+                expect(sync.untracked).toEqual([
+                    ["attachments/a.png", "notes/cover.PNG", "assets/photo.jpg"],
+                ]);
+                // 汇报：规则条数与文件数都对得上
+                const rules = written.trim().split("\n").length - 1; // 减去原来那一行
+                expect(notices.success).toEqual([
+                    copy.done.replace("{rules}", String(rules)).replace("{files}", "3"),
+                ]);
+            });
+
+            it("索引里一张图片都没有 → 规则照写，摘索引那一步是空操作", async () => {
+                const sync = createSyncStub("");
+                sync.tracked = ["notes/note.md"];
+                const tab = createTab(createFakeApp(), {}, sync, createImagesStub());
+
+                renderSyncPage(tab);
+                await flush();
+                await clickUntrack();
+                await confirmModal();
+
+                expect(sync.writes[0]).toContain("*.png\n");
+                // 空数组直接返回（服务层判空），不会拿空名单去碰 git
+                expect(sync.untracked).toEqual([[]]);
+            });
+        });
+    });
 });
 
 /**
@@ -660,7 +1789,24 @@ describe("设置页 · 仓库同步页", () => {
  * 与「归一之后才写」。
  */
 describe("设置页 · 图片同步页", () => {
-    type ShimEl = { cls?: string; text?: string; children?: ShimEl[] };
+    type ShimEl = {
+        cls?: string;
+        text?: string;
+        children?: ShimEl[];
+        /** 裸 DOM 上的监听器（见 `tests/setup.ts` 的 `addEventListener`）。 */
+        trigger?: (name: string, ...args: unknown[]) => void;
+    };
+
+    /**
+     * 裸输入元素在测试里的形状（`tests/setup.ts` 的替身）。
+     *
+     * 监听器与 `trigger` 都记在元素上，所以裸 DOM 上的交互（回车加入、点候选）
+     * 测得到 —— 见 `tests/setup.ts` 里 `addEventListener` 的说明。
+     */
+    type TestInput = {
+        value: string;
+        trigger: (name: string, ...args: unknown[]) => void;
+    };
 
     function renderImagesPage(tab: ObsyncSettingsTab): void {
         (tab as unknown as { renderImages(): void }).renderImages();
@@ -671,6 +1817,79 @@ describe("设置页 · 图片同步页", () => {
         return container.children as ShimEl[];
     }
 
+    /**
+     * 在节点树里**递归**找。
+     *
+     * 设置行自 2026-10-02 起收进了 `.setting-group > .setting-items`（见
+     * `settingsTab.openGroup`），提示段与结果区都不再是 `containerEl` 的直接
+     * 子节点 —— 只看一层会全部找不到。
+     */
+    function findAllIn(tab: ObsyncSettingsTab, predicate: (el: ShimEl) => boolean): ShimEl[] {
+        const out: ShimEl[] = [];
+        const walk = (el: ShimEl): void => {
+            for (const child of el.children ?? []) {
+                if (predicate(child)) out.push(child);
+                walk(child);
+            }
+        };
+        walk((tab as unknown as { containerEl: ShimEl }).containerEl);
+        return out;
+    }
+
+    /**
+     * 「需要图片同步的文件夹」那一格的**添加输入框**。
+     *
+     * 2026-10-02 起那一格是「输入一个路径 → 加入列表」，不是多行文本框：
+     * 所以这里拿的是添加行（`obsync-inline-field`）里的那个输入元素。
+     *
+     * **取最后一行的那个**：`commit(true)` 会重绘，`createdSettings` 只增不减
+     * （见 `tests/stubs/obsidian.ts` 的 `resetCreatedSettings`），所以「第一条」
+     * 可能是上一次渲染留下的旧节点。
+     */
+    function foldersInput(): TestInput {
+        const rows = createdSettings.filter((setting) =>
+            setting.buttons.some((button) => button.text === zhCN.settings.images.foldersBrowse)
+        );
+        expect(rows.length, "页面上没有找到文件夹添加行").toBeGreaterThan(0);
+        const input = rows.at(-1)!.texts[0];
+        expect(input, "添加行里没有输入框").toBeDefined();
+        return input!.inputEl as unknown as TestInput;
+    }
+
+    /** 按回车（真实 DOM 里 `keydown`）。 */
+    function pressEnter(input: TestInput): void {
+        input.trigger("keydown", { key: "Enter", preventDefault: () => {} });
+    }
+
+    /** 在添加框里打字（真实 DOM 里 `input` 事件驱动候选下拉）。 */
+    function typeFolders(value: string): void {
+        const input = foldersInput();
+        input.value = value;
+        input.trigger("input");
+    }
+
+    /** 候选下拉里当前列出的项目文字。 */
+    function suggestions(tab: ObsyncSettingsTab): string[] {
+        return findAllIn(tab, (child) => child.cls === "obsync-path-suggest-item").map(
+            (item) => item.children?.[0]?.text ?? ""
+        );
+    }
+
+    /** 某个节点落在哪一组里（找不到 = 不在任何组里）。 */
+    function groupOf(tab: ObsyncSettingsTab, target: ShimEl): ShimEl | undefined {
+        const contains = (el: ShimEl): boolean =>
+            el === target || (el.children ?? []).some((child) => contains(child));
+        return findAllIn(tab, (el) => el.cls === "setting-items").find((group) =>
+            (group.children ?? []).some((child) => contains(child))
+        );
+    }
+
+    /** 某个设置行落在哪一组里。 */
+    function rowGroup(tab: ObsyncSettingsTab, name: string): ShimEl | undefined {
+        const setting = row(name);
+        return setting ? groupOf(tab, setting.settingEl as unknown as ShimEl) : undefined;
+    }
+
     function row(name: string) {
         return createdSettings.find((setting) => setting.name === name);
     }
@@ -678,11 +1897,6 @@ describe("设置页 · 图片同步页", () => {
     /** 设置页的落盘计数（`commit()` 会 +1）。 */
     function saveCount(tab: ObsyncSettingsTab): number {
         return (tab as unknown as { obsync: { saved: number } }).obsync.saved;
-    }
-
-    /** 设置页持有的是**插件对象**，设置从它上面取（不是 `tab.settings`）。 */
-    function settingsOf(tab: ObsyncSettingsTab): ObsyncSettings {
-        return (tab as unknown as { obsync: { settings: ObsyncSettings } }).obsync.settings;
     }
 
     it("渲染不抛错，且注意事项紧跟在「图片同步」标题下面", () => {
@@ -717,12 +1931,13 @@ describe("设置页 · 图片同步页", () => {
         const tab = createTab(createFakeApp(), { images: { folders: [] } });
         renderImagesPage(tab);
 
-        const hint = childrenOf(tab).find(
+        const hint = findAllIn(
+            tab,
             (child) =>
                 child.cls === "setting-item-description" &&
                 child.text === zhCN.settings.images.foldersEmpty
         );
-        expect(hint).toBeDefined();
+        expect(hint).toHaveLength(1);
     });
 
     it("配了文件夹之后那行提示消失", () => {
@@ -730,52 +1945,405 @@ describe("设置页 · 图片同步页", () => {
         renderImagesPage(tab);
 
         expect(
-            childrenOf(tab).find((child) => child.text === zhCN.settings.images.foldersEmpty)
-        ).toBeUndefined();
+            findAllIn(tab, (child) => child.text === zhCN.settings.images.foldersEmpty)
+        ).toHaveLength(0);
     });
 
-    it("文件夹多行框的初值是一行一个", () => {
+    /**
+     * 「需要图片同步的文件夹」= **一个添加输入框 + 一份已加入的列表**（2026-10-02）。
+     *
+     * 用户两次要求定下的形状：① 框不要挤在右边（描述四行、框里只看得见一个 `.`）；
+     * ② 「路径输入框应该和浏览、恢复默认按钮在同一行」「不需要拉高度」「输入时下方
+     * 提供候选辅助」「可以添加多个文件夹，在下方列出并提供删除按钮」。
+     *
+     * 多行文本框因此整个去掉了 —— 它的高度、`resize`、「一行一个」的写盘方式都
+     * 不再存在，所以这一组用例钉的是**新形状**。
+     */
+    it("添加行：输入框与「浏览…」「恢复默认」在同一行", () => {
+        const tab = createTab(createFakeApp());
+        renderImagesPage(tab);
+
+        const addRow = createdSettings.find((setting) =>
+            setting.buttons.some((button) => button.text === zhCN.settings.images.foldersBrowse)
+        );
+        expect(addRow).toBeDefined();
+        // 输入框与两个按钮**同一条 `Setting`** = 同一行
+        expect(addRow!.texts[0]?.placeholder).toBe(zhCN.settings.images.foldersPlaceholder);
+        expect(addRow!.buttons.map((button) => button.text)).toEqual([
+            zhCN.settings.images.foldersBrowse,
+            zhCN.settings.images.foldersReset,
+        ]);
+        // 排在名称/描述那一行之后
+        expect(createdSettings.indexOf(addRow!)).toBeGreaterThan(
+            createdSettings.indexOf(row(zhCN.settings.images.folders)!)
+        );
+        // **贴左**：它给的是上面那一格，顶到最右会看不出这层关系；
+        // `obsync-inline-field` 再让输入框吃掉整行剩余宽度。
+        expect(addRow!.classes).toContain("obsync-inline-actions");
+        expect(addRow!.classes).toContain("obsync-inline-field");
+
+        // 页面上**没有**多行文本框了（「不需要拉高度」）
+        expect(createdSettings.flatMap((setting) => setting.textAreas)).toHaveLength(0);
+        expect(findAllIn(tab, (child) => child.cls === "obsync-folders")).toHaveLength(0);
+    });
+
+    it("已加入的文件夹各占一行，带删除按钮", () => {
         const tab = createTab(createFakeApp(), {
             images: { folders: ["attachments", "assets/img"] },
         });
         renderImagesPage(tab);
 
-        expect(row(zhCN.settings.images.folders)?.textAreas[0]?.value).toBe(
-            "attachments\nassets/img"
+        const rows = createdSettings.filter((setting) =>
+            setting.classes.includes("obsync-folder-row")
         );
+        expect(rows.map((setting) => setting.name)).toEqual(["attachments", "assets/img"]);
+        for (const folderRow of rows) {
+            const remove = folderRow.buttons.find(
+                (button) => button.tooltip === zhCN.settings.images.foldersRemove
+            );
+            expect(remove, `${folderRow.name} 那一行没有删除按钮`).toBeDefined();
+        }
+    });
+
+    /**
+     * 「浏览…」与「恢复默认」之间没有任何多余的东西，且都挂在添加行上 ——
+     * 这一条是给「两个按钮被拆到另一行」那种回归准备的。
+     */
+    it("两个按钮与输入框同属一行（不再单独占一行）", () => {
+        const tab = createTab(createFakeApp());
+        renderImagesPage(tab);
+
+        const rowsWithButtons = createdSettings.filter(
+            (setting) =>
+                setting.buttons.some((button) => button.text === zhCN.settings.images.foldersBrowse) ||
+                setting.buttons.some((button) => button.text === zhCN.settings.images.foldersReset)
+        );
+        expect(rowsWithButtons).toHaveLength(1);
+        expect(rowsWithButtons[0].texts).toHaveLength(1);
     });
 
     /**
      * 默认值是仓库根目录（整个库），归一后的形状是 `[""]`。
      *
-     * 文本框里必须显示 `.`：一个空行读起来像「什么都没填」，而它正是默认值 ——
-     * 用户会以为插件坏了，然后去手动填一个更窄的范围。
+     * 列表里必须显示**人话**：一个空行读起来像「坏了一行」，用户会以为插件坏了，
+     * 然后去手动填一个更窄的范围。（旧版是把它显示成 `.`。）
      */
-    it("默认的仓库根目录在文本框里显示成 .", () => {
+    it("默认的仓库根目录在列表里显示成「仓库根目录（整个库）」", () => {
         const tab = createTab(createFakeApp());
         renderImagesPage(tab);
 
         expect(settingsOf(tab).images.folders).toEqual([""]);
-        expect(row(zhCN.settings.images.folders)?.textAreas[0]?.value).toBe(".");
+        const rows = createdSettings.filter((setting) =>
+            setting.classes.includes("obsync-folder-row")
+        );
+        expect(rows.map((setting) => setting.name)).toEqual([
+            zhCN.settings.images.folderPickerRoot,
+        ]);
     });
 
-    it("「浏览…」与「恢复默认」在同一行，紧跟文件夹设置", () => {
+    it("删除按钮把那一项从设置里去掉（并落盘 + 重绘）", async () => {
+        const tab = createTab(createFakeApp(), {
+            images: { folders: ["attachments", "assets/img"] },
+        });
+        renderImagesPage(tab);
+
+        const before = saveCount(tab);
+        const folderRow = createdSettings.find((setting) => setting.name === "attachments")!;
+        await folderRow.buttons.find(
+            (button) => button.tooltip === zhCN.settings.images.foldersRemove
+        )!.click();
+
+        expect(settingsOf(tab).images.folders).toEqual(["assets/img"]);
+        expect(saveCount(tab)).toBeGreaterThan(before);
+    });
+
+    /**
+     * 默认值是仓库根目录（整个库），归一后的形状是 `[""]`。
+     *
+     * 列表里必须显示**人话**：一个空行读起来像「坏了一行」，用户会以为插件坏了，
+     * 然后去手动填一个更窄的范围。（旧版是把它显示成 `.`。）
+     */
+    it("默认的仓库根目录在列表里显示成「仓库根目录（整个库）」", () => {
         const tab = createTab(createFakeApp());
         renderImagesPage(tab);
 
-        // 这一行没有名称（与页面底部那排「测试 / 预览 / 立即同步」同一形状），
-        // 所以按按钮文字找。
-        const actionRow = createdSettings.find((setting) =>
-            setting.buttons.some((button) => button.text === zhCN.settings.images.foldersBrowse)
+        expect(settingsOf(tab).images.folders).toEqual([""]);
+        const rows = createdSettings.filter((setting) =>
+            setting.classes.includes("obsync-folder-row")
         );
-        expect(actionRow).toBeDefined();
-        expect(actionRow!.buttons.map((button) => button.text)).toEqual([
-            zhCN.settings.images.foldersBrowse,
-            zhCN.settings.images.foldersReset,
+        expect(rows.map((setting) => setting.name)).toEqual([
+            zhCN.settings.images.folderPickerRoot,
         ]);
-        expect(createdSettings.indexOf(actionRow!)).toBeGreaterThan(
-            createdSettings.indexOf(row(zhCN.settings.images.folders)!)
-        );
+    });
+
+    /**
+     * 分节与动作行的形状（2026-10-02）。
+     *
+     * 用户给的两张截图说的都是同一件事：**没有名称的设置行**会把按钮顶到
+     * 最右边、左半边空着，看起来就是一条空荡荡的横条；而十几张彼此独立的
+     * 卡片让整页没有层次。这一组用例把修好的形状钉住：
+     *
+     *   - 相关的行在同一个 `.setting-group` 里（一整组一张卡片）；
+     *   - 动作按钮挂在**节标题**那一行（`obsync-group-heading`）；
+     *   - 「浏览… / 恢复默认」这类行贴左（`obsync-inline-actions`）。
+     */
+    describe("分节与动作行", () => {
+        /**
+         * 常用动作排在这一页最前面（2026-10-02）。
+         *
+         * 用户的原话是「图中的功能比较常用，应该放到页面最前面才对」——
+         * 此前「操作」沉在四个设置节的最底下，而配好之后那三段基本不会再翻。
+         */
+        it("「操作」紧跟注意事项，排在所有设置节之前", () => {
+            const tab = createTab(createFakeApp(), {}, undefined, createImagesStub());
+            renderImagesPage(tab);
+
+            const children = childrenOf(tab);
+            const notesIndex = children.findIndex((child) => child.cls === "obsync-image-notes");
+            const firstGroupIndex = children.findIndex(
+                (child) => child.cls === "setting-group obsync-group"
+            );
+            expect(notesIndex).toBeGreaterThanOrEqual(0);
+            expect(firstGroupIndex).toBeGreaterThan(notesIndex);
+
+            // 第一个设置组就是「操作」那一组：它的标题行在建组时最先登记
+            expect(createdSettings.indexOf(row(zhCN.settings.images.actionsHeading)!)).toBeLessThan(
+                createdSettings.indexOf(row(zhCN.settings.images.enabled)!)
+            );
+        });
+
+        /**
+         * 空的结果区排在**第一行之前**。
+         *
+         * 这与 styles.css 里那条「上一行不是设置行时不画分隔线」是一对：
+         * `display: none` 的它**仍然占着 `:first-child`**，于是 Obsidian 会给真正
+         * 显示在最上面的那一行画出分隔线 —— 一条悬空的横线（用户截图指出的那条）。
+         * 改这个排列（或删那条 CSS）之前先读两边的注释。
+         */
+        it("空的结果区在第一行之前 —— 第一行的分隔线不能靠 `:first-child` 豁免", () => {
+            const tab = createTab(createFakeApp(), {}, undefined, createImagesStub());
+            renderImagesPage(tab);
+
+            const rows = rowGroup(tab, zhCN.settings.images.openManager);
+            // 第一个是那个**空的**结果区，第二个才是「打开图片管理」那一行
+            expect(rows?.children?.[0]?.cls).toBe("obsync-diagnostics");
+            expect(rows?.children?.[1]).toBe(
+                row(zhCN.settings.images.openManager)!.settingEl as unknown as ShimEl
+            );
+        });
+
+        it("周期紧跟在总开关下面，且不在「冲突与删除」那一节里", () => {
+            // 2026-10-02 挪的：原先「自动同步间隔」排在「冲突与删除」那一节的**末尾**，
+            // 与它实际管的事（多久自动跑一轮）毫无关系 —— 而用户正是从那里读出了
+            // 「设为 0 = 图片同步关着」这个误会。
+            const tab = createTab(createFakeApp());
+            renderImagesPage(tab);
+
+            const basics = rowGroup(tab, zhCN.settings.images.enabled);
+            expect(basics).toBeDefined();
+            expect(rowGroup(tab, zhCN.settings.images.autoSync)).toBe(basics);
+            // 紧跟在**开关之后**、受管文件夹之前
+            expect(createdSettings.indexOf(row(zhCN.settings.images.autoSync)!)).toBe(
+                createdSettings.indexOf(row(zhCN.settings.images.enabled)!) + 1
+            );
+            expect(createdSettings.indexOf(row(zhCN.settings.images.autoSync)!)).toBeLessThan(
+                createdSettings.indexOf(row(zhCN.settings.images.folders)!)
+            );
+            // 「冲突与删除」那一节里只剩两个策略下拉
+            expect(rowGroup(tab, zhCN.settings.images.conflictPolicy)).not.toBe(basics);
+            expect(rowGroup(tab, zhCN.settings.images.deleteRemotePolicy)).not.toBe(basics);
+        });
+
+        /**
+         * 「按周期同步」那一行：`[周期] 单位 [开关]`（2026-10-02 第二次改）。
+         *
+         * 用户的原话是「自动同步间隔为 0 的情况也是不太好让人理解，如果把最小值设置为
+         * 5 是不是更合适」—— 0 一旦收紧就得有别的东西表达「关」，于是拆出
+         * `autoSyncEnabled`：**数字里不再有 0 的含义**，范围 5–1440。
+         */
+        it("周期框在开关前面、单位在中间；下限是 5，初始值来自设置", () => {
+            const tab = createTab(createFakeApp(), {
+                version: 8,
+                images: { autoSyncEnabled: true, autoSyncMinutes: 30 },
+            });
+            renderImagesPage(tab);
+
+            const periodic = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.images.autoSync
+            );
+            expect(periodic).toBeDefined();
+            expect(periodic!.texts[0]?.value).toBe("30");
+            expect(periodic!.texts[0]?.inputEl.min).toBe("5");
+            expect(periodic!.texts[0]?.inputEl.max).toBe(String(24 * 60));
+            expect(periodic!.toggles[0]?.value).toBe(true);
+            // 顺序：先框、后开关
+            expect(periodic!.controls.map((control) => control.constructor.name)).toEqual([
+                "TextComponent",
+                "ToggleComponent",
+            ]);
+            const unit = (
+                periodic!.controlEl.children as unknown as Array<{ cls?: string; text?: string }>
+            ).find((child) => child.cls === "obsync-unit");
+            expect(unit?.text).toBe(zhCN.settings.images.minutesUnit);
+        });
+
+        it("周期默认是关的（总开关开着也不会自己按周期跑）", () => {
+            const tab = createTab(createFakeApp());
+            renderImagesPage(tab);
+
+            const periodic = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.images.autoSync
+            );
+            expect(periodic!.toggles[0]?.value).toBe(false);
+            expect(DEFAULT_SETTINGS.images.autoSyncEnabled).toBe(false);
+        });
+
+        it("周期低于 5 会被忽略；拨开关会写进设置，且不动周期值", async () => {
+            const tab = createTab(createFakeApp(), {
+                version: 8,
+                images: { autoSyncEnabled: true, autoSyncMinutes: 30 },
+            });
+            renderImagesPage(tab);
+
+            const periodic = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.images.autoSync
+            );
+            await periodic!.texts[0]!.type("0");
+            await periodic!.texts[0]!.type("abc");
+            expect(settingsOf(tab).images.autoSyncMinutes).toBe(30);
+
+            await periodic!.toggles[0]!.toggle(false);
+            expect(settingsOf(tab).images.autoSyncEnabled).toBe(false);
+            // 关掉周期**不动**周期值 —— 再打开时还是 30
+            expect(settingsOf(tab).images.autoSyncMinutes).toBe(30);
+        });
+
+        /**
+         * 出界的输入**不能在框里留着一个不生效的数字**。
+         *
+         * 用户的原话：「按周期同步如果输入 0-4 的值不会被视觉修正是吗？这不合理吧」
+         * —— 对，之前就是那样：框里写着 0、真正生效的却是 10。现在失焦会把显示
+         * 对齐回生效值。`addNumberField` 的说明里写了为什么修在失焦而不是 onChange
+         * （onChange 每按一个键都触发，改框会打断「15」这种两位数输入）。
+         */
+        it("出界的输入：失焦时把框里的显示对齐回生效值", async () => {
+            const tab = createTab(createFakeApp(), {
+                version: 8,
+                images: { autoSyncEnabled: true, autoSyncMinutes: 30 },
+            });
+            renderImagesPage(tab);
+
+            const field = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.images.autoSync
+            )!.texts[0]!;
+
+            // 打字过程中出界：不写、也不打断输入
+            await field.type("0");
+            expect(settingsOf(tab).images.autoSyncMinutes).toBe(30);
+
+            // 失焦：显示对齐回 30（而不是留着 0）
+            field.inputEl.trigger?.("blur");
+            expect(field.value).toBe("30");
+
+            // 合法值照旧立即生效，失焦不改它
+            await field.type("45");
+            expect(settingsOf(tab).images.autoSyncMinutes).toBe(45);
+            field.inputEl.trigger?.("blur");
+            expect(field.value).toBe("45");
+        });
+
+        it("压缩默认质量也在同一套规则里（越界的 5 不再被偷偷存下去）", async () => {
+            const tab = createTab(createFakeApp());
+            renderImagesPage(tab);
+
+            const field = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.images.compressQuality
+            )!.texts[0]!;
+
+            // 以前这里会把 5 存进设置，直到下次加载才被钳回 10 —— 框里写的与生效的
+            // 一直不是一回事。现在直接不接受，失焦对齐。
+            await field.type("5");
+            expect(settingsOf(tab).images.compressQuality).toBe(82);
+            field.inputEl.trigger?.("blur");
+            expect(field.value).toBe("82");
+        });
+
+        it("总开关叫「自动同步图片」而不是「启用图片同步」", () => {
+            // 旧名字听起来像「图片同步的总开关」，于是「间隔设为 0」被读成
+            // 「图片同步关着」—— 而**启动时仍会同步一轮**。
+            const tab = createTab(createFakeApp());
+            renderImagesPage(tab);
+
+            expect(zhCN.settings.images.enabled).toBe("自动同步图片");
+            expect(row("自动同步图片")).toBeDefined();
+            expect(row("启用图片同步")).toBeUndefined();
+            // 两行描述都要把「关掉周期 ≠ 关掉这一页的自动动作」说出来
+            expect(zhCN.settings.images.autoSyncDesc).toContain("上面的开关开着时，启动仍会同步一轮");
+            expect(zhCN.settings.images.enabledDesc).toContain("启动时跑一轮");
+        });
+
+        it("描述不许把「改名 / 删除当场处理」写成「有变化就同步」", () => {
+            // 用户第二次追问：「并在你改名或删除图片时同步云端那一份，不就是有变化就同步
+            // 的意思吗」—— 不是：改名 / 删除是**当场处理那两个对象**（等下一轮会出重复
+            // 图片、或把刚删的图补回来），而**新加或修改的图片不会立刻上传**。
+            // 少了后面那一句，这段话就会被读成通用的「有变化就同步」。
+            expect(zhCN.settings.images.autoSyncDesc).toContain("不会立刻上传");
+            expect(zhCN.settings.images.autoSyncDesc).toContain("只有改名与删除是当场处理的");
+            expect(zhCN.settings.images.enabledDesc).toContain("当场跟着处理");
+        });
+
+        it("同一个「Cloudflare R2 连接」里的几行同组，跨节的异组", () => {
+            const tab = createTab(createFakeApp());
+            renderImagesPage(tab);
+
+            const connection = rowGroup(tab, zhCN.settings.images.accountId);
+            expect(connection).toBeDefined();
+            expect(rowGroup(tab, zhCN.settings.images.bucket)).toBe(connection);
+            expect(rowGroup(tab, zhCN.settings.images.secretKey)).toBe(connection);
+
+            // 开关、受管文件夹在「基础」那一组；压缩默认值是另一组
+            const basics = rowGroup(tab, zhCN.settings.images.enabled);
+            expect(basics).toBeDefined();
+            expect(rowGroup(tab, zhCN.settings.images.folders)).toBe(basics);
+            expect(rowGroup(tab, zhCN.settings.images.compressQuality)).not.toBe(connection);
+            expect(rowGroup(tab, zhCN.settings.images.compressQuality)).not.toBe(basics);
+        });
+
+        it("三个动作按钮挂在「操作」标题行上，**不再**单占一条空卡片", () => {
+            // 用户截图里最丑的一处：一条卡片上只有最右边三个按钮。
+            const tab = createTab(createFakeApp(), {}, undefined, createImagesStub());
+            renderImagesPage(tab);
+
+            const heading = createdSettings.find(
+                (setting) =>
+                    setting.name === zhCN.settings.images.actionsHeading &&
+                    setting.buttons.some((button) => button.text === zhCN.settings.images.syncNow)
+            );
+            expect(heading).toBeDefined();
+            expect(heading!.classes).toContain("obsync-group-heading");
+            expect(heading!.buttons.map((button) => button.text)).toEqual([
+                zhCN.settings.images.test,
+                zhCN.settings.images.preview,
+                zhCN.settings.images.syncNow,
+            ]);
+
+            // 那一行**没有**按钮：按钮全在标题行上（否则又是那条空横条）
+            const namelessButtonRows = createdSettings.filter(
+                (setting) => !setting.name && setting.buttons.length > 0
+            );
+            expect(
+                namelessButtonRows.map((setting) => setting.buttons.map((button) => button.text))
+            ).toEqual([[zhCN.settings.images.foldersBrowse, zhCN.settings.images.foldersReset]]);
+        });
+
+        it("结果区在「操作」组里，且在标题行的按钮**下面**", () => {
+            const tab = createTab(createFakeApp(), {}, undefined, createImagesStub());
+            renderImagesPage(tab);
+
+            const results = findAllIn(tab, (el) => el.cls === "obsync-diagnostics");
+            expect(results).toHaveLength(1);
+            expect(groupOf(tab, results[0]!)).toBeDefined();
+        });
     });
 
     /**
@@ -852,23 +2420,95 @@ describe("设置页 · 图片同步页", () => {
     });
 
     /**
-     * 归一必须在**写的时候**做一次。
+     * 归一必须在**加入的时候**做一次。
      *
-     * 用户写 `/attachments/` 或留空行是常事，而没归一化的前缀会让范围判断
-     * 悄悄失准 —— 表现是「填了却一个文件都不动」，且没有任何提示。
+     * 用户手打 `/attachments/`、`assets//img`、`.` 是常事，而没归一化的前缀会让
+     * 范围判断悄悄失准 —— 表现是「填了却一个文件都不动」，且没有任何提示。
      */
-    it("改文件夹会归一后再写进设置，并落盘", async () => {
+    it("在框里打完按回车 → 归一后加进列表，并落盘", async () => {
         const tab = createTab(createFakeApp());
         renderImagesPage(tab);
 
         const before = saveCount(tab);
-        await row(zhCN.settings.images.folders)?.textAreas[0]?.type(
-            "/attachments/\n\nassets//img\n."
-        );
+        // 一次拿到这个框就一直用它：加入之后会重绘，但**驱动的是同一个元素**，
+        // 而设置对象是共用的（重绘只换 DOM）。
+        const input = foldersInput();
 
-        expect(settingsOf(tab).images.folders).toEqual(["attachments", "assets/img", ""]);
+        input.value = "/attachments/";
+        pressEnter(input);
+        expect(settingsOf(tab).images.folders).toEqual(["", "attachments"]);
+        // 加进去之后框要清空：不清的话下一次回车会把同一个路径再加一遍
+        expect(input.value).toBe("");
+
+        input.value = "assets//img";
+        pressEnter(input);
+        expect(settingsOf(tab).images.folders).toEqual(["", "attachments", "assets/img"]);
+
         // 「改了值但没落盘」是设置页最容易犯的错
-        expect(saveCount(tab)).toBe(before + 1);
+        expect(saveCount(tab)).toBeGreaterThan(before);
+    });
+
+    it("空输入 / 纯空白按回车什么都不加", () => {
+        const tab = createTab(createFakeApp());
+        renderImagesPage(tab);
+
+        const input = foldersInput();
+        input.value = "";
+        pressEnter(input);
+        input.value = "   ";
+        pressEnter(input);
+
+        expect(settingsOf(tab).images.folders).toEqual([""]);
+    });
+
+    it("加一个已经加过的文件夹是无害的空操作（不报错、不重复）", () => {
+        const tab = createTab(createFakeApp());
+        renderImagesPage(tab);
+
+        const input = foldersInput();
+        input.value = "/attachments/";
+        pressEnter(input);
+        input.value = "attachments";
+        pressEnter(input);
+
+        expect(settingsOf(tab).images.folders).toEqual(["", "attachments"]);
+    });
+
+    /**
+     * 输入时下方给候选（2026-10-02 用户要求），点一个就加进去。
+     *
+     * 候选来自 vault 里现成的文件夹 —— 手打路径的错法（`/attachments/`、
+     * 根本不存在的目录）以前全都没有提示，从列表里挑一次性消失。
+     */
+    it("打字时列出候选，点候选即加入", () => {
+        const fake = createFakeApp({ "attachments/a.png": "x", "assets/img/b.png": "y" });
+        const tab = createTab(fake, { images: { folders: [] } });
+        renderImagesPage(tab);
+
+        typeFolders("attach");
+        const labels = suggestions(tab);
+        expect(labels).toContain("attachments");
+        expect(labels).not.toContain("assets/img");
+
+        // 点候选（真实 DOM 里是 mousedown —— `click` 之前输入框会先 blur）
+        const item = findAllIn(tab, (child) => child.cls === "obsync-path-suggest-item")[0]!;
+        (item.trigger as (name: string, ...args: unknown[]) => void).call(item, "mousedown", { preventDefault: () => {} });
+
+        expect(settingsOf(tab).images.folders).toEqual(["attachments"]);
+    });
+
+    it("候选里标出「已在同步范围」，且打字为空时不显示", () => {
+        const fake = createFakeApp({ "attachments/a.png": "x" });
+        const tab = createTab(fake, { images: { folders: ["attachments"] } });
+        renderImagesPage(tab);
+
+        typeFolders("attach");
+        const item = findAllIn(tab, (child) => child.cls === "obsync-path-suggest-item")[0]!;
+        expect(
+            (item.children ?? []).some(
+                (child) => child.text === zhCN.settings.images.folderPickerIncluded
+            )
+        ).toBe(true);
     });
 
     it("总开关的初值来自设置，拨动会写进设置", async () => {
@@ -894,20 +2534,28 @@ describe("设置页 · 图片同步页", () => {
     });
 
     /**
-     * 这一页只有一个开关。
+     * 这一页有**两个**开关，且只能是这两个。
      *
      * 断言「有哪些开关」而不只是「某个开关在不在」：删除本地图片时的云端处置
      * 已经从开关改成下拉（`deleteRemotePolicy`），旧的询问开关必须**消失** ——
      * 留着它会是「能拨但没有任何作用」的假控件，而这个项目里正是靠「设置项
      * 无人读取」那类检查在防这个，那一项只扫 `core/settings.ts` 的字段，
      * 管不到界面上多出来的开关。
+     *
+     * 两个开关是 2026-10-02（v8）之后的形状，各有各的职责、**不重叠**：
+     * 「自动同步图片」= 允不允许在背后动云端（启动一轮 / 改名换键 / 删除处置）；
+     * 「按周期同步」= 要不要按周期跑。第二个是拆出来的，因为周期那个数字不再
+     * 兼职表达「关闭」（下限也提到了 5）。
      */
-    it("只有一个开关：启用（删除时的云端处置已经改成下拉）", () => {
+    it("这一页只有两个开关：自动同步图片、按周期同步（删除时的云端处置是下拉）", () => {
         const tab = createTab(createFakeApp());
         renderImagesPage(tab);
 
         const toggleRows = createdSettings.filter((setting) => setting.toggles.length > 0);
-        expect(toggleRows.map((setting) => setting.name)).toEqual([zhCN.settings.images.enabled]);
+        expect(toggleRows.map((setting) => setting.name)).toEqual([
+            zhCN.settings.images.enabled,
+            zhCN.settings.images.autoSync,
+        ]);
     });
 
     it("「删除本地图片时」下拉的初值来自设置，改它会写进设置", async () => {
@@ -1013,7 +2661,7 @@ describe("设置页 · 图片同步页", () => {
         // 操作区的小标题还在（用户知道这里有东西），下面是一行说明
         expect(row(zhCN.settings.images.actionsHeading)).toBeDefined();
         expect(
-            childrenOf(tab).find((child) => child.text === zhCN.images.notice.notConfigured)
-        ).toBeDefined();
+            findAllIn(tab, (child) => child.text === zhCN.images.notice.notConfigured)
+        ).toHaveLength(1);
     });
 });

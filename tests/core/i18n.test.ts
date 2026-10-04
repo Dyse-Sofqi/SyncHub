@@ -30,22 +30,29 @@ describe("getTranslations", () => {
         __setLanguage("en");
     });
 
-    it("auto 跟随 Obsidian 的语言", () => {
+    it("跟随 Obsidian 的语言", () => {
         __setLanguage("zh-CN");
-        expect(getTranslations("auto").common.cancel).toBe("取消");
+        expect(getTranslations().common.cancel).toBe("取消");
 
         __setLanguage("en-US");
-        expect(getTranslations("auto").common.cancel).toBe("Cancel");
-    });
-
-    it("显式指定语言时忽略 Obsidian 的设置", () => {
-        __setLanguage("en");
-        expect(getTranslations("zh-cn").common.cancel).toBe("取消");
+        expect(getTranslations().common.cancel).toBe("Cancel");
     });
 
     it("未知的 Obsidian 语言回退到英文而不是崩溃", () => {
         __setLanguage("xx-YY");
-        expect(getTranslations("auto").common.cancel).toBe("Cancel");
+        expect(getTranslations().common.cancel).toBe("Cancel");
+    });
+
+    /**
+     * **没有参数**（2026-10-01）。
+     *
+     * 这里曾经有一个「界面语言」设置项，`getTranslations(language)` 收它的值 ——
+     * 而那个设置项已经删了：界面语言一律跟随 Obsidian，留一个能与 Obsidian
+     * 不一致的开关只会让「界面语言不对」变成用户自己造得出来的状态。
+     * 这条用例钉的就是「只有一个来源」：函数签名不再接受任何语言。
+     */
+    it("不收参数（界面语言只有一个来源：Obsidian）", () => {
+        expect(getTranslations).toHaveLength(0);
     });
 });
 

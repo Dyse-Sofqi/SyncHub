@@ -284,4 +284,11 @@ export interface SelfUpdateCheck {
     hasUpdate: boolean;
     /** 检查失败时的原因（限流、网络…）。 */
     error?: string;
+    /**
+     * **回退过的来源**（`gitee.com/sofqi/SyncHub` 这种可读写法）。
+     *
+     * 设置里那个来源报错、改用官方仓库重试成功时才有值。它进状态行而不只是进提示条：
+     * 提示条几秒就没了，而「这次是从哪儿查的」是用户判断这条结论可不可信的依据。
+     */
+    fellBackFrom?: string;
 }

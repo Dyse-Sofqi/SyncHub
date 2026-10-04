@@ -1,19 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { __setApiVersion, __setRequestUrlHandler } from "../stubs/obsidian";
+import { __setApiVersion, __setRequestUrlHandler, Notice } from "../stubs/obsidian";
 import { Notifier } from "../../src/core/notice";
 import { SecretStore } from "../../src/core/secretStore";
 import { normalizeSettings, type ObsyncSettings } from "../../src/core/settings";
 import { zhCN } from "../../src/core/i18n/locales/zh-cn";
 import { en } from "../../src/core/i18n/locales/en";
+import type { RepoRef } from "../../src/host/types";
 import {
     InstallerService,
     type InstallerHost,
 } from "../../src/features/installer/installerService";
 import {
     clearPendingRestart,
+    DEFAULT_SELF_SOURCE,
     describeSelfState,
     readPendingRestart,
     resolveSelfRepo,
+    selfRepoAttempts,
+    selfSourceLabel,
+    SELF_MIRROR,
     SELF_REPO,
 } from "../../src/features/installer/selfUpdate";
 import {
@@ -52,6 +57,9 @@ function route(match: RegExp, respond: Route["respond"]): void {
 beforeEach(() => {
     routes = [];
     calls = [];
+    // 提示条是**全局收集**的（`Notice.instances`）—— 不清就会跨用例串味，
+    // 而「回退有没有说一声」正是靠它断言的。
+    Notice.instances.length = 0;
     __setApiVersion("1.13.1");
     __setRequestUrlHandler(async (request) => {
         calls.push(request.url);
@@ -191,6 +199,28 @@ describe("updateSelf（更新自己）", () => {
         ).toBe(false);
     });
 
+    /**
+     * **不动设置**时走的就是 Gitee 镜像（2026-10-01 起的默认）。
+     *
+     * 与上一条的区别很重要：上一条验的是「填了会生效」，这一条验的是
+     * 「什么都不填也走镜像」—— 而绝大多数用户永远不会去动那一格。
+     */
+    it("默认来源就是 Gitee 镜像：不填任何东西也从 Gitee 更新，不碰官方", async () => {
+        const fake = createFakeApp(installedObsync());
+        const { service, settings } = createService(fake);
+        setupSelfRelease({ version: "0.2.0" });
+
+        // 出厂设置（测试里就是 normalizeSettings({}) 的结果）
+        expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+
+        await service.updateSelf("0.1.0");
+
+        expect(calls.some((url) => url.includes("gitee.com/api/v5/repos/sofqi/SyncHub"))).toBe(true);
+        expect(
+            calls.some((url) => url.includes("api.github.com/repos/Dyse-Sofqi/SyncHub"))
+        ).toBe(false);
+    });
+
     it("**可以重装同一个版本**（把一个坏掉的安装修回来是合理需求）", async () => {
         const fake = createFakeApp(installedObsync());
         const { service, settings } = createService(fake);
@@ -202,6 +232,103 @@ describe("updateSelf（更新自己）", () => {
         expect(settings.installer.pendingRestartVersion).toBe("0.1.0");
     });
 
+    /**
+     * **镜像失败 → 改用官方仓库重试**（2026-10-01 用户要求）。
+     *
+     * 三件事要同时成立：顺序（先镜像）、结果（从官方拿到了文件）、
+     * 以及**说出来**（提示里必须点明换了来源 —— 悄悄换等于「来源不明」）。
+     */
+    it("镜像不可用时回退到官方仓库，并从官方把新版本装好", async () => {
+        const fake = createFakeApp(installedObsync());
+        const { service, settings } = createService(fake);
+
+        // 镜像先失败：按注册顺序匹配，所以这条要压在 setupSelfRelease 前头。
+        route(/gitee\.com\/api\/v5\/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 403,
+            text: '{"message":"rate limit"}',
+        }));
+        setupSelfRelease({ version: "0.2.0" });
+
+        const result = await service.updateSelf("0.1.0");
+
+        // 先试镜像、再试官方 —— 顺序本身是被要求的行为
+        const giteeAt = calls.findIndex((url) => url.includes("gitee.com/api/v5/repos/sofqi"));
+        const githubAt = calls.findIndex((url) => url.includes("api.github.com/repos/Dyse-Sofqi"));
+        expect(giteeAt).toBeGreaterThanOrEqual(0);
+        expect(githubAt).toBeGreaterThan(giteeAt);
+
+        // 结果是「更新成功」，且来自官方那份资产
+        expect(result).toEqual({ version: "0.2.0", replaced: true });
+        expect(readPluginFile(fake, "ob-sync", "main.js")).toBe("// main 0.2.0");
+        expect(settings.installer.pendingRestartVersion).toBe("0.2.0");
+
+        // 回退**说了出来**：提示里带上失败的那个地址与官方地址
+        const warned = Notice.instances.map((notice) => String(notice.message));
+        expect(warned.some((message) => message.includes("gitee.com/sofqi/SyncHub"))).toBe(true);
+        expect(
+            warned.some((message) => message.includes("github.com/Dyse-Sofqi/SyncHub"))
+        ).toBe(true);
+    });
+
+    it("两边都失败时抛出**官方那次**的原因（回退本身已经提示过了）", async () => {
+        const fake = createFakeApp(installedObsync());
+        const { service, settings } = createService(fake);
+
+        route(/gitee\.com\/api\/v5\/repos\/sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 403,
+            text: '{"message":"rate limit"}',
+        }));
+        route(/api\.github\.com\/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 404,
+            text: '{"message":"Not Found"}',
+        }));
+
+        await expect(service.updateSelf("0.1.0")).rejects.toThrow();
+
+        // 两次都打过了，一个文件都没写
+        expect(calls.some((url) => url.includes("gitee.com/api/v5/repos/sofqi"))).toBe(true);
+        expect(calls.some((url) => url.includes("api.github.com/repos/Dyse-Sofqi"))).toBe(true);
+        expect(fake.writes).toEqual([]);
+        expect(settings.installer.pendingRestartVersion).toBe("");
+        // 回退提示仍然只有一条（不是每次重试都嚷一句）
+        expect(
+            Notice.instances.filter((notice) =>
+                String(notice.message).includes("gitee.com/sofqi/SyncHub")
+            )
+        ).toHaveLength(1);
+    });
+
+    it("配的就是官方时**不做无谓的第二次尝试**（回退到自己没有意义）", async () => {
+        const fake = createFakeApp(installedObsync());
+        const { service, settings } = createService(fake);
+        settings.installer.selfUpdateSource = "https://github.com/Dyse-Sofqi/SyncHub";
+        route(/api\.github\.com\/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
+            status: 403,
+            text: '{"message":"rate limit"}',
+        }));
+
+        await expect(service.updateSelf("0.1.0")).rejects.toThrow();
+
+        const attempts = calls.filter(
+            (url) => url === "https://api.github.com/repos/Dyse-Sofqi/SyncHub/releases/latest"
+        );
+        expect(attempts).toHaveLength(1);
+        expect(Notice.instances.map((notice) => String(notice.message)).join(" ")).not.toContain(
+            "已改用官方仓库"
+        );
+    });
+
+    it("镜像正常时不提示回退（别让每一行都挂一串废话）", async () => {
+        const fake = createFakeApp(installedObsync());
+        const { service } = createService(fake);
+        setupSelfRelease({ version: "0.2.0" });
+
+        await service.updateSelf("0.1.0");
+
+        expect(Notice.instances.map((notice) => String(notice.message)).join(" ")).not.toContain(
+            "已改用官方仓库"
+        );
+    });
     it("**远端 id 不是 ob-sync 就中止**（常量写错时不能覆盖别的插件）", async () => {
         const fake = createFakeApp(installedObsync());
         const { service, settings } = createService(fake);
@@ -338,6 +465,102 @@ describe("describeSelfState（设置页那一行状态）", () => {
         expect(text).toBe(en.installer.selfPendingRestart("0.2.0"));
         expect(text).not.toMatch(/[\u4e00-\u9fff]/);
     });
+
+    /**
+     * 回退过官方仓库时，状态行末尾要一直写着这件事（2026-10-01）。
+     *
+     * 提示条几秒就没了，而「这次是从哪儿查的」是用户判断这条结论可不可信的依据。
+     * 三种主体（有更新 / 已是最新 / 出错）都要带上它 —— 回退是**过程**，与结论无关。
+     */
+    it("回退过时在末尾注明（有更新 / 已是最新 / 出错都带）", () => {
+        const fallback = "gitee.com/sofqi/SyncHub";
+
+        const withUpdate = describeSelfState(
+            {
+                ...base,
+                check: {
+                    currentVersion: "0.1.0",
+                    latestVersion: "0.2.0",
+                    hasUpdate: true,
+                    fellBackFrom: fallback,
+                },
+            },
+            zhCN
+        );
+        expect(withUpdate).toBe(
+            `${zhCN.installer.selfUpdateAvailable("0.1.0", "0.2.0")} ${zhCN.installer.selfCheckFellBack(fallback)}`
+        );
+
+        const upToDate = describeSelfState(
+            {
+                ...base,
+                check: {
+                    currentVersion: "0.1.0",
+                    latestVersion: "0.1.0",
+                    hasUpdate: false,
+                    fellBackFrom: fallback,
+                },
+            },
+            zhCN
+        );
+        expect(upToDate).toContain(zhCN.installer.selfCheckFellBack(fallback));
+
+        const failed = describeSelfState(
+            {
+                ...base,
+                check: {
+                    currentVersion: "0.1.0",
+                    latestVersion: "0.1.0",
+                    hasUpdate: false,
+                    error: "网络不可达",
+                    fellBackFrom: fallback,
+                },
+            },
+            zhCN
+        );
+        expect(failed).toBe(
+            `${zhCN.installer.selfCheckFailed("网络不可达")} ${zhCN.installer.selfCheckFellBack(fallback)}`
+        );
+    });
+
+    it("没回退过时不加那半句（别让每一行都挂一串废话）", () => {
+        const text = describeSelfState(
+            {
+                ...base,
+                check: { currentVersion: "0.1.0", latestVersion: "0.1.0", hasUpdate: false },
+            },
+            zhCN
+        );
+
+        expect(text).toBe(zhCN.installer.selfUpToDate("0.1.0"));
+    });
+});
+
+/**
+ * 回退顺序（2026-10-01）。
+ *
+ * 用户的要求原话是「先试镜像、失败再试官方，回退发生时要告诉用户」——
+ * 这一组钉的就是这三件事：**顺序**、**只回退到官方**、**回退要说出来**。
+ */
+describe("selfRepoAttempts / selfSourceLabel（回退顺序与称呼）", () => {
+    const custom: RepoRef = { host: "github", owner: "someone", repo: "fork" };
+
+    it("默认（镜像）→ 先镜像、再官方", () => {
+        expect(selfRepoAttempts(SELF_MIRROR)).toEqual([SELF_MIRROR, SELF_REPO]);
+    });
+
+    it("用户自己填的别的来源也回退到官方", () => {
+        expect(selfRepoAttempts(custom)).toEqual([custom, SELF_REPO]);
+    });
+
+    it("配的就是官方时**只有一次尝试**（回退到自己没有意义，还会白打一遍请求）", () => {
+        expect(selfRepoAttempts(SELF_REPO)).toEqual([SELF_REPO]);
+    });
+
+    it("提示里把来源写成可读地址", () => {
+        expect(selfSourceLabel(SELF_MIRROR)).toBe("gitee.com/sofqi/SyncHub");
+        expect(selfSourceLabel(SELF_REPO)).toBe("github.com/Dyse-Sofqi/SyncHub");
+    });
 });
 
 /**
@@ -348,9 +571,22 @@ describe("describeSelfState（设置页那一行状态）", () => {
  * （那套是给用户装的插件用的：自动探测、只提议、要确认）。
  */
 describe("resolveSelfRepo（自身更新来源）", () => {
-    it("留空 / 全空白 → 官方仓库", () => {
-        expect(resolveSelfRepo("")).toEqual(SELF_REPO);
-        expect(resolveSelfRepo("   ")).toEqual(SELF_REPO);
+    /**
+     * **默认来源是 Gitee 镜像**（2026-10-01 改的）。
+     *
+     * 空串曾经表示「官方仓库」，而 `data.json` 里存的就是它 —— 所以这条断言同时
+     * 盯着两件事：默认值换成了镜像，以及老数据里那个空值也跟着走镜像（靠
+     * `normalizeSettings` 收敛，见 settings.test.ts 里那一条）。
+     */
+    it("留空 / 全空白 → **Gitee 镜像**（不再回官方）", () => {
+        expect(resolveSelfRepo("")).toEqual(SELF_MIRROR);
+        expect(resolveSelfRepo("   ")).toEqual(SELF_MIRROR);
+    });
+
+    it("设置里那个默认字符串解析出来的就是 SELF_MIRROR（两个常量不许漂）", () => {
+        // 漂开的话，设置页显示的是一个地址、实际请求的是另一个 —— 而那种错
+        // 只会在真机上表现为「从想不到的地方拉了个包」。
+        expect(resolveSelfRepo(DEFAULT_SELF_SOURCE)).toEqual(SELF_MIRROR);
     });
 
     it("Gitee 完整地址 → host 是 gitee（**不是** GitHub 上的同名仓库）", () => {
@@ -359,6 +595,10 @@ describe("resolveSelfRepo（自身更新来源）", () => {
             owner: "sofqi",
             repo: "SyncHub",
         });
+    });
+
+    it("填官方地址仍然有效（默认换了，退路还在）", () => {
+        expect(resolveSelfRepo("https://github.com/Dyse-Sofqi/SyncHub")).toEqual(SELF_REPO);
     });
 
     it("简写按 GitHub 解释 —— 要 Gitee 就写全地址", () => {

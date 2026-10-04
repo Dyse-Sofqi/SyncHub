@@ -69,6 +69,20 @@ interface SendOptions {
     body?: ArrayBuffer;
     contentType?: string;
     timeoutMs?: number;
+    /**
+     * 额外参与签名的请求头（小写名 → 值）。
+     *
+     * 目前只有 `x-amz-copy-source` 用它（服务端 COPY）。**必须同时参与签名**：
+     * R2 会把 SignedHeaders 与实际收到的头逐字比对，漏签那个头就是一个
+     * 没有任何解释的 403 —— 所以这里只开一个口子，签与发在同一处发生。
+     */
+    extraHeaders?: Record<string, string>;
+}
+
+/** 服务端 COPY 的结论。源对象不存在时 `copyObject` 直接返回 `undefined`。 */
+export interface CopyResult {
+    /** 新对象的 ETag。响应体里读不到时缺省（调用方沿用清单里那个值）。 */
+    etag?: string;
 }
 
 export class R2Client {
@@ -193,6 +207,57 @@ export class R2Client {
     }
 
     /**
+     * **服务端**拷贝一个对象（`x-amz-copy-source`），返回新对象的 ETag。
+     *
+     * ## 为什么需要它（2026-10-01）
+     *
+     * 本地改名之后云端那一份也要换键。原来的做法是「删旧键 + 从本地重传新键」——
+     * 内容实打实走一遍上传带宽。而**文件夹改名会一次性触发整批图片**（见
+     * `imageSyncService.renameRemoteBackup`），那笔流量本来可以一点不花：
+     * COPY 由服务端搬，内容一个字节都不过本地。
+     *
+     * ## 源不存在 → 返回 `undefined`（不是抛错）
+     *
+     * 「云端本来就没有这一份」是一个**正常结论**：本地改名的那张图可能从没传过
+     * （新加的图、或者这台设备的清单丢过）。把它当失败会让用户每次改名都看到
+     * 一个没有意义的错误 —— 而那正是「插件又报错了」这类噪音的来源。
+     *
+     * 403 仍旧抛 `authFailed`（凭据问题要用户去改配置），其余抛 `copyFailed`。
+     */
+    async copyObject(sourceKey: string, destinationKey: string): Promise<CopyResult | undefined> {
+        // 头值必须是 `/桶/键`，且**键要按段编码**（空格、中文、`&` 都得转义）——
+        // 与路径同一套规则，所以复用 `encodeCanonicalPath`（它保留 `/` 分隔符）。
+        const source = `/${this.config.bucket}/${encodeCanonicalPath(sourceKey)}`;
+
+        const response = await this.send({
+            method: "PUT",
+            path: `/${this.config.bucket}/${destinationKey}`,
+            // COPY 的请求体是空的：内容由服务端从源对象复制过来。
+            payloadHash: EMPTY_PAYLOAD_SHA256,
+            extraHeaders: { "x-amz-copy-source": source },
+        });
+
+        if (response.status === 403) {
+            throw new ImageSyncError("authFailed", { status: response.status });
+        }
+        // 源缺失就是 404（NoSuchKey）。这与 GET 的 404 语义一致：**对象不在那儿**。
+        if (response.status === 404) return undefined;
+        if (response.status >= 400) {
+            throw new ImageSyncError("copyFailed", {
+                path: destinationKey,
+                status: response.status,
+                detail: extractServerMessage(response.text),
+            });
+        }
+
+        // 新对象的 ETag 在**响应体**里（`<CopyObjectResult>`），不在响应头上 ——
+        // 这与 PUT 正好相反。读不到就给一个空结果，调用方沿用清单里那个值
+        // （内容没变，两者本来就该一样）。
+        const etag = tagValue(response.text, "ETag");
+        return etag === undefined ? {} : { etag: stripQuotes(etag) };
+    }
+
+    /**
      * 打一次最小代价的列举，用来判断「这套凭据能不能用」。
      *
      * 刻意不用 HEAD 桶（`HeadBucket`）：某些代理会把 HEAD 的响应体丢掉，
@@ -250,6 +315,8 @@ export class R2Client {
             host: this.config.host,
             "x-amz-content-sha256": options.payloadHash,
             "x-amz-date": amzDate,
+            // 额外头也进签名（见 `SendOptions.extraHeaders`）。
+            ...(options.extraHeaders ?? {}),
         };
 
         const authorization = authorizationHeader({
@@ -279,6 +346,8 @@ export class R2Client {
                     "x-amz-content-sha256": options.payloadHash,
                     "x-amz-date": amzDate,
                     authorization,
+                    // 与签名里那份**必须是同一个字符串**，否则对端算出来的摘要不同。
+                    ...(options.extraHeaders ?? {}),
                     ...(options.contentType ? { "Content-Type": options.contentType } : {}),
                 },
                 body: options.body,

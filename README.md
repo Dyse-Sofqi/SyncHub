@@ -47,11 +47,11 @@ Chinese-first UI with an equal English one.
 
 **中文**
 
-- **笔记同步** — 提交 → 拉取 → 推送一条链 · 冲突指南（不自动解决）· 自动提交/推送/拉取定时器 ·
+- **笔记同步** — 提交 → 拉取 → 推送一条链 · 冲突指南（不自动解决）· 定时同步（一个周期跑完整链路） ·
   仓库同步视图（侧边栏，可点状态栏打开）· 状态栏条目 · 初始化仓库时建 `.gitignore`
   （设置页里可直接编辑）· **差异视图**（逐文件 / 逐提交 / 当前文件）·
   在远端打开文件/历史/提交 · 编辑远端 · 连接测试
-- **图片同步** — Cloudflare R2 双副本（只复制不删除）· 删本地时问一句（三档）· 受管文件夹 ·
+- **图片同步** — Cloudflare R2 双副本（只复制不删除）· 删本地时问一句（三档）· 需要图片同步的文件夹 ·
   图片管理面板（本地 / 云端 / 已链接三条轴筛选、缩略图、**点缩略图看大图（滚轮缩放 / 放大后拖动）**、
   **单张重命名**、批量同步 / 压缩 / 重命名 / 删除）·
   笔记内裁剪压缩（保持原格式、只在变小时写回）· Excalidraw 压缩画布的引用也认得出 ·
@@ -65,12 +65,12 @@ Chinese-first UI with an equal English one.
 **English**
 
 - **Vault sync** — commit → pull → push in one chain · conflict guide (no auto-resolution) ·
-  auto commit/push/pull timers · repository sync view (sidebar, openable from the status bar) ·
+  scheduled sync (one interval running the full chain) · repository sync view (sidebar, openable from the status bar) ·
   status-bar item · `.gitignore` created on init (editable in the settings page) ·
   **diff view** (per file / per commit / current file) ·
   open file/history/commit on the remote · edit remote · connection test
 - **Image sync** — Cloudflare R2 mirror (copy only, never delete) · one prompt before deleting a cloud
-  copy (three modes) · managed folders · image manager (filter on local / cloud / linked, thumbnails,
+  copy (three modes) · folders to sync · image manager (filter on local / cloud / linked, thumbnails,
   **click a thumbnail for the full-size view — the wheel zooms, drag when it is larger than the
   window**, **rename a single image**, batch sync / compress / rename / delete) · crop and compress
   inside the note (keeps the original format, writes back only when smaller) · understands Excalidraw's
@@ -88,14 +88,16 @@ Chinese-first UI with an equal English one.
 
 #### 🔄 笔记仓库同步（仅桌面端）
 
-依赖系统 git，因此**仅桌面端可用**（Windows / macOS / Linux）。
+依赖系统 git，因此**仅桌面端可用**（Windows / macOS / Linux）—— git 得**自己装**
+（插件不捆绑它，各平台怎么装见文末的「平台要求」）。
 
 - **立即同步** —— 提交 → 拉取 → 推送，一条链走完。仓库同步视图的**顶部工具条一行**：
   `提交` / `拉取` / `推送`、分支下拉、**靠右的** `立即同步`、**最右的** `刷新`。
   **「提交」只写本地仓库，「推送」只发送已提交的内容** —— 它不会顺手提交，
   带着未提交的改动点它，改动一个字节都不会上去（这时它会明确告诉你还有几个更改没提交）。
-  「自动提交并同步」定时器走的也是「立即同步」那条完整链路
-- **提交信息不用你填** —— 由设置里的**提交信息模板**自动生成（默认 `vault backup: {{date}}`，
+  「定时同步」的定时器走的也是「立即同步」那条完整链路
+- **提交信息不用你填** —— 由设置里的**提交信息模板**自动生成（默认
+  `vault backup: {{date}} ({{numFiles}} files)`，
   支持 `{{date}}` / `{{hostname}}` / `{{numFiles}}` / `{{files}}`）。全程没有输入框，
   点「提交」/「立即同步」都不会弹窗问你要备注
 - **仓库大小与待提交改动** —— 仓库同步视图里**并排两栏**：**仓库大小**（`.git` 对象库占用 +
@@ -120,22 +122,82 @@ Chinese-first UI with an equal English one.
   制造冲突）。**已存在的 `.gitignore` 绝不覆盖**，
   也可以随时改它 —— 「仓库同步」设置页里有一个**可直接编辑的多行代码框**
   （带「填入默认内容」与「在编辑器中打开」两个按钮），命令面板里也有「编辑 .gitignore」
+- **让图片不进 git** —— 图片已经交给「图片同步」（R2）的话，`.gitignore` 一节里有一个
+  **停止跟踪** 按钮，一次做完三件事（点开会先弹窗把这三步与两个后果写清楚，并让你选
+  **按什么写规则**）：
+
+  1. 把规则写进 `.gitignore`（只追加缺的那些）—— 新图片从此不进 git；
+  2. `git rm -r --cached` 把命中的已跟踪文件从 git 的**索引**里摘掉 —— **本地文件一个都不动**，
+     但下次提交会记下一条「删除」；
+  3. 下一次同步（提交 → 拉取 → 推送）把这条改动推到远端。
+
+  **两种规则形状，各有各的适用面**：
+
+  | 形状 | 写出来的规则 | 什么时候用 |
+  | --- | --- | --- |
+  | **按文件夹** | `attachments/`、`assets/img/` | 图片同步管的是**具体几个文件夹**。范围与图片同步完全重合 —— 那些文件夹里的东西本来就归它管 |
+  | **按扩展名** | `*.png`、`*.PNG`、`*.jpg` …（插件认得的 11 种图片格式） | 图片同步管的是**整个库**（默认设置）。那种配置下按文件夹写等于让 git 什么都不同步，而按扩展名只放走图片、**别的文件照旧进 git** |
+
+  两种形状**不能混着用**：扩展名规则管的是全库，而图片同步只镜像你配的那几个文件夹 ——
+  文件夹之外的图片会**同时退出 git 和 R2**（两边都不管）。所以按钮会按你的设置**只给出
+  成立的那一种**（整个库 → 默认按扩展名；具体文件夹 → 默认按文件夹）。
+
+  **为什么不能只加规则**：`.gitignore` 只管**未跟踪**的文件，已经提交过的照旧每次提交
+  都带着 —— 这是 git 的固有语义，不是配置问题。所以两步必须一起做；按扩展名时「哪些
+  图片已被跟踪」是问 git 要的（`git ls-files`），只摘图片，笔记一个都不碰。
+
+  动手之前它会替你检查三件事，任何一条不过就拒绝执行并说明原因：规则形状与图片同步的
+  范围对得上、图片同步已配好、**每一张都已经在 R2 上**。最后一条最要紧：别的设备拉取这次
+  改动时，工作区里那些图片会被 git 删掉、再由图片同步从 R2 补回来 —— 没上传的那些就真没了。
+  另外：**已经写进历史的图片不会消失**，`.git` 里的旧对象还在，仓库体积不会因此变小
+  （那需要重写历史，本插件不做）。
 - **冲突处理** —— 检测到冲突时在库根目录写一份《SyncHub 冲突指南.md》列出冲突文件，
   然后**立即停止同步链**；手动解决后重新同步，或用「放弃当前合并」回到拉取之前
-- **自动同步**（默认关闭）—— 自动提交 / 自动推送 / 自动拉取三个间隔（分钟，0 = 关闭）。
+- **定时同步**（默认关闭）—— 设置页那一行就是**一个周期 + 一个开关**：开了之后每 N 分钟
+  跑一次完整链路（提交 → 拉取 → 推送）。周期里没有「0 = 关闭」，开与关只由开关说了算。
   计时基于**上次执行时间**，重启 Obsidian 不重置周期；存储按库隔离，多个库互不干扰。
-  设置页「仓库同步」标题下有两段**注意事项**（选「重置」时自动同步会被暂停、
+  **开着的时候那一行会显示距离下次同步的倒计时**（每秒走，到点正在跑时改说「正在同步…」），
+  关掉或策略为「重置」挂起时它自己收起来。
+  后台那一轮**失败只进日志**（不打扰正在写笔记的你，下一轮多半自愈）—— 但**连续失败 3 次**时
+  会说一次，带上归类后的原因（例如「连不上远端…」）与「下一轮仍会自动重试」，成功一次即清零。
+  设置页「仓库同步」标题下有两段**注意事项**（选「重置」时定时同步会被暂停、
   多设备同时编辑同一个文件的风险），配之前值得先看一眼
-- **仓库同步视图**（侧边栏）—— 打开方式：侧栏的 **git 图标**、点一下**状态栏条目**，
-  或命令 **SyncHub：打开仓库同步面板**。顶部是**一行**工具条（提交 / 拉取 / 推送 /
-  分支下拉 / **靠右的**立即同步 / **最右的**刷新），下面是：远端地址（脱敏后回显）+ 编辑入口、
-  `领先 / 落后远端`、**并排两栏**的仓库大小与待提交改动、冲突区（列出冲突文件 + 放弃合并）、
-  **按「已暂存 / 更改」分组的文件列表**
+- **仓库同步视图**（侧边栏）—— 打开方式：侧栏的 **git 图标**、点一下**状态栏条目**、
+  命令 **SyncHub：打开仓库同步面板**，或者设置页「仓库同步」最上面那个**打开仓库同步面板**
+  按钮（在那页配置时最顺手的入口）。顶部是**一行**工具条：**分支下拉在最前**（它决定后面三个
+  动作作用在哪条分支上），然后 **提交 / 拉取 / 推送**，再 **刷新**，**立即同步靠右**
+  （开了定时同步时，「更改」页的状态摘要那一行还会显示距下次同步的倒计时）。下面是**标签组**（「更改 (N)」/「最近提交」），
+  冲突区在标签之外（它是「现在就得处理」的状态）。「更改」那一页顶部是**状态摘要**
+  （`与远端一致` / 领先落后）与**仓库大小 / 待提交改动**两栏，还有**格式筛选**，
+  再往下才是**按「已暂存 / 更改」分组的文件列表**
   （逐个文件暂存 / 取消暂存、点文件名打开笔记、**查看差异**、在远端打开此文件）、最近 10 条提交
   （点 hash 在远端查看这条提交，或点旁边的差异图标看它改了什么）。不是 git 仓库时这里直接给
-  「初始化仓库」按钮。面板是**活的**：自动提交、库外改动、命令面板里的动作都会让它自己刷新
+  「初始化仓库」按钮。面板是**活的**：定时同步、库外改动、命令面板里的动作都会让它自己刷新。
+  **开了定时同步时，工具栏右侧还会显示距离下一次同步的倒计时**（与设置页那一行同一份数据，
+  每秒自己走；正在同步时改说「正在同步…」）。
+  工具条下面第一行是**远端地址 —— 一个就地可改的输入框**（标题与输入框同一行，输入框宽度自适应；
+  失焦或回车即保存，明显写错的输入会被拦住并把框恢复原样；回显仍然脱敏，带令牌的地址不会
+  明文出现在屏幕上）。再往下是**标签组**：**「更改 (N)」/「最近提交」** 各占一屏，「更改」那一屏
+  顶部是**状态摘要**（`与远端一致` / 领先落后）与**仓库大小 / 待提交改动**两栏，所以列表为空时
+  只有一处写「没有需要提交的更改。」—— 改动一多也不用来回滚动（切标签只是换可见性，不会重跑
+  那几条 git 命令）。列表上方还有一个**格式筛选**（`全部 / Markdown / .png / …`，选项由这一轮
+  实际出现过的格式生成，带数量）—— 只想看笔记时一眼筛出 `.md`；筛选只影响列表，
+  「待提交改动」那一栏始终是总数。**冲突区留在标签之外**（它是「现在就得处理」的状态，不能藏起来）。
+- **「嵌套仓库」行**（在库的插件/主题目录里就地开发时会出现）—— 那些目录自带 `.git`，
+  库把它们记成了**指向另一个仓库的指针**（gitlink，索引模式 `160000`）。这种行在「更改」里
+  看着像文件夹、没有文件级差异，而且**怎么点「全部暂存」都消不掉**（指针没变，git 记不下东西）。
+  面板会给它加一个 **嵌套仓库** 徽标、写明原因，并给一个 **不再跟踪** 按钮：
+  一键「摘索引 + 写进 `.gitignore`」（本地文件与那个目录里的 `.git` 一个都不动，它自己的
+  git 照常可用）。不加忽略规则的话，下一轮 `git add -A` 会把指针再加回来 —— 这正是当初
+  它进索引的方式。
 - **差异视图** —— 面板上每个文件（含冲突行）与每条提交都能点开看改了什么；
   命令面板里也有 **SyncHub：查看当前文件的差异**（看正在编辑的这一个）。
+  **在主工作区以标签页打开**（不再是弹窗 —— 弹窗太小，长行读不了；标签页可以拉宽、
+  与笔记并排对照）。顶部可以切换**视图模式**：**统一**（一列，增删各占一行）或
+  **双栏对照**（像 VS Code：删除在左、新增在右，同一段改动按序号对齐 —— 删 2 行增 3 行时
+  多出来的那行只有右栏有内容，一眼看得出是新增）。模式跟着标签页一起记住。
+  **复用同一个标签**：连点几处差异不会开出一堆标签；文件差异会
+  跟着库状态自己刷新（标签页是常驻的，快照会过期），提交差异是历史里的一条、不会变。
   **工作区改动**与**已暂存改动**分成两节（同一个文件可能两边都有内容），逐行给出
   新旧两个行号、增删分色。未跟踪的新文件按「全部新增」显示内容，二进制、纯重命名、
   内容被截断、文件过大各有明确说明 —— 空白会被读成「没有改动」，那是完全不同的结论。
@@ -148,8 +210,12 @@ Chinese-first UI with an equal English one.
 - **在浏览器中打开** —— 当前文件、当前文件的修改历史，以及文件右键菜单里的同样两项；
   GitHub 与 Gitee 各按平台拼链接（中文文件名会自动转义）
 - **连接测试** —— 一条递进的检查链：git 可执行文件 → 是否 git 仓库 → 有没有远端 →
-  平台能否识别 → **真的 `ls-remote` 连一次**。任何一步失败就停，并说明「只验证了读取」
+  平台能否识别 → **真的 `ls-remote` 连一次**。任何一步失败就停，并说明「只验证了读取」。
+  它在设置页「仓库同步」里**排在最前面**（配好之后最常回来点的就是它）
 - **编辑远端地址** —— 地址里带凭据（`https://user:token@…`）时会给出警告，提示信息本身也脱敏
+- **git 不在 PATH 时** —— 设置页「仓库同步」里那一格填 git 的完整路径（整行输入框，旁边有
+  「浏览…」直接调系统的文件选择框；那个入口借的是 Obsidian 自己开文件框时用的能力，
+  移动端上点了没反应，但手输一直可用）
 
 #### 🖼️ 图片同步（Cloudflare R2）
 
@@ -163,8 +229,9 @@ Chinese-first UI with an equal English one.
   **永远同步云端**（不问，直接一起删 —— R2 没有回收站，删掉不可逆）或
   **永不同步云端**（云端永远不动；注意那一份会被下一轮同步**下载回本地**，
   因为镜像是双向补齐的）
-- **受管的文件夹**（默认整个库）—— 这是**唯一的边界**：只有落在范围内的图片会被同步，
-  也只有它们会被删除传播。可以从列表里挑（「浏览…」），手打路径的错法不用自己防
+- **需要图片同步的文件夹**（默认整个库）—— 这是**唯一的边界**：只有落在范围内的图片会被同步，
+  也只有它们会被删除传播。框里输入路径后按回车加入（输入时下面会给候选），也可以从列表里挑
+  （「浏览…」）；已加入的文件夹列在下面，每行右侧的垃圾桶可以移除
 - **图片管理面板**（命令 / 侧栏图标 / 设置页按钮）—— 把三件互相独立的事摊平成一张
   可筛选的表：**本地有哪些图**、**云端有哪些图**、**哪些图被笔记 / 画布引用着**。
   三条轴任意组合筛选（有 / 无），于是「把没传上去的补上」「清理没人引用的图」
@@ -221,8 +288,9 @@ Chinese-first UI with an equal English one.
   **在取哪个文件**（「Trefoil：正在获取 main.js…」）。国内网络下第一次访问 GitHub 的
   release 资产常常要等十几秒，没有这个反馈就分不清是在下载还是卡住了
 - **SyncHub 自身更新** —— 设置页「SyncHub 自身」一节：检查更新、更新（写新版本文件，重启 Obsidian 生效）。
-  **可以指定更新来源**：留空走官方仓库；国内访问 GitHub 慢或被阻断时，填 Gitee 镜像的地址
-  （例如 `https://gitee.com/sofqi/SyncHub`），填一次就一直用它，不再自动探测
+  **默认从 Gitee 镜像更新**（`https://gitee.com/sofqi/SyncHub`，国内可直连，检查与下载都走它）；
+  镜像不可用时**自动改用官方仓库重试，并提示一次**（不会悄悄换来源）；
+  想一直走官方就在那一格填 `https://github.com/Dyse-Sofqi/SyncHub`，填一次就一直用它，不再自动探测
 
 #### 🔐 平台与体验
 
@@ -267,7 +335,8 @@ Chinese-first UI with an equal English one.
   **SyncHub：查看当前文件的差异**（看正在编辑的这一个）
 - 想在浏览器里看某个文件：命令 **SyncHub：在浏览器中打开当前文件**，或右键文件选「**在远端打开**」
 
-自动同步默认关闭。需要的话在设置页设「自动提交并同步 / 自动推送 / 自动拉取」的间隔（分钟）。
+定时同步默认关闭。需要的话在设置页拨开「定时同步」并填周期（分钟）；它每 N 分钟跑一次
+完整链路「提交 → 拉取 → 推送」。
 
 **遇到冲突**：SyncHub 不替你决定保留哪一边 —— 它写一份冲突指南并停下，等你处理。
 
@@ -280,8 +349,13 @@ Chinese-first UI with an equal English one.
   **SyncHub：预览图片同步**（只算不做）
 - 想整理图片：**SyncHub：打开图片管理**（或侧栏的图片图标）—— 筛选、批量同步 / 压缩 /
   重命名 / 删除都在那里
-- 自动同步默认关闭。需要的话设「自动同步间隔（分钟）」
+- 按周期同步默认关闭（「按周期同步」那一行有**独立的开关**；周期 5–1440 分钟，默认 10）。
+  注意它只关掉「按周期跑」—— 只要「自动同步图片」那个开关开着，
+  **每次 Obsidian 启动仍会同步一轮**；要连启动那轮都不跑，就把「自动同步图片」关掉
 - 想让工具条上的「复制云端链接」可用，还要填**公网访问地址**（自定义域名或 `r2.dev` 域名）
+
+设置页「图片同步」那一页把**操作放在最前面**（打开图片管理 + 测试连接 / 预览变更 /
+立即同步）—— 这几个是常用的，而配好之后下面那几节基本不会再翻。
 
 **图片同步与笔记同步互不相干**：前者走 R2、后者走 git，各自有独立的开关与定时器。
 
@@ -291,9 +365,12 @@ Chinese-first UI with an equal English one.
 | --- | --- |
 | 已跟踪插件与主题 | 已安装/添加的插件与主题列表，含更新徽标、检查、更新、版本管理（回退）、冻结、打开仓库、取消绑定（不删文件） |
 | 插件安装器 | 启用开关、更新检查时机、Gitee 镜像发现、**访问令牌**（GitHub / Gitee）、SyncHub 自身更新（含**更新来源**） |
-| 仓库同步 | 同步开关、自动提交/推送/拉取间隔、提交信息模板、整合策略、git 路径、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器）、**连接测试** |
-| 图片同步 | 受管文件夹（含「浏览…」）、R2 连接与密钥、冲突与删除策略、压缩默认值、操作按钮 |
-| 通用 | 界面语言、提示开关、调试日志、**状态栏占满整屏宽** |
+| 仓库同步 | **远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**两项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**） |
+| 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步，排在最前面）、**自动同步图片**（开关）、**按周期同步**（周期 + 开关）、需要图片同步的文件夹（整行的路径框，含「浏览…」/「恢复默认」）、R2 连接与密钥、冲突与删除策略、压缩默认值 |
+| 通用 | 提示开关、调试日志、**状态栏占满整屏宽** |
+
+**界面语言跟随 Obsidian**：插件不提供单独的界面语言设置项 —— 你在 Obsidian 里
+用的语言是什么，插件就是什么（中文 / 英文两套文案对等）。
 
 **令牌只保存在本机**（Obsidian 的密钥存储，老版本回退到 localStorage），
 不会写进 `data.json`，也不会随库同步到其他设备。
@@ -311,7 +388,17 @@ Chinese-first UI with an equal English one.
 - GitHub：[Dyse-Sofqi/SyncHub/releases](https://github.com/Dyse-Sofqi/SyncHub/releases)
 - Gitee 镜像：[sofqi/SyncHub/releases](https://gitee.com/sofqi/SyncHub/releases)（国内直连更快）
 
-**平台要求**：笔记同步依赖系统 git，**仅桌面端可用**；插件安装是纯网络操作，移动端也能用。
+**平台要求**：笔记同步依赖系统 git，**仅桌面端可用**（Windows / macOS / Linux）；插件安装是纯网络操作，
+移动端也能用。
+
+> **需要自己装 git**：SyncHub **不捆绑也不下载** git（它是平台相关的原生程序，而插件发布件只有几百 KB）。
+> - **Windows**：[Git for Windows](https://git-scm.com/download/win)。装完通常就在 PATH 里；便携版环境
+>   （比如自带的 Node 运行时）里常常不在 —— 那时把 `git.exe` 的完整路径填进设置页
+>   「仓库同步 → git 可执行文件路径」（旁边有「浏览…」直接开系统文件框）。
+> - **macOS**：`/usr/bin/git` 是系统自带的壳，首次调用会提示装 Xcode Command Line Tools，跟着点一下即可。
+> - **Linux**：用发行版的包管理器装（`apt install git` / `dnf install git` / `pacman -S git`）。
+>
+> 装没装好，看设置页「仓库同步」最上面那个**连接测试**：它的第一步就是 git 可执行文件，失败会直接说出来。
 
 ### 为什么又做一个
 
@@ -347,6 +434,29 @@ SyncHub 针对这两点做了扩展：
 - 大多数 Gitee 插件仓库**没有发布 release**，所以源码文件通道是必需的
 - Gitee 的 release 资产对象**没有 `id`**（只有 `name` 与 `browser_download_url`），
   所以私有仓库的 API 附件端点只在真的拿到 id 时才用；否则回落到公开下载地址（带同一个令牌）
+
+#### 连不上远端 / 代理
+
+SyncHub 调的是**系统 git**，所以它走的就是你 git 的代理：`git config --global http.proxy`
+和环境变量（`HTTPS_PROXY` / `ALL_PROXY` 等）**都认**。（0.1.8 及更早会丢掉环境变量那一份 ——
+子进程的环境被替换成了只剩两个开关，已修。症状是「终端里能推、插件里连不上」。）
+
+日志里出现
+
+```
+fatal: unable to access 'https://…': getaddrinfo() thread failed to start
+```
+
+意思是 git 的网络传输层**连 DNS 解析线程都没起来**（不是地址错、也不是令牌错）。按常见程度：
+
+1. **代理没被 git 看到** —— 检查上面两处；环境变量那份改完要重启 Obsidian；
+2. **安全软件 / VPN / MITM 代理解析拦了套接字与线程创建**（这是 libcurl 有名的触发场景）；
+3. **系统资源紧张** —— 线程、内存或句柄被占满（重启 Obsidian 立刻能验证）。
+
+**怎么判断是不是环境问题**：在库目录里用系统终端跑一次同样的命令
+（`git push`，或设置页那个**连接测试**）。终端也失败 → 环境/网络问题，与插件无关；
+终端成功而插件失败 → 到 issue 里带上这条日志（插件侧会把这类错误单独归为「连不上远端」，
+并提示去查网络与代理，而不是让你去重装或重配令牌）。
 
 ### 开发
 
@@ -427,17 +537,19 @@ Chinese-first UI with an equal English one.
 
 #### 🔄 Vault sync (desktop only)
 
-Needs the system `git` binary, so it is **desktop-only** (Windows / macOS / Linux).
+Needs the system `git` binary, so it is **desktop-only** (Windows / macOS / Linux) — and git has to
+be **installed by you** (the plugin does not bundle it; see "Platform requirements" at the end for
+per-platform instructions).
 
 - **Sync now** — commit → pull → push in one chain. The repository sync view's **toolbar is a single
   row**: `Commit` / `Pull` / `Push`, the branch dropdown, **`Sync now` pushed to the right**, and
   **`Refresh` at the far right**. **"Commit" writes to the local repository only, and "Push" sends
   committed content only** — it never commits for you, so with uncommitted changes nothing of yours
-  goes up (and it says so, including how many changes are still uncommitted). The "auto commit and
-  sync" timer runs that same full chain
+  goes up (and it says so, including how many changes are still uncommitted). The "scheduled sync"
+  timer runs that same full chain
 - **You never have to type a commit message** — it is generated from the **commit message template**
-  in the settings (default `vault backup: {{date}}`, supporting `{{date}}`, `{{hostname}}`,
-  `{{numFiles}}` and `{{files}}`). No dialog ever asks you for a message
+  in the settings (default `vault backup: {{date}} ({{numFiles}} files)`, supporting `{{date}}`,
+  `{{hostname}}`, `{{numFiles}}` and `{{files}}`). No dialog ever asks you for a message
 - **Repository size and pending changes** — shown **side by side in two columns**: **repository
   size** (the `.git` object store plus object count, via `git count-objects`, local-only) and
   **pending changes** (the summed size of changed files). They answer different questions: "how big
@@ -464,28 +576,104 @@ Needs the system `git` binary, so it is **desktop-only** (Windows / macOS / Linu
   conflicts). An existing `.gitignore` is **never overwritten**, and you can edit it at any time —
   the "Vault sync" settings tab has an **editable multi-line box** for it (with "Fill in defaults"
   and "Open in editor" buttons), and there is also an "Edit .gitignore" command
+- **Keep images out of git** — when image sync (R2) already handles your images, the `.gitignore`
+  section has a **Stop tracking** button that does three things in one go (a modal lays out those
+  steps and the two consequences before anything runs, and lets you pick **what the rules are
+  based on**):
+
+  1. write the rules into `.gitignore` (only the missing ones) — new images stop entering git;
+  2. `git rm -r --cached` the matching tracked files out of git's **index** — **no local file is
+     touched**, but the next commit records a deletion;
+  3. the next sync (commit → pull → push) publishes that change.
+
+  **Two rule shapes, each with its own scope**:
+
+  | Shape | Rules written | When to use it |
+  | --- | --- | --- |
+  | **Folders** | `attachments/`, `assets/img/` | Image sync covers **specific folders**. The scope matches image sync exactly — whatever is in those folders already belongs to it |
+  | **Extensions** | `*.png`, `*.PNG`, `*.jpg` … (the 11 formats the plugin knows) | Image sync covers **the whole vault** (the default). Folder rules would mean git syncs nothing there, while extension rules only let images go and **keep every other file in git** |
+
+  The two must not be mixed: extension rules cover the whole vault, while image sync only mirrors
+  the folders you configured — images outside them would leave git and R2 at the same time (neither
+  system handling them). So the button only offers the shape that is **valid** for your settings
+  (whole vault → extensions by default; specific folders → folders by default).
+
+  **Why rules alone are not enough**: `.gitignore` only affects **untracked** files, so everything
+  already committed keeps riding along with every commit — that is git's semantics, not a setting.
+  The two steps have to happen together; in extension mode the "which images are tracked" list comes
+  from git (`git ls-files`), so only images are removed and not a single note is touched.
+
+  Before doing anything it checks three things and refuses with a reason if one fails: the rule shape
+  matches image sync's scope, image sync is configured, and **every image is already on R2**. The last
+  one matters most: when other devices pull this change git deletes those images from their working
+  tree and image sync restores them from R2 — anything not uploaded is simply gone. Also: **images
+  already written into history stay there** (the old objects remain in `.git`, so the repository does
+  not shrink; that would need rewriting history, which this plugin does not do).
 - **Conflicts** — on conflict SyncHub writes a resolution guide listing the conflicted files and
   **stops the chain** (continuing would commit conflict markers or push them upstream).
   Resolve by hand and sync again, or use "Abort current merge"
-- **Auto sync** (off by default) — separate intervals for auto commit / push / pull in minutes (0 = off).
-  Timing is based on the **last run** and persists per vault, so restarting Obsidian does not reset
-  the cycle and multiple vaults do not interfere. The settings page carries **two notes** under the
-  "Vault sync" heading (reset suspends automatic sync; the risk of editing the same file on several
-  devices) — worth reading before you configure it
+- **Scheduled sync** (off by default) — the settings row is **one interval plus one toggle**: once it
+  is on, the full chain (commit → pull → push) runs every N minutes. The interval has no "0 = off" —
+  the toggle is the only switch. Timing is based on the **last run** and persists per vault, so
+  restarting Obsidian does not reset the cycle and multiple vaults do not interfere. **While it is on,
+  that row shows a countdown to the next sync** (ticking every second; it says "syncing…" while that
+  round runs, and hides itself when the toggle is off or the strategy is reset). A failing background
+  round **only goes to the log** (it does not interrupt you and usually heals next round) — but after
+  **3 failures in a row** it says so once, with the classified reason (e.g. "cannot reach the remote")
+  and a note that it will retry; one success resets the count. The settings page
+  carries **two notes** under the "Vault sync" heading (reset suspends scheduled sync; the risk of
+  editing the same file on several devices) — worth reading before you configure it
 - **Repository sync view** (sidebar) — open it from the **git ribbon icon**, by **clicking the
-  status-bar item**, or via the command **SyncHub: Open repository sync panel**. Its **single-row
-  toolbar** holds `Commit` / `Pull` / `Push`, the branch dropdown, **`Sync now` pushed right** and
-  **`Refresh` at the far right**; below that are the remote URL (redacted) with an edit entry,
-  `ahead / behind`, repository size and pending changes **side by side**, a conflict section
-  (conflicted files + abort merge), the changed files **grouped into staged / changes**
+  status-bar item**, via the command **SyncHub: Open repository sync panel**, or from the **Open
+  repository sync panel** button at the top of the Vault sync settings page (the handiest entry
+  while you are configuring it). Its **single-row
+  toolbar** starts with the **branch dropdown** (it decides which branch the following actions apply
+  to), then `Commit` / `Pull` / `Push`, then **`Refresh`**, with **`Sync now` pushed right** (and the
+  countdown to the next scheduled sync appears on the status-summary row of the Changes tab). Below that is a **tab group**
+  ("Changes (N)" / "Recent commits"), with the conflict section outside the tabs (it is a "deal with
+  this now" state). The Changes tab leads with the **status summary** (`in sync with remote` /
+  ahead-behind), the **repository size / pending changes** columns and the **format filter**, and only
+  then the changed files **grouped into staged / changes**
   (per-file stage / unstage, click a file name to open the note, **view diff**, open the file on the
   remote) and the last 10 commits (click a hash to view that commit on the remote, or the diff icon
   next to it to see what it changed). When the vault is not a git repository it offers an
-  "Initialise repository" button. The panel is **live**: auto commits, outside edits and
-  command-palette actions refresh it
+  "Initialise repository" button. The panel is **live**: scheduled syncs, outside edits and
+  command-palette actions refresh it. **While scheduled sync is on, the Changes tab shows a countdown
+  to the next sync on the status-summary row** (same data as the settings row, ticking every second;
+  it says "syncing…" while a round runs). That row also tells the truth about the working tree:
+  `in sync with the remote` only when nothing is left uncommitted, otherwise it says
+  `in sync with the remote, but uncommitted changes remain`. The first row below the toolbar is the **remote URL — an input you
+  can edit in place** (label and input on one line, the input taking the remaining width; saving
+  happens on blur or Enter, a clearly wrong value is refused and the field reverts, and the value
+  shown stays redacted so a token never appears on screen). Below that sits a **tab group**:
+  **"Changes (N)" and "Recent commits"** each get their own screen, and the Changes screen leads with
+  the **status summary** (`in sync with remote` / ahead-behind) plus the **repository size / pending
+  changes** columns — so an empty list says "nothing to commit" in exactly one place, and a long
+  change list no longer forces scrolling back and forth (switching tabs only toggles visibility — it
+  does not re-run those git calls). Above the list sits a **format filter** (`All / Markdown / .png /
+  …`, with options generated from the formats actually present in this change set, each with a
+  count) — so a glance at `.md` shows just your notes; the filter affects the list only, and the
+  "pending changes" column always reports the total. The **conflict section stays outside the tabs**
+  (it is a "deal with this now" state and must not be hidden).
+- **"Nested repo" rows** (they show up when you develop a plugin or theme in place inside the
+  vault) — those folders carry their own `.git`, so the vault records a **pointer to another
+  repository** (gitlink, index mode `160000`). Such a row looks like a folder path with no
+  file-level diff and **cannot be staged away** (the pointer did not move, so git has nothing to
+  record). The panel marks it with a **nested repo** badge, says why, and offers **Stop tracking**:
+  one click removes it from the index and appends it to `.gitignore` (no local file and no nested
+  `.git` is touched, and that repository's own git keeps working). Without the ignore rule the next
+  `git add -A` would record the pointer again — which is how it got there in the first place.
 - **Diff view** — every file in the panel (conflict rows included) and every commit opens a diff;
   the command palette also has **SyncHub: View diff of the current file** for whatever you are
-  editing. **Working tree** and **staged** changes are shown as separate sections (a file can have
+  editing. It opens as a **tab in the main workspace** (no longer a modal — the modal was too small
+  to read long lines; a tab can be widened and put side by side with a note), with a **view mode
+  switch** on top: **Unified** (one column, additions and deletions on their own lines) or
+  **Side by side** (like VS Code: deletions on the left, additions on the right, paired row by row —
+  when a change deletes two lines and adds three, the extra row has content only on the right, so it
+  is obvious at a glance). The mode is remembered with the tab. The **same tab is
+  reused**, so clicking several diffs does not pile up tabs. File diffs refresh themselves as the
+  vault state changes (a tab stays open, so a snapshot would go stale); commit diffs are a fixed
+  point in history. **Working tree** and **staged** changes are shown as separate sections (a file can have
   both), with old and new line numbers and coloured additions/deletions. Untracked new files are
   shown as "all added", and binary files, pure renames, truncated content and oversized files each
   say what they are — blank space reads as "nothing changed", which is a different conclusion.
@@ -500,8 +688,12 @@ Needs the system `git` binary, so it is **desktop-only** (Windows / macOS / Linu
 - **Open on the remote** — current file and its history, also in the file context menu,
   with per-platform URLs (Gitee included)
 - **Connection test** — a step-by-step chain: git binary → git repo → remote configured →
-  platform recognised → **an actual `ls-remote`**. It states that it only proves read access
+  platform recognised → **an actual `ls-remote`**. It states that it only proves read access.
+  It sits **first** on the Vault sync settings page (it is what you come back to most)
 - **Edit remote** — warns when the URL embeds credentials, and redacts them in messages
+- **When git is not on PATH** — put its full path in the Vault sync settings (a full-width field
+  with a "Browse…" button that opens the system file dialog; that entry point borrows the same
+  capability Obsidian itself uses, so on mobile the button does nothing — typing always works)
 
 #### 🖼️ Image sync (Cloudflare R2)
 
@@ -517,9 +709,10 @@ storage**.
   **always sync the cloud** (delete both without asking; R2 has no trash) or **never sync the cloud**
   (the cloud copy is left alone — but the next round will download it back, since the mirror fills
   both directions)
-- **Managed folders** (the whole vault by default) — the **single boundary**: only images inside it
-  are synced, and only they can be affected by deletions. Pick them from a list ("Browse…") instead
-  of hand-typing paths
+- **Folders to sync** (the whole vault by default) — the **single boundary**: only images inside it
+  are synced, and only they can be affected by deletions. Type a path and press Enter to add it
+  (suggestions appear as you type), or pick one from the vault with "Browse…"; added folders are
+  listed below, each with a trash button to remove it
 - **Image manager** (command / ribbon icon / settings button) — flattens three independent facts into
   one filterable table: **which images are local**, **which are on the cloud**, and **which are
   referenced** by notes or canvases. Filter on any combination of the three, so "upload what is
@@ -643,8 +836,8 @@ First set the remote in the settings page under "Vault sync" (command
 - To view a file in the browser: command **SyncHub: Open current file in browser**, or right-click
   the file and pick **Open on the remote**
 
-Automatic sync is off by default. Turn it on by setting the "auto commit-and-sync / auto push /
-auto pull" intervals (minutes) in the settings.
+Scheduled sync is off by default. Turn it on by flipping the "Scheduled sync" toggle and setting the
+interval (minutes) in the settings; it then runs the full chain (commit → pull → push) every N minutes.
 
 **On conflict**, SyncHub does not decide which side wins — it writes a resolution guide and stops,
 waiting for you.
@@ -658,9 +851,16 @@ settings tab (the secret goes to the system keychain), then:
   **SyncHub: Preview image sync** (computes, never writes)
 - To tidy up: **SyncHub: Open image manager** (or the ribbon icon) — filtering, batch
   sync / compress / rename / delete all live there
-- Automatic sync is off by default; set the "auto sync interval (minutes)" if you want it
+- Periodic sync is off by default (the "Periodic sync" row has its **own toggle**; the interval is
+  5–1440 minutes, default 10). Note that it only switches off the periodic run — as long as the
+  "Automatic image sync" switch is on, **every Obsidian startup still syncs once**; turn that switch
+  off to stop the startup round too
 - To enable "copy cloud link" in the toolbar, also fill in the **public base URL** (a custom domain
   or an `r2.dev` domain)
+
+The "Image sync" settings tab puts the **actions first** (open image manager, plus test connection /
+preview changes / sync now) — those are the everyday entries, while the sections below are configured
+once.
 
 **Image sync and vault sync are independent**: one goes through R2, the other through git, with their
 own switches and timers.
@@ -671,8 +871,8 @@ own switches and timers.
 | --- | --- |
 | Tracked plugins & themes | The list, with update badges, check, update, version manager (rollback), freeze, open repo, unbind |
 | Plugin installer | Enable switch, update-check timing, Gitee mirror discovery, **access tokens**, self-update |
-| Vault sync | Enable switch, auto commit/push/pull intervals, commit message template, strategy, git path, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor), connection test |
-| Image sync | Managed folders (with "Browse…"), R2 connection and secret, conflict and deletion policy, compression defaults, action buttons |
+| Vault sync | **Remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these two come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**) |
+| Image sync | **Actions first** (**Open image manager** plus test connection / preview changes / sync now), **automatic image sync** (toggle), **periodic sync** (interval + toggle), folders to sync (a full-width path box with "Browse…" / "Restore default"), R2 connection and secret, conflict and deletion policy, compression defaults |
 | General | UI language, notices, debug logging, **status bar spans the full width** |
 
 Tokens are stored **locally only** (Obsidian's secret storage, falling back to localStorage for older
@@ -691,7 +891,22 @@ Two release locations (same artifacts — use whichever is reachable):
 - GitHub: [Dyse-Sofqi/SyncHub/releases](https://github.com/Dyse-Sofqi/SyncHub/releases)
 - Gitee mirror: [sofqi/SyncHub/releases](https://gitee.com/sofqi/SyncHub/releases)
 
-Vault sync needs the system `git` binary and is **desktop-only**; plugin installation works on mobile.
+Vault sync needs the system `git` binary and is **desktop-only** (Windows / macOS / Linux); plugin
+installation works on mobile.
+
+> **You have to install git yourself**: SyncHub does **not** bundle or download git (it is a
+> platform-specific native program, while a plugin release is a few hundred KB).
+> - **Windows**: [Git for Windows](https://git-scm.com/download/win). It usually lands on PATH; in
+>   portable setups (such as a bundled Node runtime) it often does not — then put the full path to
+>   `git.exe` into Vault sync → "Git executable path" (the "Browse…" button opens the system file
+>   dialog).
+> - **macOS**: `/usr/bin/git` is a system stub; the first call offers to install the Xcode Command
+>   Line Tools — just accept it.
+> - **Linux**: install it with your package manager (`apt install git`, `dnf install git`,
+>   `pacman -S git`).
+>
+> To check whether it worked, use the **connection test** at the top of the Vault sync settings page:
+> its first step is the git binary, and it says so when that fails.
 
 ### Why another one
 
@@ -729,6 +944,35 @@ A few platform differences that are already handled (do not undo them if you tou
 - Gitee's release asset objects carry **no `id`** (only `name` and `browser_download_url`), so the
   private-repo API attachment endpoint is only used when an id is really present; otherwise it falls
   back to the public download URL (with the same token)
+
+#### Cannot reach the remote / proxy
+
+SyncHub drives the **system git**, so it uses your git's proxy: both `git config --global http.proxy`
+and the environment variables (`HTTPS_PROXY` / `ALL_PROXY` …) are honoured. (0.1.8 and earlier dropped
+the environment-variable half — the child environment was replaced with just two switches; fixed. The
+symptom was "pushes work in my terminal but not in the plugin".)
+
+A log line like
+
+```
+fatal: unable to access 'https://…': getaddrinfo() thread failed to start
+```
+
+means git's network transport could not even start its **DNS resolver thread** (so it is not a bad URL
+and not a bad token). In rough order of likelihood:
+
+1. **git cannot see the proxy** — check the two places above; restart Obsidian after changing the
+   environment variables;
+2. **security software / VPN / MITM proxy interfering with socketpair and thread creation** (a
+   well-known libcurl trigger);
+3. **resource pressure** — threads, memory or handles exhausted (restarting Obsidian is an instant
+   test).
+
+**Telling environment from plugin**: run the same command in the vault with a system terminal
+(`git push`, or the settings page's **connection test**). Fails there too → it is your environment or
+network, not the plugin. Works there but not in the plugin → open an issue with that log line (the
+plugin classifies this class as "cannot reach the remote" and points you at the network and proxy
+instead of telling you to reinstall or re-enter the token).
 
 ### Development
 
