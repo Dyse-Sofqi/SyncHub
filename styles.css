@@ -47,15 +47,25 @@
 
 /* ── 徽标药丸 ──────────────────────────────────────────────────────────────
    状态类信息（可更新 / 已冻结 / 令牌已配置）做成名称后的小药丸，
-   而不是塞进描述文字里 —— 扫列表时眼睛只需看一列。 */
+   而不是塞进描述文字里 —— 扫列表时眼睛只需看一列。
+
+   ⚠ `line-height` 与 `padding` 一起**限死在自己的字号里**（1 + 0.15em×2），
+   合计 ≈ 1.3em < 标题那一行的行高，于是药丸**不会把行盒撑高**。2026-10-06 实测
+   （`.probe/settings-preview`，Obsidian 1.14.4 + 本文件）：原来是
+   `line-height: 1.6` + `padding: 0.05em`，药丸高 20px 而标题那一行只有 17px ——
+   于是徽标一出现，整行从 17px 变 20px、下面的说明文字被挤下去 3px。而这类徽标
+   大多是**异步**填进去的（要起子进程 / 发请求），用户看到的就是「进这一页先闪一下、
+   文字跟着跳一下」。
+
+   `vertical-align: middle` 让它在那一行里垂直居中 —— 与标题对齐，不上下探出。 */
 .obsync-badge {
     display: inline-block;
     margin-left: 0.5em;
-    padding: 0.05em 0.5em;
+    padding: 0.15em 0.5em;
     border-radius: 999px;
     font-size: var(--font-ui-smaller, 0.75em);
     font-weight: 500;
-    line-height: 1.6;
+    line-height: 1;
     vertical-align: middle;
     white-space: nowrap;
 }
@@ -136,6 +146,15 @@
     color: var(--text-warning, #b98a00);
     margin: 0.5em 0;
     white-space: pre-wrap;
+}
+
+/* 弹窗里的「顺便说一句」——比状态行再弱一档。
+   目前只有一处用：「添加主题」弹窗底部那句「装好后到 外观 → 主题 里选它」
+   （SyncHub 不替用户切主题，这句话必须说，但它不是警告、也不该抢按钮的注意力）。 */
+.obsync-modal-hint {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.85em);
+    margin: 0.5em 0 0;
 }
 
 /* 绑定弹窗里「来源未识别」的只读行 */
@@ -263,6 +282,125 @@
 .obsync-actions .setting-item-control button {
     padding-left: var(--size-4-2, 8px);
     padding-right: var(--size-4-2, 8px);
+}
+
+/* ── 同步进行中的特效（2026-10-05） ────────────────────────────────────────
+   用户的原话：「点击立即同步时，只有左下角状态栏中才显示正在提交，不够显眼，
+   状态栏提交时的提示文字优化一下，侧边栏同步时也要添加同步特效，不然用户
+   不知道是否正在同步」。
+
+   于是一次动作在面板上留三处痕迹：
+
+   1. 工具条**正下方**那条横幅（`.obsync-sync-banner`：转圈 + 标题 + 阶段 + 进度条）；
+   2.「立即同步」按钮呼吸一下（`.obsync-syncing` 作用域内）—— 视线本来就落在
+      刚点的那个按钮上，那一下呼吸就是把「你的点击生效了」说出来；
+   3. 四个动作按钮被禁用（在 TS 里做，见 `applyActivity`）—— 再点一次只是
+      往队列里多排一个任务，用户却会以为「点了没反应」。
+
+   动效只是**加强**，不是唯一的信息载体：标题与阶段胶囊本身就说清了在做什么。
+   所以 `prefers-reduced-motion` 下把动画全关掉也不会丢信息（见文件末尾）。 */
+
+.obsync-sync-banner {
+    margin: 0 0 var(--size-4-2, 8px);
+    padding: var(--size-4-2, 8px) var(--size-4-2, 8px) 0;
+    border-radius: var(--radius-s, 4px);
+    background: var(--background-secondary);
+    /* 左侧一条强调色：扫一眼就知道这块是「正在发生的事」 */
+    border-left: 3px solid var(--text-accent, #7f6df2);
+}
+
+/* 没有动作时这条横幅是**空的** —— 整块收起来，不占高度也不占视线。
+   与 `.obsync-countdown:empty` 同一个做法（那边也是「没有就不占地方」）。 */
+.obsync-sync-banner:empty {
+    display: none;
+}
+
+.obsync-sync-banner-head {
+    display: flex;
+    align-items: center;
+    font-weight: 600;
+}
+
+/* 圆环自身的间距由 `.obsync-spinner` 给（margin-right），这里只管别被压扁 */
+.obsync-sync-banner-head .obsync-spinner {
+    flex: 0 0 auto;
+}
+
+.obsync-sync-banner-title {
+    /* 窄侧边栏里长标题要能换行，而不是溢出把圆环挤走 */
+    min-width: 0;
+}
+
+/* 阶段：提交 → 拉取 → 推送。箭头用伪元素挂在后一个上面（纯装饰，
+   不进 DOM、不进 i18n —— 界面文字一律走 locale）。 */
+.obsync-sync-steps {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: var(--size-4-1, 4px);
+    font-size: var(--font-ui-smaller, 0.85em);
+    color: var(--text-faint);
+}
+
+.obsync-sync-step + .obsync-sync-step::before {
+    content: "→";
+    margin: 0 0.35em;
+}
+
+/* 当前那一步：强调色 + 加粗 + 呼吸。未到的步骤保持弱色 ——
+   「走到哪了」是这个横幅要回答的全部问题。 */
+.obsync-syncing .obsync-sync-step.is-active {
+    color: var(--text-accent, #7f6df2);
+    font-weight: 600;
+    animation: obsync-breathe 1.4s ease-in-out infinite;
+}
+
+/* 不确定进度条。
+   **不画百分比**是刻意的：git 不会报「推到第几个对象」，编一个 0%~100%
+   就是骗人。这条只表达「在动」，真实进度由上面那三个阶段回答。 */
+.obsync-sync-progress {
+    height: 3px;
+    margin-top: var(--size-4-2, 8px);
+    border-radius: 999px;
+    background-color: var(--background-modifier-border);
+    background-image: linear-gradient(
+        90deg,
+        transparent,
+        var(--text-accent, #7f6df2),
+        transparent
+    );
+    background-repeat: no-repeat;
+    background-size: 45% 100%;
+    animation: obsync-progress-slide 1.2s ease-in-out infinite;
+}
+
+.obsync-sync-banner-hint {
+    margin-top: var(--size-4-1, 4px);
+    font-size: var(--font-ui-smaller, 0.85em);
+    color: var(--text-muted);
+}
+
+.obsync-syncing .obsync-action-sync {
+    animation: obsync-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes obsync-progress-slide {
+    from {
+        background-position: -45% 0;
+    }
+    to {
+        background-position: 145% 0;
+    }
+}
+
+@keyframes obsync-breathe {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.55;
+    }
 }
 
 /* 仓库大小 / 待提交改动：**并排两栏**。
@@ -833,22 +971,46 @@
     display: block;
 }
 
-/* ── 设置页：区块头部栏（标题 + 说明 + 主操作同一行） ────────────────────── */
-.obsync-settings .obsync-section-header {
+/* ── 设置页：「插件与主题」页的主操作按钮行（2026-10-05） ────────────────────
+   用户要求：「把这排按钮的卡片去掉，只留按钮展示」。
+
+   这一行原来是一个「区块头部栏」卡片（左边标题「已跟踪的插件与主题」
+   + 说明，右边四个按钮；类名已随那次改动删掉 —— 这个检查认的是**注释里也有的**
+   点号类名，所以这里不再写出全名）。页签名已经叫「插件与主题」，标题与说明都是
+   重复信息 —— 所以连同卡片一起去掉了，现在只有按钮。
+
+   四条重置缺一不可：Obsidian 1.13 起 `.setting-item` 自己就是一张卡片
+   （`--setting-items-background` 的圆角块 + 内边距 + 阴影），不逐条归零就还是
+   一张卡。 */
+.obsync-settings .obsync-tracked-actions {
+    background: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0;
+    margin-bottom: var(--size-4-2, 8px);
+}
+
+/* 没有标题了，`.setting-item-info` 是空的 —— 让它 `flex: 1` 会把按钮推到最右，
+   于是这一行变成「右边孤零零几个按钮」。收起来，按钮从页面左边开始排。 */
+.obsync-settings .obsync-tracked-actions .setting-item-info {
+    display: none;
+}
+
+.obsync-settings .obsync-tracked-actions .setting-item-control {
+    flex: 1;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: var(--size-4-2, 8px);
+}
+
+/* 按钮里「图标 + 文字」之间的间距。Obsidian 的按钮样式只给文字留了内边距，
+   图标是后来插进去的（见 `settingsTab.addButtonIcon`），两者之间没有现成的空隙；
+   图标本身的尺寸与颜色来自 `.svg-icon`（`currentColor`，所以跟着按钮文字走）。 */
+.obsync-settings .obsync-button-icon {
+    display: inline-flex;
     align-items: center;
-    border-top: none;
-    border-bottom: 1px solid var(--background-modifier-border);
-    padding-bottom: 1em;
-    margin-bottom: 0.5em;
-}
-
-.obsync-settings .obsync-section-header .setting-item-info {
-    margin-right: 1em;
-}
-
-.obsync-settings .obsync-section-header .setting-item-control {
-    flex-shrink: 0;
-    gap: 0.5em;
+    margin-inline-end: 0.35em;
 }
 
 /* ── 设置页：`.gitignore` 代码框 ───────────────────────────────────────────
@@ -866,11 +1028,13 @@
    而这不是要读的段落，是要核对的清单。 */
 
 .obsync-settings .obsync-gitignore {
-    /* 宽度与 `box-sizing` **不在这里** —— 由 `settingsTab.renderGitignore` 内联给。
-       这一格已经因为「宽度只写在样式表里」回归过两次（09-24、09-25 各一次）：
-       插件样式表**不保证**在重载时被重新读入，而 Hot Reload 的重载是 disable +
-       enable，不保证重新注入那一份 CSS。这里只管外观 —— 颜色 / 字体 / 内边距
-       丢了顶多难看，宽度丢了就是坏的。 */
+    /* 宽度与 `box-sizing` 就在这里（类里），**不内联**。
+       这一格曾经为了「活过样式表缓存」把宽度内联成 `el.style.width = FULL_WIDTH`
+       （一个常量）—— 那正是审核规则 `obsidianmd/no-static-styles-assignment` 拦的事：
+       静态宽度本来就该待在类里（规则只拦字面量，用 `const` 能绕过，但绕的是形式）。
+       开发时「改了 CSS 不生效」用**完整重载 Obsidian** 解决。 */
+    width: 100%;
+    box-sizing: border-box;
     min-height: 12em;
     margin: 0.5em 0 0.75em;
     padding: 0.5em 0.6em;
@@ -1360,6 +1524,32 @@ body.obsync-status-bar-full-width .status-bar:has(.obsync-status-bar-item) {
 
 .obsync-status-bar-clickable:hover {
     color: var(--text-accent);
+}
+
+/* 忙碌时的条目（2026-10-05）。
+   用户的原话：「点击立即同步时，只有左下角状态栏中才显示正在提交，不够显眼」。
+   这一格只有文字，与旁边那些常驻条目视觉分量完全一样 —— 于是加两样东西：
+   文字改强调色，前面接一个**转动的圆环**。
+
+   圆环走 `::before`（纯 CSS）：条目的 DOM 结构一动不动是这块的硬约束 ——
+   上一版用 `prepend` 挪 DOM，把别的插件的条目整排挤走了（见上面那组用例）。
+   类由 `StatusBar.render()` 跟着活动态挂上/摘掉。 */
+.obsync-status-bar-busy {
+    color: var(--text-accent, #7f6df2);
+}
+
+.obsync-status-bar-busy::before {
+    content: "";
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    margin-right: 0.4em;
+    vertical-align: -0.05em;
+    border: 2px solid var(--background-modifier-border);
+    border-top-color: var(--text-accent, #7f6df2);
+    border-radius: 50%;
+    /* 与安装/同步进度条共用同一个旋转关键帧（文件开头那条） */
+    animation: obsync-spin 0.8s linear infinite;
 }
 
 /* ── 疑似镜像的确认弹窗 ─────────────────────────────────────────────────── */
@@ -2062,4 +2252,49 @@ body.obsync-status-bar-full-width .status-bar:has(.obsync-status-bar-item) {
 .obsync-image-preview-size {
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
+}
+
+/* ── 功能区（左侧 ribbon）底部的头像 ──────────────────────────────────────
+   设置页「通用」里那个开关打开时，`RibbonAvatar` 会把一张 `<img>` 追加进
+   `.side-dock-settings`（功能区最底部那一组，见 `ribbonAvatar.ts` 的说明）。
+
+   圆形的做法就是 `border-radius: 50%` + `object-fit: cover`：Gitee 的头像是
+   正方形 PNG，`cover` 让任何比例都不被拉扁。
+
+   `margin: 0 auto` 与同一组里那些图标按钮（`app.css` 给
+   `.side-dock-settings .side-dock-ribbon-action` 的 `margin: 0 auto`）对齐 ——
+   靠 `align-items` 是居不了的：那一组的 flex 方向是 `column`，
+   `stretch` 会让这张图横向铺满（而它有固定宽度，于是变成贴左）。
+
+   尺寸取 28px：功能区宽 44px（`--ribbon-width`），左右各 4px 内边距，
+   所以可用宽度 36px；28px 比那一排图标按钮（约 30px）略小一点，
+   不会显得比功能图标还重。 */
+.obsync-ribbon-avatar {
+    display: block;
+    width: 28px;
+    height: 28px;
+    margin: 4px auto 0;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid var(--background-modifier-border);
+}
+
+/* ── 减少动效 ──────────────────────────────────────────────────────────────
+   系统开了「减少动态效果」时，把本插件自己加的动画全部关掉。
+
+   范围收在 `.obsync-*` 里：Obsidian 核心与主题的动效归它们自己管，我们不越界。
+
+   关掉这些**不丢任何信息**，这是当初设计的前提：状态栏那条的圆环没了，但
+   文字仍在（「正在同步：提交中…」）；面板横幅的呼吸与流动条没了，但标题、
+   阶段胶囊、以及「哪一个阶段是亮的」都还在 —— 动效只负责让它更抓眼，
+   不负责承载「在做什么、到哪一步」这两件事。 */
+@media (prefers-reduced-motion: reduce) {
+    .obsync-spinner,
+    .obsync-status-bar-busy::before,
+    .obsync-sync-progress,
+    .obsync-syncing .obsync-sync-step.is-active,
+    .obsync-syncing .obsync-action-sync,
+    .obsync-settings .clickable-icon.obsync-spinning svg {
+        animation: none;
+    }
 }

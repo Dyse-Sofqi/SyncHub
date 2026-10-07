@@ -224,9 +224,13 @@ function makeService(git: FakeGit, fake: FakeApp) {
     // 替身也要截住它，否则「说了什么」断言不到。
     notifier.synced = (message: string) => notices.push(message);
 
-    // 状态栏元素直接给个假 DOM 节点 —— StatusBar 只调 setText 与 addClass
-    // （后者用于把条目贴到状态栏最左，见 statusBar.ts）。
-    const fakeItem = { setText: () => {}, addClass: () => {} } as unknown as HTMLElement;
+    // 状态栏元素直接给个假 DOM 节点 —— StatusBar 只调 setText 与 addClass / removeClass
+    // （后者用于把条目贴到状态栏最左，以及忙碌时挂上/摘掉那个转圈的类，见 statusBar.ts）。
+    const fakeItem = {
+        setText: () => {},
+        addClass: () => {},
+        removeClass: () => {},
+    } as unknown as HTMLElement;
 
     const settings = normalizeSettings({});
     settings.sync.commitMessage = "backup {{numFiles}}";
@@ -862,6 +866,83 @@ describe("状态栏活动态：动作结束后必须恢复", () => {
         await expect(service.push()).rejects.toBeInstanceOf(PushRejectedError);
 
         expect(activities[activities.length - 1]).toBe("idle");
+    });
+});
+
+/**
+ * 侧边栏那条「正在同步」横幅的数据来源（2026-10-05）。
+ *
+ * 用户的原话：「侧边栏同步时也要添加同步特效，不然用户不知道是否正在同步」。
+ * 面板靠 `onActivityChange` 画横幅，而它必须拿到两件事实：
+ *
+ * 1. **动作一开始**就知道（不能等仓库状态刷新 —— 那要等动作收尾，中途什么都没有）；
+ * 2. 知道这是不是「立即同步」那条链路的哪一步（`chain`）—— 否则横幅只能画一个
+ *    含糊的「正在提交…」，说不清后面还有拉取与推送。
+ *
+ * 为什么这两条只能在这一层测：面板拿到的就是这份推送，`sourceControlView.test.ts`
+ * 里的替身服务照这份契约实现；真正决定契约的是这里。
+ */
+describe("动作订阅：面板的「正在同步」横幅靠它", () => {
+    it("动作一开始就推，结束时推 idle", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+        git.unstaged = ["a.md"];
+
+        const seen: Array<{ kind: string; chain: boolean }> = [];
+        service.onActivityChange((activity) => seen.push({ ...activity }));
+
+        await service.commitAll();
+
+        expect(seen[0]).toEqual({ kind: "committing", chain: false });
+        expect(seen[seen.length - 1]).toEqual({ kind: "idle", chain: false });
+    });
+
+    it("「立即同步」链路的三个阶段都带 chain 标记，单独的提交则不带", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+        git.unstaged = ["a.md"];
+
+        const seen: Array<{ kind: string; chain: boolean }> = [];
+        service.onActivityChange((activity) => seen.push({ ...activity }));
+
+        await service.sync();
+
+        // 提交 → 拉取 → 推送：三步都属于同一条链路（面板据此画出那排阶段）
+        expect(seen.filter((entry) => entry.kind !== "idle").map((entry) => entry.kind)).toEqual([
+            "committing",
+            "pulling",
+            "pushing",
+        ]);
+        expect(seen.filter((entry) => entry.kind !== "idle").every((entry) => entry.chain)).toBe(
+            true
+        );
+        // 结束那一条不带链路标记：下一次单独动作不该继承它
+        expect(seen[seen.length - 1]).toEqual({ kind: "idle", chain: false });
+    });
+
+    it("面板打开时能立刻读到当前动作（同步可能是面板关着时开始的）", () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        expect(service.currentActivity).toEqual({ kind: "idle", chain: false });
+    });
+
+    it("退订之后不再收到（面板关掉不该继续被推）", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+        git.unstaged = ["a.md"];
+
+        let count = 0;
+        const unsubscribe = service.onActivityChange(() => (count += 1));
+        unsubscribe();
+
+        await service.commitAll();
+
+        expect(count).toBe(0);
     });
 });
 

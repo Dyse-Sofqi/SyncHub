@@ -3,7 +3,7 @@ import { CommunityPluginIndex } from "./communityPlugins";
 import { CommunityThemeIndex } from "./communityThemes";
 import { describeInstallerError } from "./errors";
 import { InstallerService, type InstallerHost } from "./installerService";
-import type { InstallResult } from "./types";
+import type { InstallResult, ThemeInstallResult } from "./types";
 import { AddRepoModal } from "./ui/AddRepoModal";
 import { BindExistingModal } from "./ui/BindExistingModal";
 import { UpdateChecker } from "./updateChecker";
@@ -30,7 +30,15 @@ export interface InstallerModule {
      * Obsidian 重新渲染底下的设置页，而「已跟踪」列表是渲染时读 settings 的 ——
      * 不重绘就看不见刚装的条目，得等下一次「检查全部更新」顺带那次重绘。
      */
-    openAddRepoModal(onInstalled?: (result: InstallResult) => void): void;
+    openAddRepoModal(onInstalled?: (result: InstallResult | ThemeInstallResult) => void): void;
+    /**
+     * 打开「添加主题仓库」弹窗（同一个弹窗，主题模式）。
+     *
+     * 2026-10-05 用户报的问题催生了这个入口：把主题仓库地址填进「添加插件仓库」
+     * 只会拿到「缺少必需文件：main.js」。两条路的分叉点与共用理由写在
+     * `AddRepoModal` 的文件头。
+     */
+    openAddThemeModal(onInstalled?: (result: InstallResult | ThemeInstallResult) => void): void;
     /** 打开「绑定已安装的插件与主题」弹窗。 */
     openBindExistingModal(onBound?: (count: number) => void): void;
     /** 启动后的自动更新检查（受设置控制）。 */
@@ -55,7 +63,13 @@ export function createInstallerModule(host: InstallerHost, app: App): InstallerM
         communityThemeIndex,
 
         openAddRepoModal(onInstalled): void {
-            new AddRepoModal(app, service, communityIndex, host.getT(), onInstalled).open();
+            new AddRepoModal(app, service, communityIndex, host.getT(), "plugin", onInstalled).open();
+        },
+
+        openAddThemeModal(onInstalled): void {
+            // 主题模式下「浏览社区插件」不画（见 `AddRepoModal.render`），
+            // 所以这里不需要传主题索引。
+            new AddRepoModal(app, service, communityIndex, host.getT(), "theme", onInstalled).open();
         },
 
         openBindExistingModal(onBound?: (count: number) => void): void {
@@ -71,7 +85,10 @@ export function createInstallerModule(host: InstallerHost, app: App): InstallerM
 
         scheduleStartupCheck(): void {
             const settings = host.getSettings().installer;
-            if (!settings.enabled || !settings.autoCheckOnStartup) return;
+            // 这里曾经还有一道 `settings.enabled`（「启用插件安装器」总开关），
+            // 2026-10-06 删掉了：它只挡这一处与设置页那一处，等价于「把两个自动
+            // 检查开关都关掉」，是同一个 off 的第二种说法（见 `migrateV9ToV10`）。
+            if (!settings.autoCheckOnStartup) return;
 
             const delayMs = settings.autoCheckDelaySeconds * 1000;
             window.setTimeout(() => {

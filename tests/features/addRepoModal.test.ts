@@ -5,8 +5,13 @@ import { AddRepoModal } from "../../src/features/installer/ui/AddRepoModal";
 import { zhCN } from "../../src/core/i18n/locales/zh-cn";
 import { Notifier } from "../../src/core/notice";
 import type { CommunityPluginIndex } from "../../src/features/installer/communityPlugins";
+import { InstallerError } from "../../src/features/installer/errors";
 import type { InstallerService } from "../../src/features/installer/installerService";
-import type { InstallResult } from "../../src/features/installer/types";
+import type {
+    InstallResult,
+    ThemeInstallResult,
+    TrackedKind,
+} from "../../src/features/installer/types";
 
 /**
  * 「添加插件仓库」弹窗的交互契约。
@@ -22,8 +27,14 @@ import type { InstallResult } from "../../src/features/installer/types";
 
 /** 记录被识别过的地址，用于断言按钮点击真的把输入交了出去。 */
 let resolvedInputs: string[] = [];
+/** 记录识别过的**主题**地址（主题那半边走的是另一个服务方法）。 */
+let resolvedThemeInputs: string[] = [];
 /** 记录安装请求，用于断言「用的是源仓库还是镜像」。 */
 let installRequests: Array<{ repo: string; origin?: { host: string } }> = [];
+/** 记录主题安装请求。 */
+let themeInstallRequests: Array<{ repo: string }> = [];
+/** `looksLikeKind` 的答案 —— 由各用例设定（默认「不是另一类对象」）。 */
+let looksLikeAnswer = false;
 
 function makeService(): InstallerService {
     const notifier = new Notifier({ getShowNotices: () => false, getT: () => zhCN });
@@ -40,6 +51,15 @@ function makeService(): InstallerService {
         enabled: true,
         repoRef: { host: "gitee", owner: "sofqi", repo: "Trefoil" },
     };
+    const themeResult: ThemeInstallResult = {
+        manifest: { name: "Minimal", version: "9.1.0" },
+        channel: "raw",
+        version: "9.1.0",
+        id: "Minimal",
+        replaced: false,
+        wasActive: false,
+        repoRef: { host: "github", owner: "kepano", repo: "obsidian-minimal" },
+    };
     return {
         resolveRepo: async (input: string) => {
             resolvedInputs.push(input);
@@ -49,11 +69,23 @@ function makeService(): InstallerService {
                 mirror: { host: "gitee", owner: "sofqi", repo: "Trefoil" },
             };
         },
+        resolveThemeRepo: async (input: string) => {
+            resolvedThemeInputs.push(input);
+            return {
+                ref: { host: "github", owner: "kepano", repo: "obsidian-minimal" },
+                manifest: { name: "Minimal", version: "9.1.0" },
+            };
+        },
         listVersions: async () => [{ value: "latest", label: zhCN.installer.versionLatest, prerelease: false }],
         install: async (request: { repo: string; origin?: { host: string } }) => {
             installRequests.push(request);
             return result;
         },
+        installTheme: async (request: { repo: string }) => {
+            themeInstallRequests.push(request);
+            return themeResult;
+        },
+        looksLikeKind: async () => looksLikeAnswer,
         deps: { notifier },
     } as unknown as InstallerService;
 }
@@ -67,14 +99,16 @@ function currentModal(): AddRepoModal {
 }
 
 function openModal(
-    onInstalled?: (result: InstallResult) => void,
-    service: InstallerService = makeService()
+    onInstalled?: (result: InstallResult | ThemeInstallResult) => void,
+    service: InstallerService = makeService(),
+    kind: TrackedKind = "plugin"
 ): AddRepoModal {
     const modal = new AddRepoModal(
         {} as App,
         service,
         {} as CommunityPluginIndex,
         zhCN,
+        kind,
         onInstalled
     );
     openedModal = modal;
@@ -188,15 +222,17 @@ describe("AddRepoModal 的安装回调", () => {
     }
 
     it("安装成功后把结果交给回调", async () => {
-        const results: InstallResult[] = [];
+        const results: Array<InstallResult | ThemeInstallResult> = [];
         openModal((result) => results.push(result));
 
         await resolveRepo();
         installButton().click();
 
         await vi.waitFor(() => expect(results).toHaveLength(1));
-        expect(results[0]!.manifest.name).toBe("Trefoil");
-        expect(results[0]!.version).toBe("1.2.0");
+        // 插件模式回传的一定是插件结果 —— 这里窄化一次，顺带钉住回调的载荷类型。
+        const result = results[0] as InstallResult;
+        expect(result.manifest.name).toBe("Trefoil");
+        expect(result.version).toBe("1.2.0");
     });
 
     it("提示里报出实际来源（用户看不出「没走镜像」与「没探测」的区别）", async () => {
@@ -219,7 +255,7 @@ describe("AddRepoModal 的安装回调", () => {
         (service as unknown as { install: () => Promise<never> }).install = async () => {
             throw new Error("boom");
         };
-        const results: InstallResult[] = [];
+        const results: Array<InstallResult | ThemeInstallResult> = [];
         openModal((result) => results.push(result), service);
 
         await resolveRepo();
@@ -329,5 +365,207 @@ describe("AddRepoModal 的镜像开关", () => {
 
         resolveButton().click();
         await vi.waitFor(() => expect(mirrorToggle().value).toBe(false));
+    });
+});
+
+/** 当前渲染出来的、按钮文字为 `text` 的那个按钮（render 会重建内容区，取最后一条匹配）。 */
+function buttonByText(text: string): ButtonComponent {
+    const row = [...createdSettings]
+        .reverse()
+        .find((setting) => setting.buttons.some((button) => button.text === text));
+    if (!row) throw new Error(`当前内容区里找不到「${text}」按钮`);
+    return row.buttons.find((button) => button.text === text)!;
+}
+
+/**
+ * 从第 `from` 个 Setting 起，内容区里还有没有这个按钮。
+ *
+ * `from` 不能省：`createdSettings` 是**累计**的（每次 render 都往里加），
+ * 不切片的话「当前渲染里已经撤掉它」会被之前那些渲染留下的同名按钮误判成「还在」。
+ */
+function hasButton(text: string, from = 0): boolean {
+    return createdSettings
+        .slice(from)
+        .some((setting) => setting.buttons.some((button) => button.text === text));
+}
+
+/** 弹窗标题的当前文字（`titleEl` 是 Obsidian 的元素类型，`text` 是替身记下来的）。 */
+function modalTitle(): string {
+    return (currentModal().titleEl as unknown as { text: string }).text;
+}
+
+/** 弹窗内容区里所有文本，拼成一段（断言「界面上说了什么」）。 */
+function contentTexts(): string {
+    const walk = (node: unknown): string[] => {
+        const el = node as { text?: string; children?: unknown[] };
+        return [...(el.text ? [el.text] : []), ...(el.children ?? []).flatMap(walk)];
+    };
+    return ((currentModal().contentEl.children as unknown) as unknown[])
+        .flatMap(walk)
+        .join("\n");
+}
+
+function resetModalState(): void {
+    resetCreatedSettings();
+    resolvedInputs = [];
+    resolvedThemeInputs = [];
+    installRequests = [];
+    themeInstallRequests = [];
+    looksLikeAnswer = false;
+}
+
+/**
+ * 主题模式（`kind: "theme"`）——「添加主题」那个入口。
+ *
+ * 2026-10-05 用户报的问题：把**主题**仓库地址填进「添加插件仓库」，只会拿到
+ * 「缺少必需文件：main.js」。根因不是文案，而是主题**根本没有新装入口**
+ * （在此之前只有「绑定库里已装的」与「更新已跟踪的」）。
+ */
+describe("AddRepoModal · 主题模式", () => {
+    beforeEach(resetModalState);
+
+    it("标题说的是主题，并且不画「浏览社区插件」（那个走的是官方插件索引）", () => {
+        openModal(undefined, makeService(), "theme");
+
+        expect(modalTitle()).toBe(zhCN.installer.themeModalTitle);
+        expect(hasButton(zhCN.installer.browse)).toBe(false);
+    });
+
+    it("识别走主题那一套：显示主题名与版本，且**没有版本选择**（主题没有版本钉选）", async () => {
+        openModal(undefined, makeService(), "theme");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.themeInstall)).toBeDefined());
+
+        expect(resolvedThemeInputs).toEqual(["kepano/obsidian-minimal"]);
+        const texts = contentTexts();
+        expect(texts).toContain(zhCN.installer.resolved("GitHub", "kepano/obsidian-minimal"));
+        expect(texts).toContain(zhCN.installer.themeResolved("Minimal", "9.1.0"));
+        expect(texts).not.toContain(zhCN.installer.versionLabel);
+        // 「装好后去哪儿选它」必须在**点安装之前**就说出来（我们不替用户切主题）
+        expect(texts).toContain(zhCN.installer.themeAfterInstallHint);
+    });
+
+    it("点「安装主题」走 installTheme，成功提示里带上「去哪儿选它」", async () => {
+        const notices: string[] = [];
+        const service = makeService();
+        (
+            service as unknown as { deps: { notifier: { success(message: string): void } } }
+        ).deps.notifier.success = (message: string) => notices.push(message);
+        openModal(undefined, service, "theme");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.themeInstall)).toBeDefined());
+
+        buttonByText(zhCN.installer.themeInstall).click();
+
+        await vi.waitFor(() => expect(notices).toHaveLength(1));
+        expect(themeInstallRequests[0]!.repo).toBe("kepano/obsidian-minimal");
+        expect(notices[0]).toContain(
+            zhCN.installer.themeInstalled("Minimal", "9.1.0", zhCN.host.github)
+        );
+        expect(notices[0]).toContain(zhCN.installer.themeAfterInstallHint);
+    });
+});
+
+/**
+ * 填错入口时的下一步。
+ *
+ * 这是用户那条反馈的**正面回答**：不要只说「缺少必需文件：main.js」，要说清
+ * 「这个仓库里其实是什么」，并给一个能走下去的按钮。
+ */
+describe("AddRepoModal · 填错了入口", () => {
+    beforeEach(resetModalState);
+
+    /** 让安装失败于「这个仓库里没有这类对象的标志性文件」。 */
+    function failAsWrongKind(service: InstallerService, of: "plugin" | "theme"): void {
+        const files = of === "plugin" ? "main.js" : "theme.css";
+        const failed = async () => {
+            throw new InstallerError({
+                kind: "missingRequiredFiles",
+                repo: "kepano/obsidian-minimal",
+                files,
+                of,
+            });
+        };
+        (service as unknown as { install: () => Promise<never> }).install = failed;
+        (service as unknown as { installTheme: () => Promise<never> }).installTheme = failed;
+    }
+
+    it("插件模式下装到主题仓库：报错之后给出「改为按主题安装」，并且**撤掉**原来的安装按钮", async () => {
+        const service = makeService();
+        looksLikeAnswer = true;
+        failAsWrongKind(service, "plugin");
+        openModal(undefined, service, "plugin");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.install)).toBeDefined());
+
+        const beforeFailure = createdSettings.length;
+        buttonByText(zhCN.installer.install).click();
+
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.switchToTheme)).toBeDefined());
+        expect(contentTexts()).toContain(zhCN.installer.looksLikeTheme);
+        // 再点一次「安装」还是同样的失败，所以那个按钮让位给这一个
+        expect(hasButton(zhCN.installer.install, beforeFailure)).toBe(false);
+    });
+
+    it("点「改为按主题安装」会切到主题模式并**重新识别**（识别结论不能搬过来用）", async () => {
+        const service = makeService();
+        looksLikeAnswer = true;
+        failAsWrongKind(service, "plugin");
+        openModal(undefined, service, "plugin");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.install)).toBeDefined());
+        buttonByText(zhCN.installer.install).click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.switchToTheme)).toBeDefined());
+
+        buttonByText(zhCN.installer.switchToTheme).click();
+
+        await vi.waitFor(() => expect(resolvedThemeInputs).toEqual(["kepano/obsidian-minimal"]));
+        // 标题跟着换 —— 用户得看出自己现在在哪一类的弹窗里
+        expect(modalTitle()).toBe(zhCN.installer.themeModalTitle);
+        expect(buttonByText(zhCN.installer.themeInstall)).toBeDefined();
+    });
+
+    it("主题模式下填的是插件仓库 → 「改为按插件安装」（反方向同样管）", async () => {
+        const service = makeService();
+        looksLikeAnswer = true;
+        failAsWrongKind(service, "theme");
+        openModal(undefined, service, "theme");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.themeInstall)).toBeDefined());
+
+        buttonByText(zhCN.installer.themeInstall).click();
+
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.switchToPlugin)).toBeDefined());
+        expect(contentTexts()).toContain(zhCN.installer.looksLikePlugin);
+    });
+
+    it("网络类失败**不**给这个建议（换了入口照样装不上，那是把人指错路）", async () => {
+        const service = makeService();
+        looksLikeAnswer = true;
+        (service as unknown as { install: () => Promise<never> }).install = async () => {
+            throw new InstallerError({
+                kind: "assetDownloadFailed",
+                repo: "kepano/obsidian-minimal",
+                files: "main.js",
+                of: "plugin",
+            });
+        };
+        openModal(undefined, service, "plugin");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.install)).toBeDefined());
+
+        const beforeFailure = createdSettings.length;
+        buttonByText(zhCN.installer.install).click();
+
+        // 回到可重试的状态，且不出现换入口的按钮
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.install).disabled).toBe(false));
+        expect(hasButton(zhCN.installer.switchToTheme, beforeFailure)).toBe(false);
     });
 });

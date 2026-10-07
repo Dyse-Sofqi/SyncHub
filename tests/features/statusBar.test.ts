@@ -23,10 +23,12 @@ function createItem(): {
     item: HTMLElement;
     texts: string[];
     classes: string[];
+    removed: string[];
     last: () => string | undefined;
 } {
     const texts: string[] = [];
     const classes: string[] = [];
+    const removed: string[] = [];
     const item = {
         setText(value: string) {
             texts.push(value);
@@ -35,8 +37,12 @@ function createItem(): {
         addClass(value: string) {
             classes.push(value);
         },
+        /** 忙碌态结束后要摘掉那个类 —— 留着的话那一格会一直转。 */
+        removeClass(value: string) {
+            removed.push(value);
+        },
     } as unknown as HTMLElement;
-    return { item, texts, classes, last: () => texts[texts.length - 1] };
+    return { item, texts, classes, removed, last: () => texts[texts.length - 1] };
 }
 
 function makeStatus(overrides: Partial<RepoStatus> = {}): RepoStatus {
@@ -220,12 +226,69 @@ describe("StatusBar 渲染", () => {
                 throw new Error("DOM is gone");
             },
             addClass: () => {},
+            removeClass: () => {},
         } as unknown as HTMLElement;
 
         const bar = new StatusBar({ item, getT: () => zhCN });
 
         expect(() => bar.update(makeStatus({ branch: "main" }))).not.toThrow();
         expect(() => bar.setActivity("pushing")).not.toThrow();
+    });
+});
+
+/**
+ * 「在动」必须看得出来（2026-10-05）。
+ *
+ * 用户的原话是「点击立即同步时，只有左下角状态栏中才显示正在提交，不够显眼」。
+ * 当时忙碌态与常态只差几个字：一样是灰字，在一排状态条目里扫过去看不出区别，
+ * 而一次同步可能要跑几十秒（网络 / 代理 / 大仓库）。
+ *
+ * 所以这里有两条契约：
+ * 1. 忙碌时挂 `obsync-status-bar-busy`（CSS 用它画转圈 + 强调色），**结束就摘掉**；
+ * 2. 链路里（「立即同步」）的文案与单独动作不同 —— 说得清是三步里的哪一步。
+ */
+describe("StatusBar 忙碌时的强调", () => {
+    it("忙碌时挂上转圈用的类，结束之后摘掉", () => {
+        const { item, classes, removed } = createItem();
+        const bar = new StatusBar({ item, getT: () => zhCN });
+
+        bar.setActivity("committing");
+        expect(classes).toContain("obsync-status-bar-busy");
+
+        bar.setActivity("idle");
+        expect(removed).toContain("obsync-status-bar-busy");
+    });
+
+    it("「立即同步」链路里说清是三步中的哪一步（不是光说「正在提交」）", () => {
+        // 只看到「正在提交…」时，用户会以为提交就是全部，不再等拉取与推送 ——
+        // 而它其实还要跑一阵。
+        const cases: Array<[string, string]> = [
+            ["committing", zhCN.sync.statusChainCommitting],
+            ["pulling", zhCN.sync.statusChainPulling],
+            ["pushing", zhCN.sync.statusChainPushing],
+        ];
+
+        for (const [activity, text] of cases) {
+            const { item, last } = createItem();
+            const bar = new StatusBar({ item, getT: () => zhCN });
+
+            bar.setActivity(activity as "committing" | "pulling" | "pushing", {
+                chain: true,
+            });
+
+            expect(last(), activity).toBe(`SyncHub: ${text}`);
+        }
+    });
+
+    it("单独动作沿用短句，且链路的标记**不会漏给**下一个动作", () => {
+        const { item, last } = createItem();
+        const bar = new StatusBar({ item, getT: () => zhCN });
+
+        bar.setActivity("committing", { chain: true });
+        // 下一次是单独点的「拉取」：不该继承上一次的链路标记
+        bar.setActivity("pulling");
+
+        expect(last()).toBe("SyncHub: 正在拉取…");
     });
 });
 
@@ -288,6 +351,7 @@ describe("StatusBar 的位置", () => {
         const classes: string[] = [];
         const item = {
             addClass: (value: string) => classes.push(value),
+            removeClass: () => {},
             setText: () => {},
             parentElement: parent,
         };
@@ -337,6 +401,7 @@ describe("StatusBar 可点开视图", () => {
         const handlers: Array<() => void> = [];
         const item = {
             addClass: (value: string) => classes.push(value),
+            removeClass: () => {},
             setText: () => {},
             setAttribute: (name: string, value: string) => {
                 attrs[name] = value;
@@ -374,7 +439,23 @@ describe("StatusBar 可点开视图", () => {
         locale = en;
         bar.setActivity("pushing");
 
-        expect(attrs["aria-label"]).toBe(en.sync.statusBarHint);
+        // 忙碌时那句与常态不同（见下一条），但**同样**跟着新语言走
+        expect(attrs["aria-label"]).toBe(en.sync.statusBusyHint);
+    });
+
+    /**
+     * 忙碌时最该回答的是「它在动吗、到哪一步了」，而不是「这个面板怎么开」——
+     * 面板里那条横幅说明了阶段，所以这句话把「点开就能看到进度」说出来。
+     */
+    it("忙碌时的悬停提示改为「点开看进度」，动作结束后回到常态那句", () => {
+        const { item, attrs } = clickableItem();
+        const bar = new StatusBar({ item, getT: () => zhCN, onClick: () => {} });
+
+        bar.setActivity("committing", { chain: true });
+        expect(attrs["aria-label"]).toBe(zhCN.sync.statusBusyHint);
+
+        bar.setActivity("idle");
+        expect(attrs["aria-label"]).toBe(zhCN.sync.statusBarHint);
     });
 
     it("没传 onClick 时不写 aria-label（条目保持不可点）", () => {

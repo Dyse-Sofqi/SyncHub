@@ -19,6 +19,7 @@ import { en } from "../../src/core/i18n/locales/en";
 import type { LocaleStrings } from "../../src/core/i18n";
 import type { SyncService } from "../../src/features/sync/syncService";
 import type { SimpleGitManager } from "../../src/features/sync/simpleGitManager";
+import type { SyncActivity } from "../../src/features/sync/statusBar";
 import type { CommitInfo, FileChange, RepoSize, RepoStatus } from "../../src/features/sync/types";
 
 /**
@@ -134,6 +135,8 @@ interface Harness {
     refreshCount(): number;
     /** 设「同步进行中」——倒计时那时该改说「正在同步…」。 */
     setBusy(value: boolean): void;
+    /** 推一次动作变化（面板的「正在同步」横幅靠它）。 */
+    setActivity(next: SyncActivity): void;
     /** 每次读状态时有没有要求 `force`（面板上「刷新」按钮与兜底读不一样）。 */
     forceFlags(): boolean[];
     /** 渲染了几次 —— 拿「跑了几次 git log」当代理（每次渲染都要读一次历史）。 */
@@ -161,6 +164,9 @@ function harness(options: {
     let current: RepoStatus | undefined = "status" in options ? options.status : status({});
     /** 同步是否正在进行（倒计时这时改说「正在同步…」）。 */
     let busy = false;
+    /** 当前动作（面板的「正在同步」横幅读它）。 */
+    let activity: SyncActivity = { kind: "idle", chain: false };
+    let activityListener: ((activity: SyncActivity) => void) | undefined;
     const firstCommits: CommitInfo[] | undefined = "commits" in options ? options.commits : [];
 
     /** `git.log` 的闸门 —— 设上之后那次渲染会停在历史那一步。 */
@@ -191,6 +197,23 @@ function harness(options: {
             return () => {
                 listener = undefined;
             };
+        },
+        /**
+         * 动作推送（真实实现见 `SyncService.onActivityChange`）。
+         *
+         * 与 `onStatusChange` 分开是**契约的一部分**：动作横幅要在动作一开始就出现，
+         * 而仓库状态要等动作收尾才刷新一次 —— 合成一条的话，同步跑几十秒期间
+         * 面板上什么都不会动，正是用户报的那个问题。
+         */
+        onActivityChange: (callback: (activity: SyncActivity) => void) => {
+            activityListener = callback;
+            return () => {
+                activityListener = undefined;
+            };
+        },
+        /** 面板打开时读一次当前动作（同步可能是面板关着时开始的）。 */
+        get currentActivity(): SyncActivity {
+            return activity;
         },
         get isBusy(): boolean {
             return busy;
@@ -347,6 +370,10 @@ function harness(options: {
         refreshCount: () => refreshCount,
         setBusy: (value: boolean) => {
             busy = value;
+        },
+        setActivity: (next: SyncActivity) => {
+            activity = next;
+            activityListener?.(next);
         },
         forceFlags: () => [...forces],
         renderCount: () => gitCalls.filter((call) => call === "log").length,
@@ -961,6 +988,146 @@ describe("SourceControlView 渲染", () => {
             } finally {
                 vi.useRealTimers();
             }
+        });
+    });
+
+    /**
+     * 同步进行中的特效（2026-10-05）。
+     *
+     * 用户的原话：「点击立即同步时，只有左下角状态栏中才显示正在提交，不够显眼，
+     * 状态栏提交时的提示文字优化一下，侧边栏同步时也要添加同步特效，不然用户
+     * 不知道是否正在同步」。
+     *
+     * 面板这一侧要保证四件事：
+     * 1. 动作**一来**横幅就出现（不等任何 git 跑完）—— 它是「有没有在同步」的答案；
+     * 2.「立即同步」把那三个阶段列出来，亮的是当前那一步（真实可得的进度，
+     *    而不是编一个百分比）；
+     * 3. 动作进行中四个动作按钮禁用（再点一次只是往队列里多排一个任务），
+     *    但刷新照旧可用（它只读）；
+     * 4. 结束之后横幅清空、按钮恢复 —— 不留一个「还在同步」的错觉。
+     */
+    describe("同步进行中的特效", () => {
+        /** 工具条下面那条横幅。 */
+        function banner(h: Harness): ShimNode | undefined {
+            return findAllIn(
+                contentOf(h.view).children ?? [],
+                (node) => (node.cls ?? "").split(/\s+/).includes("obsync-sync-banner")
+            )[0];
+        }
+
+        /** 节点树上的全部文字（横幅是裸 DOM，没有 Setting 可查）。 */
+        function allText(node: ShimNode): string {
+            return [node.text ?? "", ...(node.children ?? []).map(allText)]
+                .filter((text) => text !== "")
+                .join(" ");
+        }
+
+        /** 横幅上**写了什么**；空横幅返回空串。 */
+        function bannerText(h: Harness): string {
+            const node = banner(h);
+            return node ? allText(node) : "";
+        }
+
+        /** 工具条上按文字找按钮（找不到直接报出来）。 */
+        function actionButton(text: string): ButtonComponent {
+            const found = findToolbar().buttons.find((button) => button.text === text);
+            expect(found, `工具条上没有「${text}」按钮`).toBeDefined();
+            return found!;
+        }
+
+        it("没有动作时横幅是空的（CSS 的 :empty 把它整块收起来）", async () => {
+            const h = harness({});
+            await h.open();
+
+            expect(bannerText(h)).toBe("");
+        });
+
+        it("动作一来横幅立刻出现，且**不多跑一次 git**", async () => {
+            const h = harness({});
+            await h.open();
+            const gitCallsBefore = h.gitCalls.length;
+
+            h.setActivity({ kind: "committing", chain: true });
+
+            // 横幅是纯 DOM：出现它不该触发重绘（一次重绘 = 10 个 git 子进程，很贵）
+            expect(h.gitCalls.length).toBe(gitCallsBefore);
+            expect(bannerText(h)).toContain(zhCN.sync.statusSyncing);
+        });
+
+        it("「立即同步」列出三个阶段，亮的是当前那一步", async () => {
+            const h = harness({});
+            await h.open();
+
+            h.setActivity({ kind: "pulling", chain: true });
+
+            const steps = findAllIn(banner(h)?.children ?? [], (node) =>
+                (node.cls ?? "").split(/\s+/).includes("obsync-sync-step")
+            );
+            expect(steps.map((step) => step.text)).toEqual([
+                zhCN.sync.actCommit,
+                zhCN.sync.actPull,
+                zhCN.sync.actPush,
+            ]);
+
+            const active = steps.filter((step) =>
+                (step.cls ?? "").split(/\s+/).includes("is-active")
+            );
+            expect(active).toHaveLength(1);
+            expect(active[0]!.text).toBe(zhCN.sync.actPull);
+        });
+
+        it("单独的动作不画三个阶段（它本来就不是一条链）", async () => {
+            const h = harness({});
+            await h.open();
+
+            h.setActivity({ kind: "pushing", chain: false });
+
+            expect(bannerText(h)).toContain(zhCN.sync.statusPushing);
+            const stepGroups = findAllIn(banner(h)?.children ?? [], (node) =>
+                (node.cls ?? "").split(/\s+/).includes("obsync-sync-steps")
+            );
+            expect(stepGroups).toHaveLength(0);
+        });
+
+        it("动作进行中禁用四个动作按钮，但刷新照旧可用", async () => {
+            const h = harness({});
+            await h.open();
+
+            h.setActivity({ kind: "committing", chain: true });
+
+            for (const text of [
+                zhCN.sync.actCommit,
+                zhCN.sync.actPull,
+                zhCN.sync.actPush,
+                zhCN.sync.actSync,
+            ]) {
+                expect(actionButton(text).disabled, text).toBe(true);
+            }
+            // 刷新只读：同步途中想看一眼状态是合理需求
+            expect(actionButton(zhCN.sync.actRefresh).disabled).toBe(false);
+        });
+
+        it("动作结束之后横幅清空、按钮恢复", async () => {
+            const h = harness({});
+            await h.open();
+
+            h.setActivity({ kind: "pushing", chain: true });
+            expect(bannerText(h)).not.toBe("");
+
+            h.setActivity({ kind: "idle", chain: false });
+
+            expect(bannerText(h)).toBe("");
+            expect(findToolbar().buttons.every((button) => !button.disabled)).toBe(true);
+        });
+
+        it("面板打开时同步已经在跑 → 一打开就有横幅（不等下一次变化）", async () => {
+            const h = harness({});
+            // 动作发生在面板打开**之前**（命令面板触发的同步就是这种时序）
+            h.setActivity({ kind: "pushing", chain: true });
+
+            await h.open();
+
+            expect(bannerText(h)).toContain(zhCN.sync.statusSyncing);
         });
     });
 

@@ -535,7 +535,7 @@ function checkMobileSafety() {
  * 一个文件算「读过」某字段，满足其一即可：
  *   - 限定访问：`.sync.enabled`（后面跟 `=` 的是写，不算读）
  *   - 提升访问：文件里先 `const x = …getSettings().installer`，再读 `x.enabled`
- *     （`installer.enabled` 用的就是这个写法，只看限定访问会误报）
+ *     （`installer.autoCheckOnStartup` 用的就是这个写法，只看限定访问会误报）
  *
  * `settingsTab.ts` **不在扫描范围**：它读设置是为了渲染与持久化，不是消费。
  * 正是这一点让检查有意义 —— 否则每个字段都会被设置页自己「读」到。
@@ -619,7 +619,7 @@ function checkUnreadSettings() {
             `有 ${unread.length} 个设置项从没被功能代码读过（用户改了它不会有任何效果）：\n      ` +
                 unread.join("\n      ") +
                 `\n      设置页能改、data.json 里也存着，但 src 里没有消费方（settingsTab 的渲染不算）。` +
-                `\n      要么接上线（把它注入到真正用它的地方，参考 installer.enabled 的接法），` +
+                `\n      要么接上线（把它注入到真正用它的地方，参考 installer.autoCheckOnStartup 的接法），` +
                 `要么把这个设置项删掉 —— 一个改了没作用的开关比没有开关更糟。` +
                 `\n      确实有消费方、只是判据扫不到时，往 EXEMPT 里加一条并写明理由。`
         );

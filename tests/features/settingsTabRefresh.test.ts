@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createdSettings, resetCreatedSettings } from "../stubs/obsidian";
+import { createdSettings, resetCreatedSettings, type ButtonComponent } from "../stubs/obsidian";
 import { normalizeSettings } from "../../src/core/settings";
 import { zhCN } from "../../src/core/i18n/locales/zh-cn";
 import { Notifier } from "../../src/core/notice";
@@ -26,12 +26,15 @@ interface TabHandle {
     tab: ObsyncSettingsTab;
     /** 弹窗被打开时收到的「安装成功」回调（没打开过就是 undefined）。 */
     onInstalled(): ((result: InstallResult) => void) | undefined;
+    /** 「添加主题」那个弹窗收到的回调（同上）。 */
+    onThemeInstalled(): ((result: InstallResult) => void) | undefined;
 }
 
 function createTab(fake: FakeApp): TabHandle {
     const notifier = new Notifier({ getShowNotices: () => true, getT: () => zhCN });
 
     let captured: ((result: InstallResult) => void) | undefined;
+    let capturedTheme: ((result: InstallResult) => void) | undefined;
 
     const plugin = {
         app: fake.app,
@@ -50,24 +53,52 @@ function createTab(fake: FakeApp): TabHandle {
             openAddRepoModal: (callback: (result: InstallResult) => void) => {
                 captured = callback;
             },
+            // 「添加主题」是同一个弹窗的主题模式（2026-10-05）—— 它同样要在装完之后
+            // 把重绘交回去，否则新装的主题不出现在列表里。
+            openAddThemeModal: (callback: (result: InstallResult) => void) => {
+                capturedTheme = callback;
+            },
         },
     };
 
     return {
         tab: new ObsyncSettingsTab(plugin as never),
         onInstalled: () => captured,
+        onThemeInstalled: () => capturedTheme,
     };
 }
 
-/** 按下头部栏最左边的「添加插件仓库」按钮（三个主操作里的第一个）。 */
-function clickAddRepoButton(tab: ObsyncSettingsTab): void {
+/**
+ * 主操作按钮行**里**那个文字为 `text` 的按钮。
+ *
+ * 2026-10-05 之前这一行是「标题 + 说明 + 三个按钮」的卡片，当时的用例靠
+ * `setting.name === zhCN.settings.installer.tracked` 找它；用户要求「把这排按钮的
+ * 卡片去掉，只留按钮展示」之后**标题与说明都没了**（那两个 locale 键也随之删除），
+ * 所以现在只能按按钮文字找 —— 这样反而更贴近用户真正点的那个东西。
+ */
+function trackedActionButton(
+    tab: ObsyncSettingsTab,
+    text: string
+): ButtonComponent {
     (tab as unknown as { renderTrackedTab(): void }).renderTrackedTab();
 
-    const header = createdSettings.find(
-        (setting) => setting.name === zhCN.settings.installer.tracked
+    const row = createdSettings.find((setting) =>
+        setting.buttons.some((button) => button.text === text)
     );
-    if (!header) throw new Error("渲染出来的内容里找不到「已跟踪」头部栏");
-    header.buttons[0]!.click();
+    if (!row) throw new Error(`渲染出来的内容里找不到「${text}」那一行`);
+    const button = row.buttons.find((candidate) => candidate.text === text);
+    if (!button) throw new Error(`那一行里找不到「${text}」按钮`);
+    return button;
+}
+
+/** 按下按钮行最左边的「添加插件仓库」。 */
+function clickAddRepoButton(tab: ObsyncSettingsTab): void {
+    trackedActionButton(tab, zhCN.installer.modalTitle).click();
+}
+
+/** 按下「添加主题仓库」。 */
+function clickAddThemeButton(tab: ObsyncSettingsTab): void {
+    trackedActionButton(tab, zhCN.installer.addTheme).click();
 }
 
 /** 刚装好的那条记录 —— 真实流程里由 service 写进 settings（见 recordItem）。 */
@@ -154,5 +185,43 @@ describe("设置页 · 安装成功后的列表刷新", () => {
         const trackedTab = tabs.children.find((child) => child.text === zhCN.settings.tabs.tracked);
         const counts = (trackedTab?.children ?? []).map((child) => child.text);
         expect(counts).toContain("1");
+    });
+
+    /**
+     * 「添加主题」是 2026-10-05 加的独立入口。
+     *
+     * 这条断言看着只是「按钮在不在」，但它守住的是**两条**容易漏的接线：
+     * 按钮真的挂在「已跟踪」头部栏上（而不是只加了命令面板入口），以及它把重绘
+     * 交回给设置页 —— 与插件那条同一个理由（弹窗关闭不会让底下的页面重渲染）。
+     */
+    it("头部栏有「添加主题」，且它同样把重绘交给弹窗", () => {
+        const fake = createFakeApp();
+        const { tab, onThemeInstalled } = createTab(fake);
+
+        clickAddThemeButton(tab);
+
+        expect(onThemeInstalled()).toBeTypeOf("function");
+    });
+
+    it("「添加主题」装完之后新条目也立刻出现在列表里", () => {
+        const fake = createFakeApp();
+        const { tab, onThemeInstalled } = createTab(fake);
+
+        clickAddThemeButton(tab);
+        const callback = onThemeInstalled()!;
+
+        (tab as unknown as { obsync: { settings: ReturnType<typeof normalizeSettings> } })
+            .obsync.settings.installer.tracked.push({
+                ...installedRecord(),
+                kind: "theme",
+                id: "Minimal",
+                name: "Minimal",
+            });
+
+        resetCreatedSettings();
+        callback(installResult());
+
+        const names = createdSettings.map((setting) => setting.name);
+        expect(names).toContain("Minimal");
     });
 });

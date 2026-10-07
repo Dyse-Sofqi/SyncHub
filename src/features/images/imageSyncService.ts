@@ -83,6 +83,17 @@ export interface ImageSyncDeps {
     secretStore: SecretStore;
     /** 一轮同步结束后通知外部（状态栏 / 设置页重绘）。 */
     onFinished?(summary: SyncSummary): void;
+    /**
+     * 「这些本地文件是**我们自己**写的」—— 只用于下载（`writeLocal`）。
+     *
+     * 为什么需要：下载会触发 Obsidian 的 `create` / `modify` 事件，而
+     * 「变动后自动同步」（`ImageChangeQueue`）正听着那些事件 —— 不标记的话，
+     * 每下载一张就会再触发一轮同步（幂等，会立刻判成 `in-sync`，但白跑一次
+     * R2 `ListObjects`，而且日志里看着像有东西一直在变）。
+     *
+     * 装配层收到的这些路径会**被下一个同名事件消费掉**（见 `selfWrites`）。
+     */
+    onLocalWrites?(paths: string[]): void;
 }
 
 /** 内部的动作计划：带着执行需要的本地/远端数据。 */
@@ -839,6 +850,9 @@ export class ImageSyncService {
      */
     private async writeLocal(path: string, body: ArrayBuffer): Promise<void> {
         const app = this.deps.app;
+        // 先说一声「这个路径是我们自己写的」——**必须在写之前**：事件是在写的过程
+        // 里发出来的，晚了就来不及（见 `onLocalWrites` 的说明）。
+        this.deps.onLocalWrites?.([path]);
         try {
             const existing = app.vault.getAbstractFileByPath(path);
             if (existing instanceof TFile) {

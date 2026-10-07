@@ -1,7 +1,7 @@
 import type { LocaleStrings } from "../../core/i18n";
 import { logger } from "../../core/logger";
 import type { ObsyncSettings } from "../../core/settings";
-import { isSameRepo, parseRepoRef, repoWebUrl } from "../../host/repoRef";
+import { isSameRepo, repoWebUrl, tryParseRepoRef } from "../../host/repoRef";
 import type { RepoRef } from "../../host/types";
 import type { SelfUpdateCheck } from "./types";
 
@@ -36,8 +36,8 @@ import type { SelfUpdateCheck } from "./types";
  * manifest 的 id 是不是 `ob-sync`：这个常量万一指错了地方，拦住远比
  * 按错的 id 去解析目录、覆盖掉别的插件强。
  *
- * **它不再是默认来源**（2026-10-01）：默认走下面的 Gitee 镜像，而这里仍然是
- * 「显式指定」时的一个合法地址（把设置里那一格改成它的地址即可）。
+ * **它不再是默认来源**（2026-10-01）：默认走下面的 Gitee 镜像，这里是设置页那个
+ * 开关**关掉时**用的地址。
  */
 export const SELF_REPO: RepoRef = {
     host: "github",
@@ -52,8 +52,8 @@ export const SELF_REPO: RepoRef = {
  *
  * `github.com` 在目标用户的网络里是**时段性阻断**的（见下面 `resolveSelfRepo`
  * 的说明与 README）：默认走官方，意味着「检查更新」这个动作本身经常失败，
- * 而失败的样子是「一直报错 / 一直转圈」，用户只能自己去翻设置页才知道有个来源
- * 可以填。把默认改成镜像之后，开箱即用的那条路是通的。
+ * 而失败的样子是「一直报错 / 一直转圈」，用户只能自己去翻设置页才知道有个开关
+ * 可以关。把默认换成镜像之后，开箱即用的那条路是通的。
  *
  * ## 它不是「镜像发现」那套
  *
@@ -67,13 +67,47 @@ export const SELF_MIRROR: RepoRef = {
 };
 
 /**
- * 设置里「自身更新来源」的**默认值** = 上面那个镜像的完整地址。
+ * 这次该从哪个仓库更新自己。
  *
- * 用字符串是因为它就是输入框里那个值（人可读、可改、可以填成别的地址）。
- * 它与 `SELF_MIRROR` 必须指向同一个仓库 —— `selfUpdate.test.ts` 里有一条
- * 断言盯着这件事（两个常量漂开的话，默认值会变成一句好看的假话）。
+ * `useGitee` 是设置页那个开关（`settings.installer.selfUpdateUseGitee`）：
+ * 开 → `SELF_MIRROR`（Gitee 镜像），关 → `SELF_REPO`（官方仓库）。
+ *
+ * ## 为什么还留一个函数，而不是让调用方直接 `useGitee ? A : B`
+ *
+ * 因为「哪个开关对应哪个地址」是这一节的**唯一事实**，而它有两个调用方
+ * （检查与更新，都经 `InstallerService.selfRepo()`）。散在各处写三元，迟早
+ * 有一处写反 —— 那正是「检查说没有更新、更新却从另一个仓库拉」的来源。
+ * 顺带也让「镜像地址是什么」只在这一处出现。
+ *
+ * 与「镜像发现」的区别很重要：那套是**自动探测 + 只提议、要用户确认**，每次都要
+ * 探一次；这里是用户**选定的固定来源**，选一次就一直用它 —— 所以它不需要探测，
+ * 也不该被 `discoverGiteeMirrors` 那个开关影响。
  */
-export const DEFAULT_SELF_SOURCE = "https://gitee.com/sofqi/SyncHub";
+export function resolveSelfRepo(useGitee: boolean): RepoRef {
+    return useGitee ? SELF_MIRROR : SELF_REPO;
+}
+
+/**
+ * 老 `selfUpdateSource` 字符串（v8 及以前）折算成「是否用 Gitee 镜像」。
+ *
+ * 只在 `normalizeSettings` 的 v8 → v9 迁移里用一次，但折算规则必须与**当年那套
+ * 解析**保持一致，否则老用户的来源会在升级时悄悄换掉：
+ *
+ * - **空串 / 全空白 → `true`**：当年空串表示「用默认」，而默认就是镜像；
+ * - **能解析出 host 的 → `host === "gitee"`**：`owner/repo` 简写当年按 GitHub
+ *   解释（`parseRepoRef(trimmed, "github")`），所以这里也用同一个默认平台 ——
+ *   一个填 `sofqi/SyncHub` 的用户当年走的是 GitHub 上的同名仓库，现在仍是 GitHub；
+ * - **解析不出来（自定义地址 / 手改坏）→ `true`**：退回默认。当年这种值会让更新
+ *   直接抛错，而新模型没有地方放它 —— 选默认（镜像，可直连）比选官方更可能成功。
+ */
+export function selfUpdateUsesGitee(raw: unknown): boolean {
+    if (typeof raw !== "string") return true;
+
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return true;
+
+    return tryParseRepoRef(trimmed, "github")?.host !== "github";
+}
 
 /**
  * 我们自己的插件 id —— 必须与 `manifest.json` 的 `id` 一致。
@@ -101,34 +135,7 @@ export const DEFAULT_SELF_SOURCE = "https://gitee.com/sofqi/SyncHub";
 export const SELF_PLUGIN_ID = "ob-sync";
 
 /**
- * 这次该从哪个仓库更新自己。
- *
- * `source` 是设置里的「自身更新来源」（`settings.installer.selfUpdateSource`）：
- *
- * - **空串（或全空白）→ `SELF_MIRROR`**，也就是那个默认的 Gitee 镜像。
- *   空串表示「用默认」，而不是「用官方」—— 于是老 `data.json` 里那个空值
- *   （当年空串表示官方）也会跟着走到镜像上，见 `normalizeSettings` 里的说明。
- * - **填了 → 解析成 `RepoRef`**。写完整地址（`https://gitee.com/sofqi/SyncHub`、
- *   `https://github.com/Dyse-Sofqi/SyncHub`）或 `owner/repo` 简写都行；
- *   简写按 GitHub 解释，要 Gitee 就写全。
- *
- * 与「镜像发现」的区别很重要：那套是**自动探测 + 只提议、要用户确认**，每次都要
- * 探一次；这里是用户**写死的固定来源**，填一次就一直用它 —— 所以它不需要探测，
- * 也不该被 `discoverGiteeMirrors` 那个开关影响。
- *
- * 地址非法时 `parseRepoRef` 会抛 `InstallerError`，由调用方按错误路径报给用户 ——
- * **非法地址不静默改道**：那会让用户以为在用自己填的地址，实际用的是别的。
- * （「这个来源**连不上**」是另一回事：那种情况会回退到官方仓库，但**每次都会说出来**，
- * 见 `selfRepoAttempts` 与 `installer.selfSourceFallback`。）
- */
-export function resolveSelfRepo(source: string): RepoRef {
-    const trimmed = source.trim();
-    if (trimmed.length === 0) return SELF_MIRROR;
-    return parseRepoRef(trimmed, "github");
-}
-
-/**
- * 自身更新的**尝试顺序**：设置里那个来源 → 官方仓库（2026-10-01）。
+ * 自身更新的**尝试顺序**：选定的来源 → 官方仓库（2026-10-01）。
  *
  * ## 为什么要有回退
  *

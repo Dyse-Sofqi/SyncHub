@@ -410,9 +410,7 @@ describe("checkAll", () => {
 
 describe("shouldCheckOnSettingsOpen（进入设置页自动检查的判据）", () => {
     const base = {
-        enabled: true,
         autoCheckOnSettingsOpen: true,
-        trackedCount: 2,
         lastCheckAt: 0,
         now: 1_000_000_000,
     };
@@ -421,12 +419,15 @@ describe("shouldCheckOnSettingsOpen（进入设置页自动检查的判据）", 
         expect(shouldCheckOnSettingsOpen(base)).toBe(true);
     });
 
-    it("安装器关闭、开关关闭、无跟踪插件时都不检查", () => {
-        expect(shouldCheckOnSettingsOpen({ ...base, enabled: false })).toBe(false);
+    it("开关关着时不检查", () => {
+        // 2026-10-06 删掉了两条前置条件：
+        // - `enabled`（「启用插件安装器」总开关）—— 它只是本判据的第二种说法；
+        // - `trackedCount` —— 本判据现在同时管「查跟踪列表」与「查 SyncHub 自身」，
+        //   而后者跟跟踪列表无关（一个跟踪项都没有也该查自己）。「有没有跟踪项」
+        //   交给调用方在跑跟踪那一轮时判。
         expect(
             shouldCheckOnSettingsOpen({ ...base, autoCheckOnSettingsOpen: false })
         ).toBe(false);
-        expect(shouldCheckOnSettingsOpen({ ...base, trackedCount: 0 })).toBe(false);
     });
 
     it("距上次检查太近时跳过（防止反复开合设置页打光配额）", () => {
@@ -842,10 +843,10 @@ describe("checkSelf", () => {
         expect(result.hasUpdate).toBe(true);
     });
 
-    it("设置改成官方地址之后，检查也跟着走 GitHub（与更新同源）", async () => {
+    it("关掉镜像开关之后，检查也跟着走 GitHub（与更新同源）", async () => {
         const fake = createFakeApp();
         const { checker, settings } = createContext(fake);
-        settings.installer.selfUpdateSource = "https://github.com/Dyse-Sofqi/SyncHub";
+        settings.installer.selfUpdateUseGitee = false;
         route(/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
             status: 200,
             text: releaseJson("0.2.0"),
@@ -950,10 +951,10 @@ describe("checkSelf", () => {
         expect(requested.some((url) => url.includes("api.github.com"))).toBe(false);
     });
 
-    it("配的就是官方时只有一次请求", async () => {
+    it("关掉镜像开关（走官方）时只有一次请求", async () => {
         const fake = createFakeApp();
         const { checker, settings } = createContext(fake);
-        settings.installer.selfUpdateSource = "https://github.com/Dyse-Sofqi/SyncHub";
+        settings.installer.selfUpdateUseGitee = false;
         const requested: string[] = [];
         route(/releases\/latest$/, (request) => {
             requested.push(request.url);
@@ -965,5 +966,47 @@ describe("checkSelf", () => {
         expect(result.error).toBeTruthy();
         expect(result.fellBackFrom).toBeUndefined();
         expect(requested).toHaveLength(1);
+    });
+
+    /**
+     * 结果**落盘**（2026-10-06 加）。
+     *
+     * 「插件安装器」标签上的数字徽标与那一行的状态文字都读
+     * `installer.selfUpdateAvailable`，而它们都要能在「这一轮没查过」的时候显示
+     * 出来（标签栏在页面内容之前画、重启之后也是）—— 所以记录必须落到设置里，
+     * 而不是只留在某次调用的返回值里。
+     */
+    it("有更新时把版本号写进设置（标签页徽标与状态行读它）", async () => {
+        const fake = createFakeApp();
+        const { checker, settings } = createContext(fake);
+        route(/releases\/latest$/, () => ({ status: 200, text: releaseJson("0.2.0") }));
+
+        await checker.checkSelf("0.1.0");
+
+        expect(settings.installer.selfUpdateAvailable).toBe("0.2.0");
+        // 顺带刷新节流时间戳：不然一个跟踪项都没有的用户每次打开设置页都会重查。
+        expect(settings.installer.lastUpdateCheckAt).toBeGreaterThan(0);
+    });
+
+    it("无更新时清掉旧记录（那个版本已经装上了 / 远端撤了）", async () => {
+        const fake = createFakeApp();
+        const { checker, settings } = createContext(fake);
+        settings.installer.selfUpdateAvailable = "0.2.0";
+        route(/releases\/latest$/, () => ({ status: 200, text: releaseJson("0.1.0") }));
+
+        await checker.checkSelf("0.1.0");
+
+        expect(settings.installer.selfUpdateAvailable).toBe("");
+    });
+
+    it("检查失败时**不动**旧记录（过期信息好过没有）", async () => {
+        const fake = createFakeApp();
+        const { checker, settings } = createContext(fake);
+        settings.installer.selfUpdateAvailable = "0.2.0";
+        route(/releases\/latest$/, () => ({ status: 403, text: '{"message":"rate limit"}' }));
+
+        await checker.checkSelf("0.1.0");
+
+        expect(settings.installer.selfUpdateAvailable).toBe("0.2.0");
     });
 });

@@ -526,3 +526,227 @@ describe("bindThemeToRepo（手填仓库地址）", () => {
         });
     });
 });
+
+/**
+ * `installTheme` —— 从仓库地址**新装**一个主题（2026-10-05）。
+ *
+ * 这条路径此前**不存在**：主题只能「绑定库里已装的」或「更新已跟踪的」。用户把
+ * 主题仓库地址填进「添加插件仓库」时，拿到的是「缺少必需文件：main.js」——
+ * 而主题根本没有那个文件（见 `FILE_SETS.theme`）。
+ *
+ * 本组要守的是「新装」与「更新」的**三处分叉**（都在 `installTheme` 的注释里）：
+ * 目录名由远端 manifest 现算、不做镜像发现、绝不替用户切换主题。再加一条最要紧的
+ * 安全线：**同名目录里是别的主题时拒绝覆盖**。
+ */
+describe("installTheme（从仓库新装主题）", () => {
+    it("写进 themes/{manifest.name} 并记入跟踪列表", async () => {
+        const fake = createFakeApp();
+        const { service, settings } = createService(fake);
+        setupRawThemeRepo();
+
+        const result = await service.installTheme({ repo: "kepano/obsidian-minimal" });
+
+        // 目录名取**远端 manifest 的 name**（`Minimal`），不是仓库名
+        // （`obsidian-minimal`）—— 官方主题商店也是这么落的。
+        expect(result.id).toBe("Minimal");
+        expect(result.version).toBe("9.1.0");
+        expect(result.channel).toBe("raw");
+        expect(result.replaced).toBe(false);
+        expect(readThemeFile(fake, "Minimal", "theme.css")).toBe("/* theme v2 */");
+        expect(readThemeFile(fake, "Minimal", "manifest.json")).toBe(
+            themeManifestRaw("Minimal", "9.1.0")
+        );
+        expect(settings.installer.tracked[0]).toMatchObject({
+            kind: "theme",
+            host: "github",
+            owner: "kepano",
+            repo: "obsidian-minimal",
+            id: "Minimal",
+            name: "Minimal",
+            installedVersion: "9.1.0",
+            channel: "raw",
+        });
+    });
+
+    it("**绝不替用户切换主题**（装的正好是当前主题时只请求一次重载）", async () => {
+        const fake = createFakeApp();
+        fake.customCss.theme = "Minimal";
+        const { service } = createService(fake);
+        setupRawThemeRepo();
+
+        const result = await service.installTheme({ repo: "kepano/obsidian-minimal" });
+
+        expect(result.wasActive).toBe(true);
+        // 文件被换了，所以要让 Obsidian 重读一次 —— 否则用户看到「装好」但观感没变
+        expect(fake.customCss.reloadRequests).toBe(1);
+        // 但切换主题是用户的动作：`themeFolder.ts` 刻意连 `setTheme` 都没收进来
+        expect(fake.customCss.setThemeCalls).toEqual([]);
+        expect(fake.customCss.theme).toBe("Minimal");
+    });
+
+    it("主题名首尾的空白会被去掉，再当目录名", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        // `"Minimal "` 与 `"Minimal"` 在 Windows 上是同一个目录、在 Linux 上不是 ——
+        // 留着空白只会在跨设备时制造「主题凭空消失」。
+        setupRawThemeRepo({ manifest: themeManifestRaw("Minimal ", "9.1.0") });
+
+        const result = await service.installTheme({ repo: "kepano/obsidian-minimal" });
+
+        expect(result.id).toBe("Minimal");
+        expect(readThemeFile(fake, "Minimal", "theme.css")).toBe("/* theme v2 */");
+    });
+
+    it("主题名不能当目录名时回落到仓库名（目录名会成为路径的一截）", async () => {
+        const fake = createFakeApp();
+        const { service, settings } = createService(fake);
+        // 带路径分隔符的名字过得了 manifest 的解析（`name` 只要非空），
+        // 但过不了 `isValidThemeName` —— 而它会成为 `rmdir(folder, true)` 的目标。
+        setupRawThemeRepo({ manifest: themeManifestRaw("Minimal / 9", "9.1.0") });
+
+        const result = await service.installTheme({ repo: "kepano/obsidian-minimal" });
+
+        expect(result.id).toBe("obsidian-minimal");
+        expect(readThemeFile(fake, "obsidian-minimal", "theme.css")).toBe("/* theme v2 */");
+        expect(settings.installer.tracked[0]).toMatchObject({ id: "obsidian-minimal" });
+        // 记录里的显示名仍然是远端那个（界面上要按作者给的名字显示）
+        expect(settings.installer.tracked[0]).toMatchObject({ name: "Minimal / 9" });
+    });
+
+    it("目标目录里是**另一个**主题时拒绝覆盖", async () => {
+        const fake = createFakeApp(
+            seedTheme("Minimal", {
+                "manifest.json": themeManifestRaw("Rose Red", "1.0.0"),
+                "theme.css": "/* 别人的主题 */",
+            })
+        );
+        const { service, settings } = createService(fake);
+        setupRawThemeRepo();
+
+        await expectInstallerError(
+            () => service.installTheme({ repo: "kepano/obsidian-minimal" }),
+            "themeNameConflict"
+        );
+
+        // 别人的主题一个字节都不许动，也不该出现在跟踪列表里
+        expect(readThemeFile(fake, "Minimal", "theme.css")).toBe("/* 别人的主题 */");
+        expect(settings.installer.tracked).toEqual([]);
+    });
+
+    it("目标目录里是**同一个**主题（或没有 manifest）时允许重装", async () => {
+        const fake = createFakeApp(
+            seedTheme("Minimal", {
+                "manifest.json": themeManifestRaw("Minimal", "8.0.0"),
+                "theme.css": "/* 旧版 */",
+            })
+        );
+        const { service } = createService(fake);
+        setupRawThemeRepo();
+
+        const result = await service.installTheme({ repo: "kepano/obsidian-minimal" });
+
+        expect(result.replaced).toBe(true);
+        expect(readThemeFile(fake, "Minimal", "theme.css")).toBe("/* theme v2 */");
+    });
+
+    it("**不做镜像发现**：新装时主题的镜像判据（本地已装的那一版）还不存在", async () => {
+        const fake = createFakeApp();
+        const { service, settings } = createService(fake);
+        setupRawThemeRepo();
+
+        await service.installTheme({ repo: "kepano/obsidian-minimal" });
+
+        expect(calls.some((url) => url.includes("gitee.com"))).toBe(false);
+        expect(settings.installer.mirrorSuggestions).toEqual({});
+    });
+
+    it("不满足 minAppVersion 时中止，不写任何文件", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        setupRawThemeRepo({
+            manifest: themeManifestRaw("Minimal", "9.1.0", { minAppVersion: "99.0.0" }),
+        });
+
+        await expectInstallerError(
+            () => service.installTheme({ repo: "kepano/obsidian-minimal" }),
+            "incompatibleApp"
+        );
+        expect(fake.writes).toEqual([]);
+    });
+
+    it("仓库里没有 theme.css 时报 missingRequiredFiles（**带的 kind 是主题**）", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        // 一个插件仓库：有 manifest 与 main.js，没有 theme.css
+        route(/releases\/latest$/, () => ({ status: 404, text: "{}" }));
+        route(/\/releases\?/, () => ({ status: 200, text: "[]" }));
+        route(/HEAD\/manifest\.json$/, () => ({
+            status: 200,
+            text: JSON.stringify({
+                id: "trefoil",
+                name: "Trefoil",
+                version: "1.0.0",
+                minAppVersion: "1.0.0",
+            }),
+        }));
+        route(/HEAD\/theme\.css$/, () => ({ status: 404, text: "not found" }));
+
+        let detail: unknown;
+        try {
+            await service.installTheme({ repo: "kepano/obsidian-minimal" });
+        } catch (err) {
+            detail = (err as { detail?: unknown }).detail;
+        }
+
+        // 文案要按 kind 选词（「无法安装该主题」而不是「该插件」）——
+        // 这条钉的正是 `errors.ts` 里 `of` 参数的来路。
+        expect(detail).toMatchObject({ kind: "missingRequiredFiles", files: "theme.css", of: "theme" });
+    });
+
+    it("looksLikeKind 认得对面那一类对象的标志性文件", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        route(/HEAD\/theme\.css$/, () => ({ status: 200, text: "/* theme */" }));
+        route(/HEAD\/main\.js$/, () => ({ status: 404, text: "not found" }));
+        const ref = { host: "github", owner: "kepano", repo: "obsidian-minimal" } as const;
+
+        expect(await service.looksLikeKind(ref, "theme")).toBe(true);
+        expect(await service.looksLikeKind(ref, "plugin")).toBe(false);
+    });
+
+    it("looksLikeKind 探测失败时返回 false（不给一个走不通的建议）", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        // 没有 route：任何请求都会抛错
+        const ref = { host: "github", owner: "kepano", repo: "obsidian-minimal" } as const;
+
+        expect(await service.looksLikeKind(ref, "theme")).toBe(false);
+    });
+});
+
+describe("resolveThemeRepo", () => {
+    it("识别成功时回传地址与 manifest", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        route(/HEAD\/manifest\.json$/, () => ({
+            status: 200,
+            text: themeManifestRaw("Minimal", "9.1.0"),
+        }));
+
+        const resolved = await service.resolveThemeRepo("kepano/obsidian-minimal");
+
+        expect(resolved.ref).toEqual({ host: "github", owner: "kepano", repo: "obsidian-minimal" });
+        expect(resolved.manifest.name).toBe("Minimal");
+    });
+
+    it("没有 manifest.json 时报 missingManifest（kind 是主题）", async () => {
+        const fake = createFakeApp();
+        const { service } = createService(fake);
+        route(/HEAD\/manifest\.json$/, () => ({ status: 404, text: "not found" }));
+
+        await expectInstallerError(
+            () => service.resolveThemeRepo("kepano/nope"),
+            "missingManifest"
+        );
+    });
+});

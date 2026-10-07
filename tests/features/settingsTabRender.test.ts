@@ -68,6 +68,20 @@ function createTab(
             checker: {} as UpdateChecker,
         },
         openImageManager(): void {},
+        // 令牌输入框在保存 / 测试 / 清除后会调它重画功能区头像（见 `main.ts`）。
+        // 这一页的用例不驱动那几个入口，但替身上缺了它，将来补一条令牌用例时
+        // 会以一个与被测行为无关的 TypeError 失败。
+        refreshRibbonAvatar(): void {},
+        /**
+         * 「初始化 git 仓库」那一行点了按钮之后走它 —— **与命令面板、侧边栏面板
+         * 是同一个方法**（`ObsyncPlugin.initRepo`），所以这一页的用例只要断言
+         * 「它被调了」就够了，提示文案与 `.gitignore` 的处理都在那一份实现里。
+         */
+        initCalls: 0,
+        async initRepo(): Promise<boolean> {
+            plugin.initCalls += 1;
+            return true;
+        },
     };
 
     return new ObsyncSettingsTab(plugin as never);
@@ -118,7 +132,27 @@ function createSyncStub(initial?: string) {
         savedRemotes: [] as string[],
         /** `service.refresh()` 被调了几次（远端改完要强制刷新）。 */
         refreshes: 0,
+        /**
+         * 当前库是不是 git 仓库 —— 「初始化 git 仓库」那一行的徽标与按钮读它
+         * （2026-10-05 加的那一行；这是它在设置页里的唯一数据来源）。
+         */
+        isRepo: true,
+        /**
+         * `git.isRepo()` 被问了几次。
+         *
+         * 2026-10-06 起设置页**只问一次**（问过就缓存，见 `renderInitRow` 与
+         * `ObsyncSettingsTab.vaultIsRepo`）—— 没有这个计数，「每次重绘都重新起
+         * 一个 git 子进程」这条回归就没人拦得住。
+         */
+        isRepoCalls: 0,
+        /** 设了就让 `isRepo()` 抛错（模拟 git 不在 PATH）。 */
+        isRepoError: undefined as Error | undefined,
         git: {
+            async isRepo(): Promise<boolean> {
+                stub.isRepoCalls += 1;
+                if (stub.isRepoError) throw stub.isRepoError;
+                return stub.isRepo;
+            },
             async getRemoteUrl(): Promise<string | undefined> {
                 return stub.remoteUrl;
             },
@@ -227,7 +261,7 @@ type TextAreaEl = {
     /** shim 的 `createEl` 会记下标签名 —— 用它证明它真的是 `textarea`。 */
     tagName?: string;
     value: string;
-    /** 内联样式（宽度与 box-sizing 在 JS 里写了一份）。 */
+    /** 内联样式表（用来证明元素上**没有**写静态样式 —— 那是审核规则拦的形态）。 */
     style?: Record<string, string>;
     trigger: (name: string, ...args: unknown[]) => void;
 };
@@ -245,10 +279,26 @@ describe("设置页 · 安装器页", () => {
         expect(() => renderInstallerPage(tab)).not.toThrow();
 
         const names = createdSettings.map((setting) => setting.name);
-        expect(names).toContain(zhCN.settings.installer.heading);
-        expect(names).toContain(zhCN.settings.installer.enabled);
+        // 2026-10-06 起这一页**没有页首标题**（页签「插件安装器」已经是页名），
+        // 也**没有**「启用插件安装器」总开关了（它只挡两个自动检查，等价于把它们
+        // 都关掉）—— 下面那两条自动检查各自还在。
+        expect(names).toContain(zhCN.settings.installer.autoCheck);
+        expect(names).toContain(zhCN.settings.installer.autoCheckOnSettingsOpen);
         expect(names).toContain(zhCN.settings.installer.mirrorDiscovery);
         expect(names).toContain(zhCN.settings.installer.selfHeading);
+    });
+
+    it("**没有页首标题**：第一条内容就是状态小字（2026-10-06）", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderInstallerPage(tab);
+
+        const container = (tab as unknown as { containerEl: { children: unknown[] } }).containerEl;
+        // 标题行是 `Setting`（挂在它自己的 `settingEl` 里），而状态小字是裸 `<p>`。
+        expect((container.children as Array<{ cls?: string }>)[0]?.cls).toBe(
+            "setting-item-description"
+        );
     });
 
     it("「SyncHub 自身」一节有检查更新与更新两个按钮", () => {
@@ -266,23 +316,23 @@ describe("设置页 · 安装器页", () => {
         ]);
     });
 
-    it("「SyncHub 自身」一节有「更新来源」输入框，初值来自设置", () => {
+    it("「SyncHub 自身」一节有「启用 Gitee 镜像源」开关，初值来自设置", () => {
         const fake = createFakeApp();
         const tab = createTab(fake, {
-            installer: { selfUpdateSource: "https://gitee.com/sofqi/SyncHub" },
+            installer: { selfUpdateUseGitee: false },
         });
 
         renderInstallerPage(tab);
 
         const row = createdSettings.find(
-            (setting) => setting.name === zhCN.settings.installer.selfSource
+            (setting) => setting.name === zhCN.settings.installer.selfUseGitee
         );
         expect(row).toBeDefined();
-        expect(row?.desc).toBe(zhCN.settings.installer.selfSourceDesc);
-        expect(row?.texts[0]?.value).toBe("https://gitee.com/sofqi/SyncHub");
+        expect(row?.desc).toBe(zhCN.settings.installer.selfUseGiteeDesc);
+        expect(row?.toggles[0]?.value).toBe(false);
     });
 
-    it("改「更新来源」会**真的写进设置**（否则「填了没用」），并去掉首尾空白", async () => {
+    it("改「启用 Gitee 镜像源」会**真的写进设置**（否则「拨了没用」）", async () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
         const plugin = (
@@ -293,14 +343,15 @@ describe("设置页 · 安装器页", () => {
 
         renderInstallerPage(tab);
         const row = createdSettings.find(
-            (setting) => setting.name === zhCN.settings.installer.selfSource
+            (setting) => setting.name === zhCN.settings.installer.selfUseGitee
         );
 
-        // 带首尾空白：从浏览器地址栏复制时经常带上，而它会让 parseRepoRef 解析失败
-        row!.texts[0]!.type("  https://gitee.com/sofqi/SyncHub  ");
+        // 默认开 → 拨到关（改用官方仓库）
+        expect(plugin.settings.installer.selfUpdateUseGitee).toBe(true);
+        row!.toggles[0]!.toggle(false);
         await Promise.resolve();
 
-        expect(plugin.settings.installer.selfUpdateSource).toBe("https://gitee.com/sofqi/SyncHub");
+        expect(plugin.settings.installer.selfUpdateUseGitee).toBe(false);
         expect(plugin.saved).toBe(1);
     });
 
@@ -316,6 +367,74 @@ describe("设置页 · 安装器页", () => {
         );
 
         expect(texts).toContain(zhCN.installer.selfNotChecked("0.9.0"));
+    });
+
+    /**
+     * 页内顺序（2026-10-06 用户要求）：
+     *
+     * 「将当前版本 0.1.9 · 尚未检查更新的小字提示放到最前面，然后展示 SyncHub 自身
+     * 更新卡片，然后是启用 gitee 镜像源更新 SyncHub 设置项，再然后是进入设置页时
+     * 自动检查设置项，……最后展示启动时检查更新、启动检查延迟、自动发现 gitee 镜像
+     * 设置项。」
+     */
+    it("顺序：自身卡片 → 镜像源开关 → 进入设置页检查 → 启动检查 → 延迟 → 镜像发现", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderInstallerPage(tab);
+
+        const names = createdSettings.map((setting) => setting.name);
+        const order = [
+            zhCN.settings.installer.selfHeading,
+            zhCN.settings.installer.selfUseGitee,
+            zhCN.settings.installer.autoCheckOnSettingsOpen,
+            zhCN.settings.installer.autoCheck,
+            zhCN.settings.installer.autoCheckDelay,
+            zhCN.settings.installer.mirrorDiscovery,
+        ];
+        const positions = order.map((name) => names.indexOf(name));
+
+        // 六个都在（-1 会让下面那条「严格递增」在某种情况下假通过）
+        expect(positions).not.toContain(-1);
+        // 严格递增 = 顺序就是上面写的那样
+        expect(positions).toEqual([...positions].sort((a, b) => a - b));
+        expect(new Set(positions).size).toBe(positions.length);
+    });
+
+    it("状态小字排在自身更新卡片**之前**（这一页的第一条内容）", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderInstallerPage(tab);
+
+        const container = (tab as unknown as { containerEl: { children: unknown[] } }).containerEl;
+        const children = container.children as Array<{ text?: string }>;
+        const statusIndex = children.findIndex(
+            (child) => child.text === zhCN.installer.selfNotChecked("0.9.0")
+        );
+        expect(statusIndex, "找不到状态小字那一行").toBeGreaterThanOrEqual(0);
+
+        const card = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.installer.selfHeading
+        );
+        const cardIndex = children.indexOf(card!.settingEl as unknown as { text?: string });
+        expect(cardIndex).toBeGreaterThan(statusIndex);
+    });
+
+    it("上一轮查到过更新时，状态小字直接用**落盘的结果**（不必等这一轮检查）", () => {
+        // 没有这一条的话，用户打开设置页看到「尚未检查更新」，而标签栏那个徽标
+        // 同时亮着 —— 两处自相矛盾。
+        const fake = createFakeApp();
+        const tab = createTab(fake, { installer: { selfUpdateAvailable: "0.9.9" } });
+
+        renderInstallerPage(tab);
+
+        const container = (tab as unknown as { containerEl: { children: unknown[] } }).containerEl;
+        const texts = (container.children as Array<{ text?: string }>).map(
+            (child) => child.text ?? ""
+        );
+
+        expect(texts).toContain(zhCN.installer.selfUpdateAvailable("0.9.0", "0.9.9"));
     });
 
     it("有待重启标记时，状态行显示的是「重启后生效」而不是版本号", () => {
@@ -344,6 +463,58 @@ describe("设置页 · 安装器页", () => {
 });
 
 /**
+ * 标签栏上的数字徽标。
+ *
+ * 「已追踪插件」那个（跟踪数 / 可更新数）是早就有的；2026-10-06 用户要求
+ * **「插件安装器」也来一个** —— 那个更新藏在第二页里，不点进去就不知道。
+ * 它读的是落盘的 `installer.selfUpdateAvailable`，所以重启之后徽标还在。
+ */
+describe("设置页 · 标签栏徽标", () => {
+    interface FakeNode {
+        text?: string;
+        cls?: string;
+        children: FakeNode[];
+    }
+
+    /** 画一次标签栏，返回那五个按钮（顺序即 `tabs` 数组）。 */
+    function renderTabBar(tab: ObsyncSettingsTab): FakeNode[] {
+        (tab as unknown as { renderTabs(): void }).renderTabs();
+        const container = (tab as unknown as { containerEl: { children: FakeNode[] } })
+            .containerEl;
+        const nav = container.children.find((child) => child.cls === "obsync-tabs");
+        expect(nav, "没画出标签栏").toBeDefined();
+        return nav!.children;
+    }
+
+    const countBadges = (node: FakeNode): FakeNode[] =>
+        node.children.filter((child) => child.cls?.includes("obsync-tab-count"));
+
+    it("SyncHub 自身有可用更新时，「插件安装器」标签上挂一个数字徽标", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake, { installer: { selfUpdateAvailable: "0.9.9" } });
+
+        const buttons = renderTabBar(tab);
+        // 顺序：插件与主题 / 插件安装器 / 仓库同步 / 图片同步 / 通用
+        const installerButton = buttons[1]!;
+        const badges = countBadges(installerButton);
+
+        expect(badges).toHaveLength(1);
+        expect(badges[0]!.text).toBe("1");
+        // 强调色那一条类名（与「已追踪插件」那个可更新徽标同一套样式）
+        expect(badges[0]!.cls).toContain("is-update");
+    });
+
+    it("没有可用更新时那个标签上什么都不挂", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        const buttons = renderTabBar(tab);
+
+        expect(countBadges(buttons[1]!)).toHaveLength(0);
+    });
+});
+
+/**
  * 设置页「通用」标签。
  *
  * 这一页此前**一个用例都没有**（上面那组是安装器页）。这里补上状态栏全宽那个开关：
@@ -358,7 +529,7 @@ describe("设置页 · 通用页", () => {
         (tab as unknown as { renderGeneral(): void }).renderGeneral();
     }
 
-    it("渲染不抛错，且三行都在（提示 / 调试日志 / 状态栏全宽）", () => {
+    it("渲染不抛错，且四行都在（提示 / 调试日志 / 状态栏全宽 / 功能区头像 / 头像平台）", () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
 
@@ -368,6 +539,48 @@ describe("设置页 · 通用页", () => {
         expect(names).toContain(zhCN.settings.general.showNotices);
         expect(names).toContain(zhCN.settings.general.debugLogging);
         expect(names).toContain(zhCN.settings.general.statusBarFullWidth);
+        expect(names).toContain(zhCN.settings.general.ribbonAvatar);
+        // 2026-10-06 从上面那一行里拆出来的「用哪个平台」。
+        expect(names).toContain(zhCN.settings.general.ribbonAvatarSource);
+    });
+
+    it("**没有页首标题**：第一条内容就是「显示操作结果提示」（2026-10-06）", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderGeneralPage(tab);
+
+        const names = createdSettings.map((setting) => setting.name);
+        expect(names[0]).toBe(zhCN.settings.general.showNotices);
+    });
+
+    /**
+     * 访问令牌 2026-10-06 从「插件安装器」页移到了这里（用户要求）。
+     *
+     * 两条都要验：**这一页有它**（否则用户按新位置找不到），以及**安装器页没有它了**
+     * （留着就是两处入口，改一处另一处看着像没生效）。
+     */
+    it("访问令牌一节在通用页（含平台标题与说明）", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderGeneralPage(tab);
+
+        const names = createdSettings.map((setting) => setting.name);
+        expect(names).toContain(zhCN.settings.token.heading);
+        expect(names).toContain(zhCN.settings.token.githubName);
+        expect(names).toContain(zhCN.settings.token.giteeName);
+    });
+
+    it("安装器页**不再**渲染访问令牌（避免两处入口）", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderInstallerPage(tab);
+
+        const names = createdSettings.map((setting) => setting.name);
+        expect(names).not.toContain(zhCN.settings.token.heading);
+        expect(names).not.toContain(zhCN.settings.token.githubName);
     });
 
     it("状态栏全宽默认是**开着**的（加开关不该悄悄改掉所有人的界面）", () => {
@@ -406,6 +619,162 @@ describe("设置页 · 通用页", () => {
 
         expect(plugin.settings.statusBarFullWidth).toBe(false);
         // 落盘 + 重算派生状态（后者才会给 body 加/摘那个类 —— 见 pluginBoot 的用例）
+        expect(plugin.saved).toBe(1);
+        expect(plugin.applied).toBe(1);
+    });
+
+    /**
+     * 功能区（左侧 ribbon）底部的 Gitee 头像。
+     *
+     * 2026-10-05 用户要求的那一条：**默认关闭**，打开后在功能区底部显示圆形头像。
+     * 「默认关」不是风格问题 —— 它是一个新增的视觉元素，而且展示的是用户的账号头像，
+     * 默认打开等于替所有人改了界面。
+     */
+    it("「功能区展示用户头像」**默认关着**，且描述指向下面那一项", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderGeneralPage(tab);
+
+        const row = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.general.ribbonAvatar
+        );
+        expect(row?.toggles[0]?.value).toBe(false);
+        expect(DEFAULT_SETTINGS.ribbonAvatar).toBe(false);
+        // 「没配令牌就没有头像」那句 2026-10-06 挪到了**平台那一行**（它讲的是
+        // 哪个平台的令牌）—— 这里只剩一句「用哪个平台由下面那一项决定」。
+        expect(row?.desc).toBe(zhCN.settings.general.ribbonAvatarDesc);
+    });
+
+    /**
+     * 头像用哪个平台（2026-10-06 用户要求拆出来的那一项）。
+     *
+     * 用户的原话：「将功能区展示用户头像中gitee部分拆分出来单独设置一个设置项，
+     * 默认开启，开启时使用gitee头像，关闭时使用GitHub头像」。
+     */
+    it("「使用 Gitee 头像」**默认开着**（沿用拆之前写死的 Gitee）", () => {
+        const tab = createTab(createFakeApp());
+
+        renderGeneralPage(tab);
+
+        const row = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.general.ribbonAvatarSource
+        );
+        expect(row?.toggles[0]?.value).toBe(true);
+        expect(DEFAULT_SETTINGS.ribbonAvatarUseGitee).toBe(true);
+        // 「没配对应令牌就没有头像」必须写在这一行 —— 不写的话，选了没配令牌的
+        // 那个平台的用户只会以为开关坏了。
+        expect(row?.desc).toBe(zhCN.settings.general.ribbonAvatarSourceDesc);
+        expect(row?.desc).toContain(zhCN.settings.token.heading);
+    });
+
+    it("总开关关着时那一行**置灰**（但值不改写：再打开时选择还在）", () => {
+        const tab = createTab(createFakeApp(), { ribbonAvatarUseGitee: false });
+
+        renderGeneralPage(tab);
+
+        const row = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.general.ribbonAvatarSource
+        );
+        expect(row?.toggles[0]?.disabled).toBe(true);
+        // 置灰不改值 —— 与「启动检查延迟」那一行同一条规矩。
+        expect(row?.toggles[0]?.value).toBe(false);
+    });
+
+    it("拨动那一行会写进设置（否则「拨了没反应」）", async () => {
+        const tab = createTab(createFakeApp(), { ribbonAvatar: true });
+        const plugin = (
+            tab as unknown as {
+                obsync: { settings: ReturnType<typeof normalizeSettings>; saved: number };
+            }
+        ).obsync;
+
+        renderGeneralPage(tab);
+        const row = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.general.ribbonAvatarSource
+        );
+
+        row!.toggles[0]!.toggle(false);
+        await Promise.resolve();
+
+        expect(plugin.settings.ribbonAvatarUseGitee).toBe(false);
+        expect(plugin.saved).toBe(1);
+    });
+
+    /**
+     * 「换头像」的入口（2026-10-05 用户要求）。
+     *
+     * 用户的原话：「在功能区展示头像设置项中，添加用户的 gitee 设置页链接，方便用户
+     * 更换头像」。头像**不可能在插件里改**（那是 Gitee 账号的资料），所以这一条的
+     * 全部意义就在那个链接上 —— 因此钉的是网址本身、`_blank`，以及它确实挂在
+     * **平台那一行**的描述里（挂到别处就等于没做）。2026-10-06 它随平台开关一起从
+     * 「功能区展示用户头像」那一行挪过来 —— 留在总开关那一行会与「用哪个平台」脱节、
+     * 指错地方。
+     */
+    function avatarSourceLink(): { href?: string; text?: string; target?: string } {
+        const row = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.general.ribbonAvatarSource
+        );
+        if (!row) throw new Error("通用页里没有「使用 Gitee 头像」那一行");
+
+        const children =
+            (row.descEl as unknown as {
+                children?: Array<{ tagName?: string; text?: string; attrs?: Record<string, string> }>;
+            }).children ?? [];
+        // 引导语与链接是同一个元素里的两个节点
+        expect(children[0]?.text).toBe(zhCN.settings.general.ribbonAvatarChangeLead);
+
+        const link = children.find((child) => child.tagName === "A");
+        if (!link) throw new Error("描述里没有链接");
+        return { href: link.attrs?.href, text: link.text, target: link.attrs?.target };
+    }
+
+    it("平台那一行的描述里带可点的个人资料页链接（默认 Gitee）", () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+
+        renderGeneralPage(tab);
+
+        const link = avatarSourceLink();
+        expect(link.href).toBe("https://gitee.com/profile");
+        expect(link.text).toBe(zhCN.settings.general.ribbonAvatarChangeLinkGitee);
+        // `_blank`：交给系统浏览器打开，而不是把设置弹窗导航走
+        expect(link.target).toBe("_blank");
+    });
+
+    it("选了 GitHub 时链接指向 GitHub 的资料页（跟着平台走）", () => {
+        const tab = createTab(createFakeApp(), { ribbonAvatarUseGitee: false });
+
+        renderGeneralPage(tab);
+
+        const link = avatarSourceLink();
+        expect(link.href).toBe("https://github.com/settings/profile");
+        expect(link.text).toBe(zhCN.settings.general.ribbonAvatarChangeLinkGithub);
+    });
+
+    it("拨开「功能区展示用户头像」会写进设置并重算派生状态（否则拨了没反应）", async () => {
+        const fake = createFakeApp();
+        const tab = createTab(fake);
+        const plugin = (
+            tab as unknown as {
+                obsync: {
+                    settings: ReturnType<typeof normalizeSettings>;
+                    saved: number;
+                    applied: number;
+                };
+            }
+        ).obsync;
+
+        renderGeneralPage(tab);
+        const row = createdSettings.find(
+            (setting) => setting.name === zhCN.settings.general.ribbonAvatar
+        );
+
+        row!.toggles[0]!.toggle(true);
+        await Promise.resolve();
+
+        expect(plugin.settings.ribbonAvatar).toBe(true);
+        // 落盘 + 重算派生状态：后者会调 `RibbonAvatar.apply()` 把头像画上去。
         expect(plugin.saved).toBe(1);
         expect(plugin.applied).toBe(1);
     });
@@ -472,20 +841,15 @@ describe("设置页 · 仓库同步页", () => {
         );
     }
 
-    it("渲染不抛错，且注意事项紧跟在「仓库同步」标题下面", () => {
+    it("渲染不抛错，且注意事项是这一页的第一条内容", () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
 
         expect(() => renderSyncPage(tab)).not.toThrow();
 
-        const heading = createdSettings.find(
-            (setting) => setting.name === zhCN.settings.sync.heading
-        );
-        const children = childrenOf(tab);
-        const headingIndex = children.indexOf(heading!.settingEl as unknown as ShimEl);
-
-        // 「标题正下方」＝ 紧邻的下一个节点。被挪到页面别处这条就红。
-        expect(children[headingIndex + 1]?.cls).toBe("obsync-sync-notes");
+        // 2026-10-06 起这一页**没有页首标题**（页签「仓库同步」已经是页名），
+        // 注意事项因此直接成为第一条内容。被挪到页面别处这条就红。
+        expect(childrenOf(tab)[0]?.cls).toBe("obsync-sync-notes");
     });
 
     it("注意事项里是 locale 里的那两条，标题也在", () => {
@@ -538,11 +902,15 @@ describe("设置页 · 仓库同步页", () => {
          *
          * **「连接测试」之前的每一项都必须是「测试能通过」的充要条件。**
          *
-         * 连接测试查的就是这两件事 —— git 能不能跑（git 可执行文件路径）、远端能不能连
-         * （远端地址）。别的一律排在它后面，免得用户为了「为什么连不上」先滑过一堆
-         * 与连接无关的设置。
+         * 连接测试查的就是这几件事 —— **这个库是不是 git 仓库**、git 能不能跑
+         * （git 可执行文件路径）、远端能不能连（远端地址）。别的一律排在它后面，
+         * 免得用户为了「为什么连不上」先滑过一堆与连接无关的设置。
+         *
+         * 第一项是 2026-10-05 补的（用户要求「把仓库初始化按钮也放入设置页，
+         * 保证仓库同步的基本设置能全部在设置页中就完成」）—— 在此之前新库的第一步
+         * 断在侧边栏面板里，而地址已经在这一页了。
          */
-        it("「连接测试」之前只有两个前提项：远端地址与 git 可执行文件路径", async () => {
+        it("「连接测试」之前有三个前提项：初始化仓库、远端地址与 git 可执行文件路径", async () => {
             const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
             renderSyncPage(tab);
             await flush();
@@ -550,10 +918,12 @@ describe("设置页 · 仓库同步页", () => {
             const before = createdSettings
                 .slice(0, createdSettings.findIndex((s) => s.name === zhCN.sync.diagnoseHeading))
                 .map((setting) => setting.name)
-                // 标题行、注意事项之后的区块标题不算设置项
-                .filter((name) => name && name !== zhCN.settings.sync.heading);
+                // 空名字的行是 `openGroup()` 建的分组容器，不算设置项
+                // （页首标题 2026-10-06 删了，所以不再需要把它滤掉）
+                .filter((name) => name);
 
             expect(before).toEqual([
+                zhCN.settings.sync.initRepo,
                 zhCN.sync.remoteLabel,
                 zhCN.settings.sync.gitPath,
             ]);
@@ -651,6 +1021,129 @@ describe("设置页 · 仓库同步页", () => {
             expect(indexOf(zhCN.sync.diagnoseHeading)).toBeLessThan(
                 indexOf(zhCN.settings.sync.gitignoreHeading)
             );
+        });
+
+        /**
+         * 「初始化 git 仓库」那一行（2026-10-05 用户要求）。
+         *
+         * 用户的原话：「把仓库同步中远端地址的设置项移到了设置页了，但是把仓库 git
+         * 初始化漏在了侧边栏面板里，请把仓库初始化按钮也放入设置页，保证仓库同步的
+         * 基本设置能全部在设置页中就完成」。
+         *
+         * 这一行要钉住两件事：**它真的去做那件事**（走插件那个公共方法 ——
+         * 与命令面板、侧边栏面板同一个），以及**它说的话与磁盘上的事实一致**
+         * （徽标由 `git.isRepo()` 填；问不出来时留空，而不是猜「还没有仓库」）。
+         */
+        describe("初始化 git 仓库", () => {
+            function initRow() {
+                const row = createdSettings.find(
+                    (setting) => setting.name === zhCN.settings.sync.initRepo
+                );
+                if (!row) throw new Error("找不到「初始化 git 仓库」那一行");
+                return row;
+            }
+
+            /** 名称后面那个状态徽标（替身把 `createSpan` 记成 nameEl 的一个子节点）。 */
+            function badgeText(): string | undefined {
+                const nameEl = initRow().nameEl as unknown as {
+                    children?: Array<{ text?: string }>;
+                };
+                return nameEl.children?.find((child) => child.text)?.text;
+            }
+
+            it("排在远端地址之前（三者里它最底层：没有仓库，地址填了也没用）", () => {
+                const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
+                renderSyncPage(tab);
+
+                const names = createdSettings.map((setting) => setting.name);
+                expect(names.indexOf(zhCN.settings.sync.initRepo)).toBeLessThan(
+                    names.indexOf(zhCN.sync.remoteLabel)
+                );
+            });
+
+            it("库还不是仓库：徽标说「还不是」，按钮可用", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.isRepo = false;
+                const tab = createTab(createFakeApp(), {}, sync);
+
+                renderSyncPage(tab);
+                await flush();
+
+                expect(badgeText()).toBe(zhCN.settings.sync.initNeeded);
+                expect(initRow().buttons[0]!.disabled).toBe(false);
+            });
+
+            it("已经是仓库：徽标说「已是」，按钮**置灰**（幂等也不该让人以为插件坏了）", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.isRepo = true;
+                const tab = createTab(createFakeApp(), {}, sync);
+
+                renderSyncPage(tab);
+                await flush();
+
+                expect(badgeText()).toBe(zhCN.settings.sync.initDone);
+                expect(initRow().buttons[0]!.disabled).toBe(true);
+            });
+
+            it("点按钮走的是插件那个公共方法，完事重新读一次状态", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.isRepo = false;
+                const tab = createTab(createFakeApp(), {}, sync);
+                const plugin = (tab as unknown as { obsync: { initCalls: number } }).obsync;
+
+                renderSyncPage(tab);
+                await flush();
+
+                // 初始化成功之后磁盘上就有仓库了 —— 替身在这里翻转，模拟那一步
+                sync.isRepo = true;
+                await initRow().buttons[0]!.click();
+                await flush();
+
+                expect(plugin.initCalls).toBe(1);
+                expect(badgeText()).toBe(zhCN.settings.sync.initDone);
+                expect(initRow().buttons[0]!.disabled).toBe(true);
+            });
+
+            /**
+             * 只问一次（2026-10-06 用户要求）。
+             *
+             * 用户的原话：「监测过已经是 git 仓库的话，每次点进仓库同步设置页就不用再
+             * 主动检测了，直接将标识固定就行，等同步时再验证即可」。原来每次重绘都起
+             * 一个 `git is-repo` 子进程，结果回来才填徽标 —— 于是每次切进这一页都能
+             * 看到徽标「弹」出来（还会把下面的说明文字挤下去几像素）。
+             */
+            it("第二次进这一页**不再问 git**，且徽标是**同步**就位的", async () => {
+                const sync = createSyncStub("# 规则\n");
+                const tab = createTab(createFakeApp(), {}, sync);
+
+                renderSyncPage(tab);
+                await flush();
+                expect(sync.isRepoCalls).toBe(1);
+
+                // 等价于「切走再切回来」：同一个页签实例再画一次。
+                renderSyncPage(tab);
+
+                expect(sync.isRepoCalls).toBe(1);
+                // **不等异步** —— 徽标此刻就该在。没有这一条，用户看到的还是「弹出来」。
+                expect(badgeText()).toBe(zhCN.settings.sync.initDone);
+            });
+
+            it("问不出来时**不记**：徽标留空、按钮仍可用（真不行时会有具体报错）", async () => {
+                const sync = createSyncStub("# 规则\n");
+                sync.isRepoError = new Error("git 不在 PATH");
+                const tab = createTab(createFakeApp(), {}, sync);
+
+                renderSyncPage(tab);
+                await flush();
+
+                expect(badgeText()).toBeUndefined();
+                expect(initRow().buttons[0]!.disabled).toBe(false);
+
+                // 「问不出来」不是一种结果，所以不缓存 —— 下一次还要再问。
+                renderSyncPage(tab);
+                await flush();
+                expect(sync.isRepoCalls).toBe(2);
+            });
         });
 
         /**
@@ -1266,30 +1759,24 @@ describe("设置页 · 仓库同步页", () => {
         });
 
         /**
-         * 宽度必须**内联**给，不能只留在 CSS 类里。
+         * 宽度与 `box-sizing` 走 CSS 类 `.obsync-gitignore`，**不内联**。
          *
-         * 这一格回归过两次（09-24、09-25 各一次），两次形态一模一样：只要宽度只写在
-         * `styles.css` 里，用户那边就会出现「改了 CSS、框还是窄的」—— 插件样式表
-         * **不保证**在 Hot Reload 重载时被重新读入，而 `.hotreload` 标记只保证
-         * 「插件会被重载」，不保证那一份 CSS 被重新注入。
-         *
-         * （这里曾经钉的是反面 ——「宽度来自 CSS 类、不写内联样式」，理由是审核会拦。
-         * 那条测试挡住的正是唯一的修复路径，所以它被换成了这一条。）
-         *
-         * 审核的 `obsidianmd/no-static-styles-assignment` 拦的是**字面量**赋值；
-         * `const w = "100%"; el.style.width = w;` 是规则自带的 valid 形态。
-         * 所以这里钉的是「宽度写在 style 上」，而不是「写法必须是字面量」。
+         * 这里曾经钉的是反面 ——「宽度必须内联给，否则插件样式表不重读会让它缩回右侧
+         * 那几百像素」（一次开发期的样式表缓存问题）。但那正是审核规则
+         * `obsidianmd/no-static-styles-assignment` 要拦的事：静态宽度本来就该待在类里；
+         * 规则只拦**字面量**赋值，用一个 `const` 就能绕过 —— 绕过的是形式，不是判据。
+         * 所以现在钉「元素上不写内联样式」，宽度留给类。
+         * （开发时改了 CSS 不生效，用完整重载 Obsidian 解决，而不是写进元素。）
          */
-        it("宽度**内联**给足（不能只依赖样式表）", () => {
+        it("宽度与 box-sizing 交给 CSS 类，元素上不写内联样式", () => {
             const tab = createTab(createFakeApp(), {}, createSyncStub("# 规则\n"));
 
             renderSyncPage(tab);
 
             const area = gitignoreArea(tab);
             expect(area.cls).toBe("obsync-gitignore");
-            expect(area.style?.["width"]).toBe("100%");
-            // `width: 100%` 再加内边距与边框，content-box 下会超出容器 → 横向滚动条。
-            expect(area.style?.["boxSizing"]).toBe("border-box");
+            expect(area.style?.["width"]).toBeUndefined();
+            expect(area.style?.["boxSizing"]).toBeUndefined();
         });
 
         it("文件已经存在时：内容显示在框里，徽标是「已保存」", async () => {
@@ -1899,17 +2386,14 @@ describe("设置页 · 图片同步页", () => {
         return (tab as unknown as { obsync: { saved: number } }).obsync.saved;
     }
 
-    it("渲染不抛错，且注意事项紧跟在「图片同步」标题下面", () => {
+    it("渲染不抛错，且注意事项是这一页的第一条内容", () => {
         const tab = createTab(createFakeApp());
 
         expect(() => renderImagesPage(tab)).not.toThrow();
 
-        const heading = row(zhCN.settings.images.heading);
-        const children = childrenOf(tab);
-        const headingIndex = children.indexOf(heading!.settingEl as unknown as ShimEl);
-
-        // 「标题正下方」＝ 紧邻的下一个节点。被挪到页面别处这条就红。
-        expect(children[headingIndex + 1]?.cls).toBe("obsync-image-notes");
+        // 2026-10-06 起这一页**没有页首标题**（页签「图片同步」已经是页名），
+        // 注意事项因此直接成为第一条内容。被挪到页面别处这条就红。
+        expect(childrenOf(tab)[0]?.cls).toBe("obsync-image-notes");
     });
 
     it("注意事项逐条来自 locale（漏一条就等于没写）", () => {
@@ -2132,26 +2616,82 @@ describe("设置页 · 图片同步页", () => {
             );
         });
 
-        it("周期紧跟在总开关下面，且不在「冲突与删除」那一节里", () => {
+        it("变动同步与周期紧跟在总开关下面，且不在「冲突与删除」那一节里", () => {
             // 2026-10-02 挪的：原先「自动同步间隔」排在「冲突与删除」那一节的**末尾**，
             // 与它实际管的事（多久自动跑一轮）毫无关系 —— 而用户正是从那里读出了
             // 「设为 0 = 图片同步关着」这个误会。
+            //
+            // 2026-10-06 在总开关与周期之间插进了「变动后自动同步」：它是本机改动的
+            // 主力（周期那条现在只管把别处的变化拉回来），所以排在周期上面。
             const tab = createTab(createFakeApp());
             renderImagesPage(tab);
 
             const basics = rowGroup(tab, zhCN.settings.images.enabled);
             expect(basics).toBeDefined();
+            expect(rowGroup(tab, zhCN.settings.images.changeSync)).toBe(basics);
             expect(rowGroup(tab, zhCN.settings.images.autoSync)).toBe(basics);
-            // 紧跟在**开关之后**、受管文件夹之前
-            expect(createdSettings.indexOf(row(zhCN.settings.images.autoSync)!)).toBe(
-                createdSettings.indexOf(row(zhCN.settings.images.enabled)!) + 1
+
+            const index = (name: string): number => createdSettings.indexOf(row(name)!);
+            expect(index(zhCN.settings.images.changeSync)).toBe(
+                index(zhCN.settings.images.enabled) + 1
             );
-            expect(createdSettings.indexOf(row(zhCN.settings.images.autoSync)!)).toBeLessThan(
-                createdSettings.indexOf(row(zhCN.settings.images.folders)!)
+            expect(index(zhCN.settings.images.autoSync)).toBe(
+                index(zhCN.settings.images.changeSync) + 1
+            );
+            expect(index(zhCN.settings.images.autoSync)).toBeLessThan(
+                index(zhCN.settings.images.folders)
             );
             // 「冲突与删除」那一节里只剩两个策略下拉
             expect(rowGroup(tab, zhCN.settings.images.conflictPolicy)).not.toBe(basics);
             expect(rowGroup(tab, zhCN.settings.images.deleteRemotePolicy)).not.toBe(basics);
+        });
+
+        /**
+         * 「变动后自动同步」那一行：`[延时] 秒 [开关]`（2026-10-06 加）。
+         *
+         * 与下面「按周期同步」同一形状。默认**开**、静默 30 秒 ——
+         * 理由见 `ImageSyncSettings.imageChangeSyncEnabled`（它与「每隔 N 分钟
+         * 无条件跑一轮」不是一类东西）。
+         */
+        it("变动同步：框在开关前面、单位在中间；范围 5–600，默认开 / 30 秒", () => {
+            const tab = createTab(createFakeApp());
+            renderImagesPage(tab);
+
+            const row_ = row(zhCN.settings.images.changeSync);
+            expect(row_).toBeDefined();
+            expect(row_!.texts[0]?.value).toBe("30");
+            expect(row_!.texts[0]?.inputEl.min).toBe("5");
+            expect(row_!.texts[0]?.inputEl.max).toBe("600");
+            expect(row_!.toggles[0]?.value).toBe(true);
+            expect(DEFAULT_SETTINGS.images.imageChangeSyncEnabled).toBe(true);
+            expect(DEFAULT_SETTINGS.images.imageChangeDelaySeconds).toBe(30);
+            // 顺序：先框、后开关
+            expect(row_!.controls.indexOf(row_!.texts[0]!)).toBeLessThan(
+                row_!.controls.indexOf(row_!.toggles[0]!)
+            );
+            // 单位「秒」跟在框后面
+            const unitSpans = Array.from(
+                row_!.controlEl.children as unknown as Array<{ text?: string }>
+            ).map((child) => child.text);
+            expect(unitSpans).toContain(zhCN.settings.images.secondsUnit);
+        });
+
+        it("拨动变动同步会写进设置（否则拨了没反应）", async () => {
+            const tab = createTab(createFakeApp(), {
+                images: { imageChangeSyncEnabled: true },
+            });
+            const plugin = (
+                tab as unknown as {
+                    obsync: { settings: ReturnType<typeof normalizeSettings>; saved: number };
+                }
+            ).obsync;
+
+            renderImagesPage(tab);
+            row(zhCN.settings.images.changeSync)!.toggles[0]!.toggle(false);
+            await Promise.resolve();
+
+            expect(plugin.settings.images.imageChangeSyncEnabled).toBe(false);
+            expect(plugin.saved).toBe(1);
         });
 
         /**
@@ -2278,17 +2818,30 @@ describe("设置页 · 图片同步页", () => {
             expect(row("自动同步图片")).toBeDefined();
             expect(row("启用图片同步")).toBeUndefined();
             // 两行描述都要把「关掉周期 ≠ 关掉这一页的自动动作」说出来
-            expect(zhCN.settings.images.autoSyncDesc).toContain("上面的开关开着时，启动仍会同步一轮");
+            // （2026-10-06 起「周期」那一行上面的开关变成了两个，所以文案写的是
+            // 「上面的总开关」—— 说「上面的开关」会指代不清）。
+            expect(zhCN.settings.images.autoSyncDesc).toContain("上面的总开关开着时，启动仍会同步一轮");
             expect(zhCN.settings.images.enabledDesc).toContain("启动时跑一轮");
         });
 
-        it("描述不许把「改名 / 删除当场处理」写成「有变化就同步」", () => {
-            // 用户第二次追问：「并在你改名或删除图片时同步云端那一份，不就是有变化就同步
-            // 的意思吗」—— 不是：改名 / 删除是**当场处理那两个对象**（等下一轮会出重复
-            // 图片、或把刚删的图补回来），而**新加或修改的图片不会立刻上传**。
-            // 少了后面那一句，这段话就会被读成通用的「有变化就同步」。
-            expect(zhCN.settings.images.autoSyncDesc).toContain("不会立刻上传");
-            expect(zhCN.settings.images.autoSyncDesc).toContain("只有改名与删除是当场处理的");
+        /**
+         * 「按周期同步」那一行的描述在 2026-10-06 **被重写过**，这条用例也跟着换了前提。
+         *
+         * 原来守的是「别把『改名 / 删除当场处理』写成『有变化就同步』」——
+         * 那时新加或修改的图片确实不会立刻上传。加了「变动后自动同步」之后，
+         * 那句话不再成立（本机改动由那一项负责），于是这里改守**新的分工**：
+         * 周期那条必须说清它管的是**别处**的变化，本机的交给上面那一项。
+         */
+        it("周期那一行的描述说清它只管「别处」的变化", () => {
+            // 用户的原话是「并在你改名或删除图片时同步云端那一份，不就是有变化就同步
+            // 的意思吗」—— 当年要靠描述纠正这个误读；现在分工更清楚了：
+            // 本机改动归「变动后自动同步」，周期只管把其他设备的改动拉回来。
+            expect(zhCN.settings.images.autoSyncDesc).toContain("其他设备");
+            expect(zhCN.settings.images.autoSyncDesc).toContain("本机的改动由上面那一项负责");
+            // 反过来，「变动后自动同步」那一行必须说清它只管本机
+            expect(zhCN.settings.images.changeSyncDesc).toContain("本机");
+            expect(zhCN.settings.images.changeSyncDesc).toContain("按周期同步");
+            // 总开关的描述仍然要说「改名 / 删除是当场处理的」
             expect(zhCN.settings.images.enabledDesc).toContain("当场跟着处理");
         });
 
@@ -2547,13 +3100,14 @@ describe("设置页 · 图片同步页", () => {
      * 「按周期同步」= 要不要按周期跑。第二个是拆出来的，因为周期那个数字不再
      * 兼职表达「关闭」（下限也提到了 5）。
      */
-    it("这一页只有两个开关：自动同步图片、按周期同步（删除时的云端处置是下拉）", () => {
+    it("这一页只有三个开关：自动同步图片、变动后自动同步、按周期同步（删除时的云端处置是下拉）", () => {
         const tab = createTab(createFakeApp());
         renderImagesPage(tab);
 
         const toggleRows = createdSettings.filter((setting) => setting.toggles.length > 0);
         expect(toggleRows.map((setting) => setting.name)).toEqual([
             zhCN.settings.images.enabled,
+            zhCN.settings.images.changeSync,
             zhCN.settings.images.autoSync,
         ]);
     });

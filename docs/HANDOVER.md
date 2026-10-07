@@ -97,7 +97,7 @@
 | **更新检查比安装路径「少做了两件事」→ 永远报「已是最新」** | 真 bug：`checkOne`（检查）本应是 `resolveSource`（安装）的镜像，却有两处退化。① **不带令牌** —— 私有仓库在未鉴权时两个平台都返回 **404**（刻意不泄漏「仓库是否存在」），检查把它读成「这个仓库没有 release」；② **不回退** —— `/releases/latest` 只给正式版，「只发预发布版」的仓库返回 404，而安装路径在这一级会往下看预发布版。两处症状相同：**装得上、却永远收不到更新提示**。附带代价：不带令牌走的是**匿名配额**（Gitee 极低，项目为此专门做过节流），等于自己制造那些 403 | `checkOne` 带上 `service.tokenForHost(plugin.host)`（新增带文档的公开出口），并在 404 后对齐 `resolveSource` 的第二级（`listReleases` 取首个）；`updateChecker.test.ts` +6，含两条反向守卫（令牌不串平台、没配令牌不造鉴权头）与一条「回退只在 404 后发生」 |
 | **「有哪些平台」有 4 份副本，其中 1 份决定用户数据的生死** | 真缺口（漂移风险）：`SUPPORTED_HOSTS` 声明自己是平台列表，却**没有任何调用方**；同一个事实另写了三份 —— `settings` 的 `VALID_HOSTS`（持久化校验）、`secretStore.snapshot` 的循环、设置页的两个 `renderTokenField("github"/"gitee")`。第一份的后果不是「不好看」：**漏掉某个平台时，用户在那个平台上装的插件会在下次加载 `data.json` 时被当成非法条目无声丢弃**（不报错，列表里就没了）。而 `hostRegistry` 自己的注释写着「将来加 GitLab / Bitbucket 只需要在这里注册一项」—— 那句话不成立 | 平台列表移入 `host/types.ts` 并让 `HostKind` 由它**推导**（加平台 = 改那一行），三个使用点全部改为派生；`hostRegistry` 的注释改成「加平台要动哪些地方」的完整清单；新增 `tests/host/hostRegistry.test.ts`（5 条，让四个使用点互相印证而非各列一份平台名） |
 | **重复实现里躺着的那一份是错的** | 真缺口：`InstallerService.checkForUpdate` 是「有没有更新」的**第二份实现**，无任何调用方，且判据用的是 `requestedVersion` —— 跟踪最新版的插件那个值是字符串 `"latest"`，于是它几乎恒返回 release。谁把它当成现成的工具接上，谁就得到一个**恒报「有更新」**的功能。同类还有 `isManifestCompatible`（兼容性判断的第二份），它声明的存在理由「注入 `requireApiVersion` 便于测试」已被 obsidian stub 的 `__setApiVersion` 取代 | 两处删除（其余死导出清点见第七节「死代码清点」） |
-| **「启用笔记同步」是个死开关** | 真 bug（UX）：`sync.enabled` 有开关、`data.json` 里存着值、README 也列着它，而 `src` 里**没有一处读它**。于是用户关掉同步之后，自动提交照样每 N 分钟把笔记**推上远端** —— 他做了 UI 提供给他的那个动作，却没有任何效果。类型和测试都抓不到：类型上 `true` 也是 `boolean`；测试里 `Automatics` 直接注入设置对象、看不见装配层那一行（实测把 `enabled: deps.getSettings().sync.enabled` 改成 `enabled: true`，全量测试**全绿**） | `sync.enabled` 注入 `Automatics`，关掉时一个定时器都不起（边界照 `installer.enabled`：只管后台自动动作，不拦命令面板里的显式命令）；新增 `scripts/checks.mjs` 第 6 项「设置项无人读取」补上这个盲区 |
+| **「启用笔记同步」是个死开关** | 真 bug（UX）：`sync.enabled` 有开关、`data.json` 里存着值、README 也列着它，而 `src` 里**没有一处读它**。于是用户关掉同步之后，自动提交照样每 N 分钟把笔记**推上远端** —— 他做了 UI 提供给他的那个动作，却没有任何效果。类型和测试都抓不到：类型上 `true` 也是 `boolean`；测试里 `Automatics` 直接注入设置对象、看不见装配层那一行（实测把 `enabled: deps.getSettings().sync.enabled` 改成 `enabled: true`，全量测试**全绿**） | `sync.enabled` 注入 `Automatics`，关掉时一个定时器都不起（边界照 `installer.autoCheckOnStartup`：只管后台自动动作，不拦命令面板里的显式命令）；新增 `scripts/checks.mjs` 第 6 项「设置项无人读取」补上这个盲区 |
 | **「自动提交间隔」少写了「并同步」** | 文案与实现不符：那一项到点执行的是**完整链路**「提交 → 拉取 → 推送」（与「立即同步」同一条），而界面只写「自动提交间隔」+「设为 0 表示关闭」。用户读到的意思于是变成「只提交」，会以为把「自动推送 / 自动拉取」设为 0 就能拦住网络动作 —— 拦不住。参考项目的原名是 `Auto commit-and-sync interval`，正是这三个字 + 解释 | 改成「自动提交**并同步**间隔」，说明文案写明整条链路与「即使推送/拉取间隔为 0 也会随它发生」；`Automatics` 里那条 `commit` 分支补注释，并用测试钉住「调的是 `sync()` 而不是 `commitAll()`」。（**2026-10-02 更进一步**：三个间隔合成一个「定时同步」周期，那两段防误解的文案连同两个附加间隔一起删了 —— 见第三节五「定时同步：一个周期 + 一个开关」） |
 | 设置页术语混用 | 「已追**踪**插件」（标签）vs「已跟**踪**的插件」（同页标题） | 统一为「跟踪」 |
 | **「更新完还报可更新」，点了还是同一个版本** | 真 bug（同一个根因的第二张脸）：记录里的 `installedVersion` 被抹成空串，而 `isNewerVersion("1.4.2", "")` 两边有一边解析不了，退化成「字符串不同即视为有更新」→ **永远报可更新**；点更新装回 1.4.2、设置页一开又被抹掉，成了循环。抹掉的来路是上一行那个「记录与磁盘对账」功能自己：它用**插件**的 manifest 解析器去读**主题**的 manifest（主题没有 `id`）→ 抛错 → 当成「没装」→ 写空 | 主题改用 `readThemeManifestVersion`（主题解析器）；并且**读不到就不动记录** —— 只有「目录真的不存在」才记成未安装（那样更新检查会给出可更新，是有用的）。另：`checkTheme`/`checkPlugin` 曾试过「本地版本未知就不报可更新」，但那会关掉「绑定来的无版本主题也能更新到有版本那份」这条既有能力，已撤回 —— 该修的是记录，不是判据。见 `tests/features/installedVersionReconcile.test.ts` |
@@ -200,7 +200,7 @@ pnpm verify:head # 在 **HEAD**（而不是工作区）上跑测试 —— 提�
 
 | 规则 | 它到底要什么 |
 | --- | --- |
-| `no-static-styles-assignment`（**error**） | 不许 `el.style.x = "字面量"`。**`setCssProps({ width: "100%" })` 同样违规** —— 那条规则只放行 `--*` 自定义属性。静态样式必须待在 CSS 类里，只有动态值才该走自定义属性 |
+| `no-static-styles-assignment`（**error**） | 不许 `el.style.x = "字面量"`、`el.style.setProperty("x", "字面量")`、`el.setAttribute("style", "…")`，以及 `setCssProps` / `setCssStyles` 里**带引号且不以 `--` 开头**的键。它**只认字面量**：`const w = "100%"; el.style.width = w` 与模板字符串（`translateX(${x}px)`）都不报 —— 但那是规则的**形式边界**，不是「可以这么写」：静态样式本来就该待在类里（2026-10-08 把 `.obsync-gitignore` 的宽度从这种写法收回了 CSS 类）。只有**动态值**才该走 `--*` 自定义属性 |
 | `no-nodejs-modules` | 不许**静态** import Node 内置模块；它认可的写法是「`require` / 动态 `import()` 落在 `Platform.isDesktop` 守卫内」。`commitMessage.ts` 的 `node:os` 就是这么改的 |
 | `no-console`（以 `rule-custom-message` 报出） | 只放行 `console.debug` / `warn` / `error` —— `console.info` 会被报成「Avoid unnecessary logging to console」。所以 `logger.info()` 落到 `console.debug` |
 | `prefer-window-timers` | 定时器写 `window.setTimeout` / `window.clearTimeout`，否则弹出窗口（popout window）下行为不一致 |
@@ -276,10 +276,16 @@ commit 是本地历史、随时能 `git reset`，**push 才是「别人能看到
 | 标签 | 内容 |
 | --- | --- |
 | 已追踪插件 | 三个主操作按钮（添加插件仓库 / 绑定已有插件 / 检查全部更新）+ 跟踪列表 |
-| 插件安装器 | 启用开关、更新检查时机、Gitee 镜像发现、**访问令牌**（GitHub / Gitee）、SyncHub 自身更新 |
-| 仓库同步 | **注意事项**（标题正下方，2026-09-19 加）、**操作**（**打开仓库同步面板**，2026-10-02 加）、**连接测试**（同日提到前面）、**定时同步**（周期 + 开关同一行 + **距下次同步的倒计时**，2026-10-02 由「同步开关 + 三个间隔」合并，策略为「重置」时两个控件都禁用）、提交信息模板、整合策略、**git 可执行文件路径**（2026-10-02 起整行 + 「浏览…」 + 一行「去哪儿装 git」的下载链接）、**`.gitignore` 编辑框**（2026-09-24 加） |
+| 插件安装器 | **SyncHub 自身**（版本状态小字 → 检查更新 / 更新按钮 → 「启用 Gitee 镜像源」开关，2026-10-06 按用户要求整块提到最前）、**进入设置页时自动检查**（开着时同时查跟踪列表与 SyncHub 自身）、**启动时检查更新** + 延迟、**自动发现 Gitee 镜像**。标签上有**数字徽标**（`installer.selfUpdateAvailable`，SyncHub 自身有可用更新时显示） |
+| 仓库同步 | **注意事项**（**页面最上方**，2026-09-19 加；2026-10-06 删掉页首标题后它直接成为第一条内容）、**操作**（**打开仓库同步面板**，2026-10-02 加）、**连接测试**（同日提到前面）、**定时同步**（周期 + 开关同一行 + **距下次同步的倒计时**，2026-10-02 由「同步开关 + 三个间隔」合并，策略为「重置」时两个控件都禁用）、提交信息模板、整合策略、**git 可执行文件路径**（2026-10-02 起整行 + 「浏览…」 + 一行「去哪儿装 git」的下载链接）、**`.gitignore` 编辑框**（2026-09-24 加） |
 | 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步）**排在最前面**（2026-10-02）、**自动同步图片**（开关，2026-10-02 由「启用图片同步」改名）、**按周期同步**（周期 + 开关，同日从「冲突与删除」末尾挪来并把开关拆出来）、**需要图片同步的文件夹**（2026-10-02 由「受管的图片文件夹」改名；同日从「一个多行文本框」改成「添加输入框 + 候选下拉 + 已加入列表」）、R2 连接（含密钥）、冲突与删除策略、压缩默认值 |
-| 通用 | 提示开关、调试日志、**状态栏占满整屏宽**（2026-09-19 加）—— 界面语言那个下拉 2026-10-01 删了：一律跟随 Obsidian（见 `core/i18n/index.ts`） |
+| 通用 | 提示开关、调试日志、**状态栏占满整屏宽**（2026-09-19 加）、**功能区展示用户头像**（2026-10-05 加）、**使用 Gitee 头像**（2026-10-06 从上一项拆出来：用哪个平台的头像；总开关关着时置灰，描述里带「去换头像」的链接且跟着平台走）、**访问令牌**（GitHub / Gitee，2026-10-06 从「插件安装器」页移来）—— 界面语言那个下拉 2026-10-01 删了：一律跟随 Obsidian（见 `core/i18n/index.ts`） |
+
+**五个页签都**没有页首标题（2026-10-06 删）：页签名就是页名，再顶一行同名标题是重复
+信息（「已追踪插件」那一页的标题与卡片更早在 2026-10-05 就去掉了）。删的是
+`settings.{installer,sync,images,general}.heading` 这四个键；**节内**的小标题留着 ——
+`settings.token.heading`（「访问令牌」）与 `openGroup(title)` 建的区块标题（R2 连接、
+连接测试…）都还在。
 
 选中项存在内存（`activeTab`），页内重绘或切换标签后不回弹到第一页；
 切标签不会重复触发「进入设置页自动检查」。标签文案在 `settings.tabs.*`。
@@ -515,7 +521,10 @@ vault 事件只有 `delete`（问一句 / 删云端）与 `rename`（云端换�
    原来它是这一行的 `Setting` 控件，被 `.setting-item-control` 挤在右侧几百像素里 ——
    描述占四行、框里只看得见一个 `.`（用户附的截图正是那样）。
    做法与 `.gitignore` 那一节完全一致：名称/描述那行**不带控件**，框改成挂在
-   `.obsync-block-wrap` 里的块级 `textarea`，**宽度与 `box-sizing` 内联给**。
+   `.obsync-block-wrap` 里的块级 `textarea`，**宽度与 `box-sizing` 写在类里**
+   （2026-10-08 起 `.obsync-gitignore` 就是这样 —— 曾经为了「活过样式表缓存」
+   内联成 `el.style.width = FULL_WIDTH`，那是踩 `no-static-styles-assignment`
+   的形式边界，已收回类里）。
    那层壳的类名从 `obsync-gitignore-wrap` 改成通用的 `obsync-block-wrap`（两处共用，
    规则只有 `display: block`）；框自己的外观在 `.obsync-folders`（不折行、界面字体 ——
    这里没有需要对齐的通配符语法，与 `.gitignore` 的等宽不同）。
@@ -1401,6 +1410,10 @@ src/
   2. 打开 SyncHub 设置页（`autoCheckOnSettingsOpen`，默认开启，
      由 `display`/`hide` 区分「打开页签」与「页内重绘」，并有 10 分钟节流
      `SETTINGS_OPEN_CHECK_INTERVAL_MS` + 持久化的 `lastUpdateCheckAt`）。
+     2026-10-06 起这一条**两件事一起做**：跟踪列表的更新 + **SyncHub 自身**
+     （用户要求「进入设置页检查更新的同时也检查 SyncHub 自身」）。自己那一份
+     **不受「有没有跟踪项」影响** —— `trackedCount` 因此从
+     `shouldCheckOnSettingsOpen` 的入参里去掉了，空列表时跟踪那一轮自己返回。
   执行更新永远手动：命令「更新全部插件」、行上的 ⬇ / ↻ 按钮。
   冻结项（`frozen`）**不参与任何检查**，因此也不会进入「更新全部」的集合
   （文案已修正为「不参与更新检查」——产品里没有自动更新）。
@@ -1409,6 +1422,11 @@ src/
   安装/更新成功后由 `recordInstalled` 清除，normalizeSettings 会剪掉
   已不在跟踪列表的条目。检查失败保留旧记录（过期信息好过没有），
   但 `lastUpdateCheckAt` 照常刷新（限流期间不要反复重试）。
+  **自身那一份同构**：结果存在 `installer.selfUpdateAvailable`（版本号字符串，
+  空串 = 没有），由 `checkSelf` 里的 `recordSelfUpdateCheck` 落盘，
+  「插件安装器」标签上的数字徽标与那一行的状态小字都读它；`updateSelf` 成功后清掉。
+  为什么要落盘而不是只留内存：标签栏在页面内容**之前**画、重启之后也要还在 ——
+  只放内存的话徽标永远慢一拍（与 `availableUpdates` 同一条理由）。
 - **镜像发现**（`mirrorFinder.ts`）：用两边 manifest 的 `id` 二次校验，
   同名不同项目直接放弃 —— 装错比找不到严重。默认关闭
   （实测抽样 40 个社区插件命中 0 个），且全程走 raw 通道零 API 配额。
@@ -1571,26 +1589,33 @@ src/
   也走 disable → enable，但那是官方支持的路径。本节的入口服务的是「没上架 /
   开发期」这段。
 
-### 更新来源可以指定（2026-09-20；默认改镜像 + 回退官方 2026-10-01）
+### 更新来源是个开关（2026-10-06 改；默认镜像 + 回退官方 2026-10-01）
 
-`settings.installer.selfUpdateSource`（设置页「SyncHub 自身」一节的输入框）：
+`settings.installer.selfUpdateUseGitee`（设置页「SyncHub 自身」一节的开关
+「启用 Gitee 镜像源更新 SyncHub」）：
 
-- **空串 / 全空白 → `SELF_MIRROR`（Gitee 镜像 `sofqi/SyncHub`）** —— 2026-10-01 起
-  这就是**默认**（`DEFAULT_SELF_SOURCE`），出厂设置里存的就是那个完整地址。
-  换成镜像的理由：`github.com` 在目标网络里是时段性阻断的，默认走官方会让
+- **开（默认）→ `SELF_MIRROR`（Gitee 镜像 `sofqi/SyncHub`）**；**关 → `SELF_REPO`
+  （官方 `github/Dyse-Sofqi/SyncHub`）**。二选一由 `resolveSelfRepo(useGitee)` 定，
+  检查与更新**都**用它 —— 两边共用 `InstallerService.selfRepo()`（`checkSelf` 的
+  默认参数就是它），否则会出现「检查说没有更新、更新却从另一个仓库拉」这种自相矛盾。
+- 默认走镜像的理由：`github.com` 在目标网络里是时段性阻断的，默认走官方会让
   「检查更新」这个动作本身就经常失败；失败的样子只是「一直报错」，用户得自己去翻
-  设置页才知道有个来源可以填。
-- **填了 → `resolveSelfRepo()` 解析成 `RepoRef`**，检查与更新**都**用它 ——
-  两边共用 `InstallerService.selfRepo()`（`checkSelf` 的默认参数就是它），
-  否则会出现「检查说没有更新、更新却从另一个仓库拉」这种自相矛盾。
-  填 `https://github.com/Dyse-Sofqi/SyncHub` 就回到官方（此时只有一次尝试）。
-- **老 `data.json` 的迁移不需要版本号**：那个字段当年默认是空串（= 官方），
-  而新规则「空 = 用默认」由 `normalizeSettings` 每次读时收敛 —— 于是老用户
-  不动任何东西也跟着走镜像，下次保存时默认地址落盘。
+  设置页才知道有个开关可以关。
+- **为什么从「填地址」改成开关**（2026-10-06 用户要求「自更新来源用开关的形式选择」）：
+  原先的自由文本框要用户先读懂一串规则才敢动（空串算默认、`owner/repo` 简写按
+  GitHub 解释、非法地址抛错）。两个固定地址之间切换本来就是二选一。代价是**不再支持
+  自定义来源** —— 那个场景本来也不成立（写盘前校验远端 manifest 的 `id` 必须是
+  `ob-sync`，fork 改了 id 就会被拒）。
+- **老 `data.json` 的迁移**（`migrateV8ToV9`，v8 → v9）：老字段
+  `selfUpdateSource: string` 由 `selfUpdateUsesGitee()` 折算成布尔 —— 空串 / 全空白 /
+  非字符串 / 解析不出来的值 → `true`（用镜像）；能解析出 host 的按 `host === "gitee"`
+  判定，简写沿用当年的默认平台 GitHub。折算规则必须与**当年那套解析**一致，否则老用户
+  的来源会在升级时被悄悄换掉。
 
 #### 回退顺序：先镜像、失败再试官方（2026-10-01，用户要求）
 
-`selfRepoAttempts(configured)` 给出尝试顺序：配置的来源 → `SELF_REPO`。
+`selfRepoAttempts(configured)` 给出尝试顺序：选定的来源 → `SELF_REPO`。
+（开关关着时配置的**就是**官方，此时只有一次尝试 —— 回退到自己没有意义。）
 `updateSelf` 与 `checkSelf` 都按它走，**每次回退都提示一次**
 （`installer.selfSourceFallback`，提示里带上失败那个地址），并且**不静默**：
 
@@ -1602,11 +1627,9 @@ src/
   是用户判断这条结论可不可信的依据。
 - 「远端没有更新的 release」**不算失败**（`error` 为空），因此不触发回退：
   镜像就是权威来源，它说没有就是没有 —— 否则每次检查都要打两个平台。
-- **非法地址仍然直接抛错、不改道**（与回退区分开）：那说的是「你填的东西不是仓库地址」，
-  静默换源会让用户以为在用自己填的地址。
 
 它与「Gitee 镜像发现」是**两回事**，别混：那套是自动探测 + 只提议 + 要用户确认、每次都要
-探一遍；这里是写死的**固定来源**，所以**不受 `discoverGiteeMirrors` 开关影响**，
+探一遍；这里是选定的**固定来源**，所以**不受 `discoverGiteeMirrors` 开关影响**，
 也不需要探测。
 
 ⚠ **踩过的坑（被测试抓到的）**：第一版写成
@@ -2063,7 +2086,8 @@ gitee 镜像下载的选择**」。两件事在同一句话里：GitHub 资产�
 | `r2Client.ts` | S3 兼容客户端（ListObjectsV2 / Put / Get / Delete），走 `host/http.ts` |
 | `imageScan.ts` | 扩展名白名单 + 受管文件夹边界 + 本地扫描 |
 | `syncState.ts` | 状态清单（localStorage，键 `obsync-image-state`） |
-| `imageSyncService.ts` | 同步引擎：`plan` / `run` / `syncPath` / `publicUrlFor` / 删除三件套 |
+| `imageSyncService.ts` | 同步引擎：`plan` / `run` / `syncSelection` / `syncPath` / `publicUrlFor` / 删除三件套 |
+| `imageChangeQueue.ts` | 「变动后自动同步」的攒批器（静默期 + 硬上限 + 正在跑时不丢） |
 | `imageLibrary.ts` | 三方状态合并（本地 / 云端 / 引用）+ 筛选与排序 |
 | `ui/ImageEditorModal.ts` | 裁剪 / 压缩弹窗 |
 | `ui/imageToolbar.ts` | 阅读视图的悬浮工具条 |
@@ -2084,6 +2108,47 @@ gitee 镜像下载的选择**」。两件事在同一句话里：GitHub 资产�
 3. **`folders` 与 `prefix` 各管一件事。** `folders` = 管哪些（唯一的边界），
    `prefix` = 放在桶的哪儿。两者都成立才归本插件处理。
    `settings.images.prefix` 存用户原文，归一只在 `buildR2Config` 里发生。
+
+### 什么时候同步：四个触发器（2026-10-06）
+
+用户问「图片同步如果不做按周期同步，做即时同步会更好吧？」，随后自己改口提出
+「变动之后 30s 内无额外变动再同步」。落地成四个触发器 —— **完整推导（含成本模型与
+「明确不做的事」）在 `docs/image-sync-design.md`**，这里只留结论与坑：
+
+| 触发器 | 管什么 | 默认 |
+| --- | --- | --- |
+| **变动后静默同步**（`imageChangeQueue.ts`） | **本机**改动 → 云端 | 开，静默 30 秒（5–600） |
+| **周期同步**（`ImageAutomatics`） | **其他设备**上的变化 → 本机 | 关，周期 30 分钟 |
+| 编辑器保存 → `service.syncPath()` | 单张要立刻有结果 | 始终 |
+| 启动后一轮 | 兜住「静默期内关窗」 | 始终 |
+
+**为什么不能只留事件（把周期删掉）**：事件只看得见**本机**的改动。另一台设备传的图、
+或者用户在 R2 控制台手工删的对象，本机什么都没发生 → 没有事件 → 计时器根本不会被启动。
+周期那一轮是**唯一**能看见那些变化的。所以它不是「旧机制」，职责换成了「拉回远端漂移」。
+
+**四个必须记住的坑**：
+
+1. **静默期是正确性要求，不只是省请求。** 有些程序分块写大文件，`modify` 会在写到一半
+   时触发 —— 那时去读会上传一张**截断的图**。
+2. **硬上限不能省**（`maxWaitForQuietMs` = `clamp(静默期 × 10, 5 分钟, 30 分钟)`）：
+   连续动几百张图时静默期永远不满足 → 没有上限就是**永远不跑**。
+3. **正在跑一轮时来的变动不能丢。** `ImageAutomatics.fire()` 的处置是「放弃这一轮、
+   等下一个整周期」—— 那条路可以，因为周期还会再来；变动同步**没有下一个周期可等**。
+   队列的处置是「隔 5 秒回头再试」，直到能跑为止。
+4. **自触发抑制要带过期时间。** 下载会写本地、写本地会发 `create`/`modify` —— 不标记的话
+   每下载一张就再触发一轮。标记靠**事件**消费，而**写失败时不会有事件**：所以
+   `selfWrites` 是 `Map<路径, 标记时刻>` + 10 秒 TTL，而不是一个裸 `Set`
+   （裸 `Set` 的残留会把用户后来对同一个文件的真实改动吃掉）。
+
+**删除（`delete`）不参与**：它已经有自己的即时处置（问一句 + 记墓碑），而同步从不删云端
+—— 触发一轮唯一可能的效果是把云端那份**拉回来**（`deleteRemotePolicy: "never"` 那一档），
+那不是「刚删完」该看到的反馈。
+
+**编辑器保存那条路故意不抑制**：保存后 30 秒会有一轮「白跑」（`decide()` 判成 in-sync），
+换来的是 `syncPath` 失败时能自愈 —— 抑制掉就只剩「等周期」，而周期默认是关的。
+
+**改名的 `noteRenamed` 也会入队**：`renameRemoteBackup` 用服务端 COPY 搬云端那一份，
+成功时跑一轮是白跑；入队是为了它**失败**时能补上（新路径会被当「本地有、云端没有」重传）。
 
 ### 删除：为什么退回到「问一句」（2026-09-23）
 
@@ -2225,6 +2290,252 @@ gif 经过画布只剩第一帧。这两个格式**能同步但不能编辑**，
   `confirmDeleteRemote.test.ts`（三个出口，含 Esc）、`sigv4.test.ts`（AWS 官方向量）。
 - `verify:mobile` 通过：这个模块**移动端也装**，静态导入图里不能有 Node 依赖
   （`scripts/checks.mjs` 的「移动端安全」守着，当前 66 个模块）。
+
+## 五点十、功能区头像（Gitee / GitHub，2026-10-05；平台开关 2026-10-06）
+
+用户要求：「在设置页通用下添加『功能区展示用户头像』的设置项，默认关闭，打开后在
+左侧功能区底部展示圆形 gitee 头像」。代码在 `src/features/avatar/ribbonAvatar.ts`。
+
+**2026-10-06 又拆出一项**：「将功能区展示用户头像中gitee部分拆分出来单独设置一个
+设置项，默认开启，开启时使用gitee头像，关闭时使用GitHub头像」——
+`settings.ribbonAvatarUseGitee`（默认 `true`，沿用拆之前写死的 Gitee），
+设置页那一行叫「使用 Gitee 头像」，总开关关着时**置灰但值不改写**。
+这个模块因此不再写死平台：`deps.avatarHost()` **每次 `apply()` 问一次**，
+令牌/查询/文案都跟着平台走（GitHub 侧同样是 `validateToken()` 顺手带回
+`avatar_url`，不多打接口）。
+
+### 数据从哪来（顺带回答「有密钥就能拿头像吗」）
+
+**能。** `GET https://gitee.com/api/v5/user?access_token=…` 返回的 User 资料里有
+`avatar_url`，而且**与账号名同一次响应**（`login` 与 `avatar_url` 都在里面）——
+所以头像不需要多打一次接口，`GiteeHost.validateToken` 顺手把它带回来即可
+（`TokenInfo.avatarUrl`）。实测（2026-10-05，公开的 `/v5/users/sofqi` 与它同一个
+User 模型）：
+
+- 形状 `https://foruda.gitee.com/avatar/{id}/{uid}_{login}_{ts}.png`；
+- 图床**公开**：不带令牌也能取到图片本身，`<img referrerpolicy="no-referrer">`
+  也照常返回（探针页实测，见下）；
+- 但「这个地址属于谁」只有带令牌问 `/user` 才知道 —— 匿名访问是 **401**
+  （实测），而 Gitee 的匿名配额极低，所以**没令牌时一个请求都不发**。
+
+### 三个必须记住的取舍
+
+1. **不用 `addRibbonIcon`**。那个 API 建的是动作按钮（要 lucide 图标 + 点击回调），
+   而且固定插在功能区**顶部**那一组。这里要的是底部、无动作的一张图。
+2. **挂进 `.side-dock-settings`，不是 `.workspace-ribbon`**。后者自己 `display:flex`
+   且里面已经有一个 `margin-top:auto` 的孩子（就是 `.side-dock-settings`），
+   再给我们的节点一个 auto 边距会**平分**剩余空间 —— 后果是设置齿轮被顶到中间。
+   追加进 `.side-dock-settings` 的最后一个孩子就落在最底部（DOM 顺序 = 视觉顺序）。
+   移动端功能区在抽屉里（`.workspace-drawer-ribbon`），选择器清单里也留着那条。
+3. **它是插进 Obsidian 核心节点的**，所以两件事必须做：`layout-change` 时重挂
+   （功能区会被重建，`apply()` 幂等）、`onunload` 时摘掉（否则插件禁用后那张图
+   还在，而谁也看不出是谁留下的 —— 与状态栏全宽那个类同一个教训）。
+
+### 状态与竞态
+
+- 头像地址**只在成功时缓存**，且按 **`平台 + 令牌`** 认身份：失败不缓存（用户中途
+  补令牌就能生效）、换令牌或换平台就作废（换了账号要换图）。
+  平台也要进身份键：两个平台恰好存了同一串令牌时，只按令牌认会把上一张头像当成
+  新平台的画上去 —— 而那种错没有任何报错，只是「头像不对」。
+- `inFlight` 同时挡重复请求与**过期结果**：请求还没回来时用户换了令牌/平台，
+  先回来的那次必须丢掉（有用例钉着）。
+- 令牌变了要重画：那三个入口（失焦保存 / 测试 / 清除）显式调
+  `main.refreshRibbonAvatar()`。2026-10-06 起令牌与头像同处「通用」页，但这条
+  仍然必要 —— 令牌那三个入口**都不走 `commit()`**（不落盘设置、只写密钥存储），
+  没人会替它们调 `apply()`。
+
+### 验证
+
+- `tests/features/ribbonAvatar.test.ts`（28 条）：挂载点选择、开关/令牌为假时不发
+  请求、底部追加、缓存、过期响应、清令牌/`destroy()` 摘节点、布局重建后重挂、
+  **换平台**（重新解析、换图、悬停文案跟着换平台说、换到没配令牌的平台时摘掉、
+  两平台同一串令牌也各解析一次）。
+- `tests/host/giteeHost.test.ts`：`validateToken` 带回头像、只发一次请求、
+  非 http(s) 的 `avatar_url` 当作没有（空串会让 `<img src="">` 去请求当前页面）。
+- `tests/pluginBoot.test.ts`：默认关时**一次 DOM 查询都不发**；开着且有令牌时
+  真的走到「去功能区找位置」这一步（装配没断在半路）。
+- **视觉实测**：`.probe/settings-preview/avatar-probe.html`（真 app.css + 真
+  `styles.css` + 真 `RibbonAvatar` + 一个真的 Gitee 头像地址）——量到 28×28、
+  `border-radius: 50%`、水平居中、贴在功能区底部；图床在
+  `referrerpolicy="no-referrer"` 下返回 `248×248`（真的加载成功）。
+
+### 补记：「换头像」的链接（2026-10-05，同一天）
+
+用户要求：「在功能区展示头像设置项中，添加用户的 gitee 设置页链接，方便用户更换头像」。
+
+头像是**账号资料**，插件改不了 —— 所以这一行能做的就是把人送过去。做法与 git 路径那一行的
+下载链接完全一致：`descEl.appendText(引导语)` + `createEl("a", { href, target: "_blank" })`。
+
+- **网址是常量** `GITEE_PROFILE_URL`（`settingsTab.ts` 末尾），与 `GIT_DOWNLOAD_URL` 同一条
+  规矩：网址不随语言变，不进 locale；进 locale 的是链接**文字**（同 `gitPathLink`）。
+- 地址选 `https://gitee.com/profile`（设置 → 基本设置 → 个人资料）：实测 2026-10-05
+  `/profile` 可用、`/profile/avatar` 是 **404**（头像没有独立子页面），
+  Gitee 帮助中心那篇「个人信息设置」里 `个人资料` / `基本信息` 两个链接指向的也是它。
+- 用例：`tests/features/settingsTabRender.test.ts` 里那条
+  「功能区头像那一行的描述里带可点的 Gitee 个人资料页链接」——钉 href、`_blank`、
+  以及它挂在**这一行**（挂到别处就等于没做）。
+
+## 五点十一、主题的新装入口（2026-10-05）
+
+用户报的问题：「如果添加插件按钮填写的是主题地址，会因为缺少 main.js 而不通过，
+能否优化一下，或许应该给添加主题添加一个按钮？」
+
+### 根因不是文案，是**没有这条路**
+
+在它之前主题只有两条路：**绑定**库里已经装好的（`bindExistingThemes` /
+`bindThemeToRepo`）和**更新**已跟踪的（`updateTheme`）。也就是说 SyncHub 从来
+没能把一个主题装到磁盘上 —— 把主题仓库地址填进「添加插件仓库」，`PLUGIN_SPEC`
+要求 `manifests.json + main.js`，而主题根本没有 `main.js`，于是报
+「缺少必需文件：main.js」。所以这次补的是**能力**，不只是提示。
+
+### 三处刻意与插件不同的行为（`installTheme`）
+
+1. **目录名 = 远端 manifest 的 `name`**（`themeFolderName`），不能当目录名时
+   （`isValidThemeName`）回落到仓库名，两条都不行就报 `themeNameInvalid` 而不是
+   「随便拼一个」—— 目录名会成为 `rmdir(folder, true)` 的目标。
+   注意与 `updateTheme` 的「绝不改名」不冲突：那条说的是**已存在**的主题。
+2. **不做镜像发现**（`allowMirror: false`）。主题的镜像判据是「名字相同 + 版本不比
+   源旧」，它依赖本地已装的那一版；新装时手上还没有，判据不成立
+   （见 `findGiteeMirrorForTheme`）。跑插件那套（按 `manifest.id`）只会更错。
+3. **绝不替用户切换主题**，只在「装的正是当前主题」（重装场景）时 `requestLoadTheme`。
+   与 `themeFolder.ts` 刻意不收 `setTheme` 是同一条规矩。
+
+### 一条新的安全线：`themeNameConflict`
+
+`themes/{名字}` 已经装着**另一个**主题时**拒绝写盘**（读不到 manifest 的目录、
+名字大小写相同的目录都不算冲突 —— 那是同一个主题，覆盖它正是「重装」该做的事）。
+理由：两个不同的主题完全可以同名，而被覆盖的可能是用户当前正在用的那一个，且它不在
+跟踪列表里、没有「重新下载」这条路。这与插件的 `pluginIdConflict` 同一个性质。
+
+### 入口与「填错门」的兜底
+
+- 新入口：设置页「已跟踪」头部栏的**添加主题**按钮 + 命令
+  `SyncHub：添加主题仓库`（`openAddThemeModal`）。
+- `AddRepoModal` 现在按 `kind` 分叉（**同一个弹窗**，不是复制一份）：主题模式隐藏
+  「浏览社区插件」（那走的是官方插件索引）、隐藏版本与启用开关。
+- **失败之后**才会探一次对面那个标志性文件（`KIND_MARKER_FILE`，即 `main.js` /
+  `theme.css`），确有就给「改为按主题安装」按钮。两个刻意的边界：
+  1. 只认 `missingRequiredFiles` —— 网络类失败（`assetDownloadFailed`）被读成
+     「你走错门了」会把人指去点一个换了也装不上的按钮；
+  2. 只在这一刻读那一个文件（走源码 raw 通道，不花 API 配额，但 `main.js` 可能
+     几百 KB），正常路径上一次都不读。
+
+### 验证
+
+- `tests/features/themeService.test.ts`：`installTheme` 13 条（落盘位置、改名回落、
+  拒绝覆盖、允许重装、不做镜像发现、不兼容中止、`of: "theme"` 的报错）+ `resolveThemeRepo`。
+- `tests/features/addRepoModal.test.ts`：主题模式 3 条 + 填错入口 4 条（含「网络类失败
+  不给建议」那条反向边界）。
+- `tests/features/settingsTabRefresh.test.ts`：新入口把重绘交回设置页（否则新装的主题
+  不出现在列表里 —— 与插件那条同一个坑）。
+- `tests/pluginBoot.test.ts`：命令 `add-theme-repo` 注册了。
+
+## 五点十二、初始化仓库搬进设置页（2026-10-05）
+
+用户的原话：「把仓库同步中远端地址的设置项移到了设置页了，但是把仓库 git 初始化
+漏在了侧边栏面板里，请把仓库初始化按钮也放入设置页，保证仓库同步的基本设置能全部
+在设置页中就完成」。
+
+### 为什么它属于「连接测试之前」那一组
+
+这一页的结构约定（2026-10-04 用户的话）是：**「连接测试」之前的每一项都必须是
+「测试能通过」的充要条件**。而 `SyncService.diagnose` 的**第 2 步**就是「这个库是不是
+git 仓库」（不通过就停在那里）—— 所以初始化是三个前提里最底层的一个：没有仓库，
+远端地址与 git 路径都谈不上。它排在这一组的**最前面**，颜色上与「远端地址」「git
+路径」用同一条分割线分在同一张卡片里（`prerequisites`）。
+
+### 三个实现要点
+
+1. **入口只有一个实现**：`ObsyncPlugin.initRepo()` 从 private 改成 public，并返回
+   `boolean`（是否成功）。命令面板、侧边栏面板那个按钮、设置页这一行都走它 ——
+   提示文案与 `.gitignore` 的处理不会分叉。返回值只给设置页用：成功后直接把徽标改成
+   「已是」（**不再去问一次 git** —— 刚跑完的 `git init` 就是答案）。
+2. **状态徽标只问一次**（2026-10-06 用户要求）：「监测过已经是 git 仓库的话，每次点进
+   仓库同步设置页就不用再主动检测了，直接将标识固定就行，等同步时再验证即可」。
+   原来每次重绘都起一个 `git is-repo` 子进程，结果回来才填徽标 —— 于是每次切进这一页
+   都能看到徽标「弹」出来，还把下面的说明文字挤下去几像素。现在缓存在
+   `ObsyncSettingsTab.vaultIsRepo`（**只在内存**：这个值会变，写进 `data.json` 就是
+   一句没人纠正的假话；重启插件后重新问一次，代价一次子进程）。
+   **读不到时什么都不说**（`catch` 里把徽标清空、按钮留着，且**不缓存**）——
+   把「问不出来」说成「还没有仓库」会让用户去点一个不该点的按钮。
+3. **已经是仓库时按钮置灰**：`git init` 幂等，点了不会坏，但一个「点了什么都不会发生」
+   的按钮会让人怀疑插件坏了。徽标同时说明当前状态（「已是 git 仓库」）。
+
+> 另一半在样式里：`.obsync-badge` 原来是 `line-height: 1.6` + `padding: 0.05em`，
+> 实测**药丸 20px 而标题那一行只有 17px** —— 徽标一出现整行就被撑高 3px。
+> 改成 `line-height: 1` + `padding: 0.15em 0.5em` 之后，「有徽标」与「没徽标」
+> 量出来逐项相同。这类徽标大多是异步填的，所以这条对**所有**带徽标的行都成立。
+
+### 验证
+
+- `tests/features/settingsTabRender.test.ts`：新增 5 条（位置在远端地址之前、两种徽标 +
+  按钮形态、点按钮走 `initRepo` 并刷新、问不出来时不猜）。既有的「连接测试之前只有两个
+  前提项」那条**顺序用例**同步改成三个（它本来就是钉这个约定的）。
+- `tests/pluginBoot.test.ts`：移动端调 `initRepo()` 返回 `false` 而不是抛错。
+- `.probe/settings-preview/page.html?page=sync`（`&repo=0` 看「还不是仓库」那种形态）——
+  两种状态都截图看过：徽标跟在名称后面、按钮形态符合预期、三行在同一张卡片里。
+
+## 五点十三、按钮行的外观与图标（2026-10-05）
+
+用户要求（一次四件事）：「添加主题」改名「添加主题仓库」；「绑定已安装的插件与主题」
+改名「绑定已有插件或主题」，并在文字前加 lucide `link` 图标；「检查全部更新」改名
+「检查更新」，并在文字前加 lucide `refresh-cw`；然后**把这排按钮的卡片去掉，只留按钮展示**。
+
+代码在 `settingsTab.renderTrackedTab`。
+
+### 卡片去掉 = 标题与说明也去掉
+
+那一行原来是 `.obsync-section-header`：左边标题「已跟踪的插件与主题」+ 说明，
+右边四个按钮。页签名已经叫「插件与主题」、列表下方还有一句空状态提示，**标题与说明
+都是重复信息** —— 所以连卡片一起去掉了（`.obsync-section-header` 的三条 CSS 规则一并删除；
+`settings.installer.tracked` / `trackedDesc` 两个 locale 键也删了，`pnpm check` 的
+「未使用的 i18n 键」与「CSS 类覆盖」双双盯着这两件事）。新类是
+`.obsync-tracked-actions`：`background/border/border-radius/box-shadow/padding` 四条
+逐条归零（Obsidian 1.13 起 `.setting-item` 自己就是卡片），并让按钮**从左边排**
+（`.setting-item-info` 空了，`display: none` 之后按钮不再被推到最右）。
+
+> 仍然用 `Setting` 创建按钮，不用裸 `new ButtonComponent(...)`：设置页的「点了没反应」
+> 那类问题在测试里靠 `createdSettings` 找按钮，直接 new 出来的对那套断言不可见。
+
+### 图标：`setButtonText` 与 `setIcon` **不能连用**
+
+从真机的 `main.js` 里读出来的两条实现：
+
+- `setButtonText(x)` → `buttonEl.setText(x)` = **清空整个按钮**再写一段文字；
+- `ButtonComponent.setIcon(i)` → 全局 `setIcon(buttonEl, i)`，而它的实现是
+  「若第一个子节点不是同一个图标，**先删掉它**，再 append 图标」。
+
+于是 `setButtonText("绑定…").setIcon("link")` 的结果是**只剩图标**（文字被当成
+「第一个子节点」删掉了）。所以 `addButtonIcon()` 自己建一个 `.obsync-button-icon`
+容器装图标，再 `prepend` 到文字前面；**换文字之后必须重新调一次**
+（「检查更新」跑起来时会把文字换成「正在检查更新…」，那一下会把图标一起清掉）。
+
+两个替身同步补上，否则这条路径在单测里看不见：
+
+- `tests/stubs/obsidian.ts` 的 `ButtonComponent.setButtonText` 现在**真的**清空
+  `buttonEl` 再写文字（原来只记 `text`），于是「图标在文字前面」可断言；
+- `tests/setup.ts` 补了 `prepend`（语义照 DOM：已在文档里的节点是**移动**，不是复制）。
+
+### 探针又抓到一个假阴性（这次是探针自己的错）
+
+`.probe/settings-preview/page.html?page=tracked` 第一次渲染直接画出
+`TypeError: buttonEl.createSpan is not a function` —— 真机上完全正常：
+Obsidian 把这些 DOM 扩展装在 **`HTMLElement.prototype`** 上（`obsidian.d.ts` 里
+`interface Element` 的全局增强就是它），而探针的 shim 只给「自己 `obsidianize()` 过的」
+元素装。已在 `obsidian-shim.ts` 里改成补一次原型，并顺带让 `setIcon` 真的画出用到的
+两个 lucide 图标（原来只写一个 `data-icon`，于是预览里**一个图标都看不见**）。
+
+量到的结果（headless Chromium）：绑定按钮 `svg-icon lucide-link`、检查按钮
+`svg-icon lucide-refresh-cw`，都是 18×18、在文字之前、与文字间距 5px；另外两个按钮没有图标；
+按钮高度都是 30px（图标没有把按钮撑变形）。
+
+### 验证
+
+- `tests/features/trackedActionsRow.test.ts`（新，7 条）：四段文案、这一行没有标题与说明、
+  两个图标的类名与**顺序**、另外两个按钮没有图标、「正在检查更新…」期间图标仍在且
+  **只有一个**、三个弹窗入口各自连着自己那颗按钮。
+- `tests/features/settingsTabRefresh.test.ts`：定位那一行的手改成了**按按钮文字找**
+  （原来靠 `zhCN.settings.installer.tracked`，那个键已经删了）—— 顺带更贴近用户真正点的东西。
 
 ## 六、同步模块（阶段三）实现要点
 
@@ -2791,7 +3102,7 @@ simple-git 的 config 传递（不碰网络、不需令牌）。
   形如 `this.settings.language`，容器名与局部变量名混在一起，扫不准，故不扫；
 - 一个文件算「读过」，要么限定访问 `.sync.enabled`（后面跟 `=` 是写，不算读），
   要么「提升访问」：文件里先 `const x = …getSettings().installer`，再读 `x.enabled`
-  （`installer.enabled` 就是这个写法，只看限定访问会误报）；
+  （`installer.autoCheckOnStartup` 就是这个写法，只看限定访问会误报）；
 - **`settingsTab.ts` 不在扫描范围**：它读设置是为了渲染与持久化，不是消费。
   没有这一条，每个字段都会被设置页自己「读」到，检查就没意义了。
 
@@ -2835,13 +3146,26 @@ simple-git 的 config 传递（不碰网络、不需令牌）。
 `main.ts` 的 `applyStatusBarWidth` 甚至为此**主动放弃了改内联样式**的方案
 （那会与主题/其他插件互相覆盖，插件卸载后留下的内联样式更难清干净）。
 
+> **2026-10-08 复查（0.2.0 发版前）**：`obsidianmd/no-static-styles-assignment` 仍是
+> **0 违规**。这一轮**收回了一处踩形式边界的写法** —— `.obsync-gitignore` 的宽度曾经
+> 写成 `const FULL_WIDTH = "100%"; areaEl.style.width = FULL_WIDTH;`（09-24 为绕开
+> 「插件样式表不保证在热重载时被重新读入」而内联）。规则只拦**字面量**，用 `const`
+> 能绕过，但绕的是形式、不是判据：静态宽度本来就该待在类里。现已把
+> `width: 100%` / `box-sizing: border-box` 写回 `.obsync-gitignore`，元素上不再写内联
+> 样式（`settingsTabRender.test.ts` 那条用例也翻面：从「必须内联」改成「不许内联」）。
+> 开发时「改了 CSS 不生效」用**完整重载 Obsidian** 解决。
+>
+> 剩下三处 `.style.*` 都是**动态值**（`ImagePreviewModal` 的缩放 / 平移尺寸、
+> `ImageEditorModal` 的裁剪框几何），走的是模板字符串 —— 规则显式放行，也是它的
+> 设计意图（这类值本来就该动态）。
+
 ### 官方提交要求
 
 | 要求 | 本项目 |
 | --- | --- |
 | `minAppVersion` 合适 | `1.8.7`，由 `pnpm check` 第 1 项持续保证 |
 | description 短、以句号结尾、无 emoji、≤250 字符 | 78 字符，符合 |
-| 只用 `fundingUrl` 链财务支持；不接受捐赠就移除 | 未配置 |
+| 只用 `fundingUrl` 链财务支持；不接受捐赠就移除 | 已配置：`fundingUrl` 是对象（PayPal + 扫码图），`validate-manifest` 要求对象值全为非空字符串，已满足 |
 | 命令 ID 不带插件 ID（Obsidian 会自动加前缀） | 10 个命令全不带 |
 | Node / Electron API 只能桌面端 | 见下（唯一需要解释的一处） |
 | 移除示例代码 | 无示例代码 |

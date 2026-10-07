@@ -28,6 +28,21 @@ export const zhCN = {
         ribbonSync: "SyncHub：打开仓库同步视图",
         ribbonInstaller: "SyncHub：安装社区插件",
         ribbonImages: "SyncHub：打开图片管理",
+        /**
+         * 功能区底部那张头像的悬停 / 替代文案（2026-10-05）。
+         *
+         * 它**不带任何动作**（点它没有反应），所以这句话要回答的是「这是谁」——
+         * 插件别处回答不了这个问题，而它正是「当前配的令牌属于哪个账号」
+         * 最直观的答案（镜像探测拿的也是这个账号名，见 `mirrorOwnerCandidates`）。
+         *
+         * `host` 是平台显示名（「Gitee」/「GitHub」，由装配层传 `displayName` 进来）——
+         * 2026-10-06 起头像可以是两个平台里的任一个，句子必须说清是哪一个。
+         *
+         * 账号名缺席时退到那句通用的：那种响应（有头像地址、没有 `login`）不合常理，
+         * 但文案不该因此变成一句带空格的残句。
+         */
+        ribbonAvatar: (host: string, account: string) =>
+            account ? `SyncHub：${host} 账号 ${account} 的头像` : `SyncHub：${host} 账号的头像`,
     },
 
     common: {
@@ -107,7 +122,8 @@ export const zhCN = {
         },
 
         general: {
-            heading: "通用",
+            // 页首标题 2026-10-06 删了（页签「通用」就是页名）—— 那一行原本是
+            // `heading: "通用"`。
             showNotices: "显示操作结果提示",
             showNoticesDesc: "关闭后只显示错误提示，成功与进度提示会被静默。",
             debugLogging: "输出调试日志",
@@ -121,45 +137,97 @@ export const zhCN = {
                 "把状态栏拉成整屏宽，同步条目才能贴在最左侧（否则左边没有空位）。" +
                 "关掉后状态栏恢复 Obsidian 原样（右下角一簇），同步条目仍在那一簇的最前面 —— " +
                 "功能不变，只是不再占满一整条。",
+            /**
+             * 功能区（左侧 ribbon）底部的圆形头像。
+             *
+             * 两句都必须说到：**默认关**（不加开关就啥都不变），以及
+             * **用哪个平台的头像由下面那一项决定**（2026-10-06 拆出去）——
+             * 不说的话用户会以为这张头像只能是 Gitee 的。
+             *
+             * 「没配令牌就什么都不显示」那一句挪到了下面 `ribbonAvatarSourceDesc`
+             * ——它讲的是**哪个平台**的令牌，跟着那一行走更准。
+             */
+            ribbonAvatar: "功能区展示用户头像",
+            ribbonAvatarDesc:
+                "在左侧功能区底部显示一张圆形头像（当前所配令牌所属账号的）。" +
+                "用哪个平台的头像由下面那一项决定。",
+            /**
+             * 头像用哪个平台（2026-10-06 用户要求）。
+             *
+             * 用户的原话：「将功能区展示用户头像中gitee部分拆分出来单独设置一个设置项，
+             * 默认开启，开启时使用gitee头像，关闭时使用GitHub头像」。所以名称写成
+             * **开启时那一档**（与「启用 Gitee 镜像源更新 SyncHub」同一个写法），
+             * 描述里补上关闭时是什么。
+             *
+             * 「没配对应令牌就没有头像」必须写在这里：不写的话，选了没配令牌的那个
+             * 平台的用户只会以为开关坏了（令牌就在**本页下方**的「访问令牌」一节）。
+             */
+            ribbonAvatarSource: "使用 Gitee 头像",
+            ribbonAvatarSourceDesc:
+                "开启时用 Gitee 令牌所属账号的头像，关闭时用 GitHub 的。" +
+                "需要先在下方「访问令牌」里填好对应平台的令牌 —— 没填就没有头像可显示，开关本身不会报错。",
+            /**
+             * 「去平台换头像」那一句 + 两档链接文字（2026-10-05 用户要求，
+             * 2026-10-06 随平台开关拆成两条）。
+             *
+             * 用户的原话：「在功能区展示头像设置项中，添加用户的 gitee 设置页链接，
+             * 方便用户更换头像」。头像**不能在插件里换**（它是平台账号的资料），
+             * 所以这两条的全部作用就是把人送过去。
+             *
+             * 链接文字只写域名与路径（与 `gitPathLink` 的 `git-scm.com` 同一套写法）；
+             * 真正的 `href` 是 `settingsTab.ts` 里的 `GITEE_PROFILE_URL` /
+             * `GITHUB_PROFILE_URL` 两个常量 —— 网址不随语言变，所以不进这里。
+             */
+            ribbonAvatarChangeLead: "想换一张头像的话，到个人资料页改：",
+            ribbonAvatarChangeLinkGitee: "gitee.com/profile",
+            ribbonAvatarChangeLinkGithub: "github.com/settings/profile",
         },
 
         installer: {
-            heading: "插件安装器",
-            enabled: "启用插件安装器",
-            enabledDesc: "从 GitHub 或 Gitee 安装并更新社区插件。",
+            // 页首标题 2026-10-06 删了（页签「插件安装器」就是页名）。
+            /**
+             * 这里原来第一行是 `enabled` / `enabledDesc`（「启用插件安装器」）——
+             * 2026-10-06 随字段一起删了：它只挡下面两个自动检查，等价于把它们都关掉，
+             * 而名字却让人以为关掉就不装了。理由见 `core/settings.ts` 的 `migrateV9ToV10`。
+             */
             autoCheck: "启动时检查更新",
             autoCheckDesc: "Obsidian 启动后自动检查已跟踪插件与主题的更新。默认关闭 —— 多数情况下用「进入设置页时自动检查」就够。",
             autoCheckDelay: "启动检查延迟（秒）",
             autoCheckDelayDesc: "启动后等待多久再开始检查，避免与 Obsidian 自身的启动流程争抢资源。",
             autoCheckOnSettingsOpen: "进入设置页时自动检查",
             autoCheckOnSettingsOpenDesc: "打开本设置页时自动检查一次更新。短时间内重复打开会跳过，以免白白消耗接口配额。",
-            tracked: "已跟踪的插件与主题",
-            trackedDesc: "通过 SyncHub 绑定、安装或更新的插件与主题。",
+            /**
+             * 这里原来还有 `tracked`（「已跟踪的插件与主题」）与 `trackedDesc`
+             * 两个键 —— 它们是「已跟踪」页顶部那张卡片的标题与说明。
+             * 2026-10-05 用户要求「把这排按钮的卡片去掉，只留按钮展示」，
+             * 卡片连同标题与说明一起下掉了，所以两个键也删了
+             * （`pnpm check` 的「未使用的 i18n 键」会拦住忘了删的情况）。
+             * 页面上现在只剩一句空状态：`trackedEmpty`。
+             */
             trackedEmpty: "还没有添加任何插件或主题。",
             selfHeading: "SyncHub 自身",
             selfDesc:
                 "更新 SyncHub 自己。只写入新版本的文件，不重载正在运行的插件 —— 重启 Obsidian 后新版本才生效。",
             /**
-             * 自身更新的来源。
+             * 自身更新的来源开关（2026-10-06 用户要求：从自由文本框改成开关）。
              *
              * 文案必须点明四件事：**默认是什么**（不然用户不知道要不要动它）、
-             * **镜像挂了会怎样**（会自动回退到官方，并提示一次 —— 写清楚才敢用默认）、
-             * **想换回官方怎么填**、以及**填错了会怎样**（校验 id，所以不会误伤别的插件）
-             * —— 最后一条是他敢不敢填的前提。
+             * **开 / 关各自对应哪个地址**、**镜像挂了会怎样**（会自动回退到官方，
+             * 并提示一次 —— 写清楚才敢默认开）、以及**不会误伤别的插件**（写盘前
+             * 校验远端 manifest 的 id 必须是 ob-sync）—— 最后一条是他敢不敢关的前提。
              */
-            selfSource: "自身更新来源",
-            selfSourceDesc:
-                "默认走 Gitee 镜像（gitee.com/sofqi/SyncHub，国内可直连）；留空也用默认。" +
+            selfUseGitee: "启用 Gitee 镜像源更新 SyncHub",
+            selfUseGiteeDesc:
+                "默认开启：从 Gitee 镜像（gitee.com/sofqi/SyncHub）检查并下载 SyncHub 自己的更新，国内可直连。" +
+                "关闭后改用官方仓库（github.com/Dyse-Sofqi/SyncHub）。" +
                 "镜像不可用（例如 Gitee 匿名接口被限流）时会自动改用官方仓库重试，并提示一次。" +
-                "想一直从官方更新就填 github.com/Dyse-Sofqi/SyncHub。" +
-                "更新前会校验远端 manifest 的 id 必须是 ob-sync，所以地址填错不会覆盖别的插件。",
-            selfSourcePlaceholder: "https://gitee.com/sofqi/SyncHub",
+                "更新前会校验远端 manifest 的 id 必须是 ob-sync，所以不会覆盖别的插件。",
             mirrorDiscovery: "自动发现 Gitee 镜像",
             mirrorDiscoveryDesc: "安装 GitHub 插件时，探测 Gitee 上的镜像仓库：同名仓库，以及你 Gitee 账号下的同名仓库（后者需要先填 Gitee 令牌）。命中则改用镜像源下载，国内速度更快。",
         },
 
         sync: {
-            heading: "仓库同步",
+            // 页首标题 2026-10-06 删了（页签「仓库同步」就是页名）。
             /**
              * 「定时同步」这一行：**周期框 + 开关**。
              *
@@ -241,6 +309,25 @@ export const zhCN = {
             strategyMerge: "合并（保留双方历史）",
             strategyRebase: "变基（历史线性）",
             strategyReset: "重置（以远端为准，丢弃本地提交）",
+            /**
+             * 「初始化 git 仓库」那一行（2026-10-05）。
+             *
+             * 用户把远端地址搬进设置页之后，初始化还留在侧边栏面板里 ——
+             * 「保证仓库同步的基本设置能全部在设置页中就完成」。
+             *
+             * 两句都要说清：**什么时候需要点它**（库还不是 git 仓库），以及
+             * **顺手做了什么**（建一份默认 `.gitignore`，而且已有的绝不覆盖 ——
+             * 用户会担心这一点，因为那句话听起来像「插件要动我的文件」）。
+             */
+            initRepo: "初始化 git 仓库",
+            initRepoDesc:
+                "在当前库根目录建一个 git 仓库（`git init`）。库还不是仓库时才需要点它；" +
+                "顺手会建一份默认的 .gitignore（已经有一份的话绝不会被覆盖），" +
+                "免得 workspace.json 被同步出去、在多设备上反复冲突。",
+            /** 状态徽标：已经是仓库（按钮会置灰 —— `git init` 幂等，点了什么都不会发生）。 */
+            initDone: "已是 git 仓库",
+            initNeeded: "还不是 git 仓库",
+            initRunning: "正在初始化…",
             gitPath: "git 可执行文件路径",
             gitPathDesc: "留空使用系统 PATH 中的 git。Windows 上 git 不在 PATH 时才需要填写。",
             /**
@@ -377,7 +464,7 @@ export const zhCN = {
          * 这页的坑是「文件可能**被删掉**」。所以三条注意事项必须留在最上方。
          */
         images: {
-            heading: "图片同步",
+            // 页首标题 2026-10-06 删了（页签「图片同步」就是页名）。
             notesHeading: "注意事项",
             notes: [
                 "同步只复制、从不删除：每一轮把两边缺的补上（云端多了就下载、本地多了就上传），" +
@@ -389,6 +476,9 @@ export const zhCN = {
                     "R2 管「图片不占仓库体积、且能被外链引用」。想让它们不再进 git：到「仓库同步 → " +
                     ".gitignore」一节点「停止跟踪」—— 它会加忽略规则，并让 git 忘掉已经提交过的那些" +
                     "（本地文件一个都不动）。SyncHub 不会自己去改 .gitignore。",
+                "在手机上它同样会跑（Obsidian 不提供「仅 Wi-Fi」这种设置）：蜂窝网络下往库里放图，" +
+                    "会立刻走流量。介意的话把「变动后自动同步」关掉 —— 那样新图只会在下一轮周期、" +
+                    "启动时、或你点「立即同步」时才上传。",
             ],
             /**
              * 这一行是**总开关**，但它管的不只是「自动同步」：启动那一条、改名时
@@ -479,6 +569,26 @@ export const zhCN = {
             deleteRemoteAlways: "永远同步云端",
             deleteRemoteNever: "永不同步云端",
             /**
+             * 「变动后自动同步」这一行：**数字 + 单位 + 开关**（2026-10-06 加）。
+             *
+             * 它与下面「按周期同步」是两件事，描述里必须把区别说清 ——
+             * 否则用户会问「我不是已经开了周期吗，为什么还要这个」：
+             *
+             * - 这一条管**本机**：你动了图之后跑一次；
+             * - 下面那条管**别处**：另一台设备传的、或桶里被手工改的，
+             *   本机看不见任何事件，只能主动去问。
+             *
+             * 「停手 N 秒」是用户能感知的行为，所以写在描述里；那个数字是框里的值。
+             */
+            changeSync: "变动后自动同步",
+            changeSyncDesc:
+                "在受管文件夹里新增或改动了图片之后，停手 N 秒（5–600）就自动同步一次。" +
+                "一次编辑会话（拖进一批图、批量压缩）会被合并成一轮，也不会在你还在写文件的时候开始。" +
+                "它只管本机上的改动；其他设备上的变化要靠下面「按周期同步」去拉回来。" +
+                "关掉它之后，新图和改过的图要等下一轮周期（或点「立即同步」）才会上传。",
+            /** 延时框的无障碍标签（框旁边没有自己的文字说明）。 */
+            changeSyncDelayAria: "变动后自动同步的延迟（秒）",
+            /**
              * 「按周期同步」这一行：**数字 + 单位 + 开关**（2026-10-02 第二次改）。
              *
              * 上一次（同一天早些时候）只是把它从「设 0 表示关闭」改成「设 0 表示不按
@@ -489,15 +599,21 @@ export const zhCN = {
              * 名字也从「自动同步间隔（分钟）」改成「按周期同步」：单位由框后面那个
              * span 承担，而这一行现在既有开关又有周期，一个叫「间隔」的名字罩不住
              * 那个开关。
+             *
+             * 2026-10-06 起它的**职责变了**（本机改动交给上面那一项），所以描述也
+             * 重写了 —— 原文案里那句「新加或修改的图片不会立刻上传，要等下一轮」
+             * 已经不再成立。
              */
             autoSync: "按周期同步",
             autoSyncDesc:
-                "打开后每 N 分钟（5–1440）跑一整轮比对，把两边缺的补上（上传与下载）。" +
-                "关掉它只停掉周期 —— 上面的开关开着时，启动仍会同步一轮。" +
-                "注意新加或修改的图片不会立刻上传，要等下一轮（或点「立即同步」）；" +
-                "只有改名与删除是当场处理的。同步不会删除任何文件。",
+                "每 N 分钟（5–1440）去云端核对一次，把其他设备上的改动拉回来" +
+                "（另一台设备传的图、或云端被手工改动的对象）—— 本机的改动由上面那一项负责。" +
+                "关掉它只停掉周期；上面的总开关开着时，启动仍会同步一轮。" +
+                "同步不会删除任何文件。",
             /** 单位跟在周期框后面（`<input> 分钟 <开关>`），与「仓库同步」页同一形状。 */
             minutesUnit: "分钟",
+            /** 单位跟在变动同步的延时框后面（`<input> 秒 <开关>`）。 */
+            secondsUnit: "秒",
             /** 周期框的无障碍标签（框旁边没有自己的文字说明）。 */
             intervalAria: "按周期同步的间隔（分钟，5–1440）",
 
@@ -543,6 +659,13 @@ export const zhCN = {
          * 一串没有前缀的「添加插件仓库 / 检查全部更新」在面板里根本找不着。
          */
         cmdAddRepo: "SyncHub：添加插件仓库",
+        /**
+         * 「添加主题仓库」那条命令（2026-10-05）。
+         *
+         * 与 `cmdAddRepo` 同一套前缀规矩（见上面那段注释）：命令面板里必须能按
+         * 插件名搜到。
+         */
+        cmdAddTheme: "SyncHub：添加主题仓库",
         cmdBindExisting: "SyncHub：绑定库里已安装的插件与主题",
         cmdCheckUpdates: "SyncHub：检查插件与主题更新",
         cmdUpdateAll: "SyncHub：更新全部插件与主题",
@@ -558,6 +681,35 @@ export const zhCN = {
         kindTheme: "主题",
 
         modalTitle: "添加插件仓库",
+        /**
+         * 主题那半边的弹窗文案（2026-10-05）。
+         *
+         * `themeRepoDesc` 必须点明两件用户想不到的事：主题会落到 `themes/` 下，
+         * 而且**装完要自己去「外观」里选**（SyncHub 不替用户切换主题 —— 见
+         * `InstallerService.installTheme` 的第 4 条）。少说第二句，用户会以为
+         * 「装完没生效」。
+         */
+        themeModalTitle: "添加主题仓库",
+        themeRepoDesc:
+            "填写 owner/repo 简写，或粘贴完整的主题仓库链接（仓库里要有 manifest.json 与 theme.css）。" +
+            "SyncHub 不会替你切换主题：装好后到「设置 → 外观 → 主题」里选它。",
+        addTheme: "添加主题仓库",
+        themeResolved: (name: string, version: string) => `主题：${name} ${version}`,
+        themeInstall: "安装主题",
+        /** 装完那一句。弹窗里提示一次、成功提示里再带一次（两处都要说，别只留一处）。 */
+        themeAfterInstallHint:
+            "装好了到「设置 → 外观 → 主题」里选它 —— SyncHub 不会替你切换主题。",
+        /**
+         * 入口选错时的两句提示 + 两个换入口的按钮（2026-10-05）。
+         *
+         * 用户报的原话是「添加插件按钮填写的是主题地址，会因为缺少 main.js 而不通过」。
+         * 光说「缺少必需文件」等于把用户留在原地，所以这里要**说出看到了什么**
+         * （有 theme.css、没有 main.js）并给出下一步。
+         */
+        looksLikeTheme: "这个仓库里是主题（有 theme.css、没有 main.js），不是插件。",
+        looksLikePlugin: "这个仓库里是插件（有 main.js、没有 theme.css），不是主题。",
+        switchToTheme: "改为按主题安装",
+        switchToPlugin: "改为按插件安装",
         repoLabel: "仓库地址",
         repoDesc: "填写 owner/repo 简写，或粘贴完整的 GitHub / Gitee 仓库链接。",
         repoPlaceholder: "例如：Dyse-Sofqi/SyncHub 或 https://gitee.com/owner/repo",
@@ -634,6 +786,16 @@ export const zhCN = {
         installFailed: "安装失败",
         installed: (name: string, version: string, source: string) =>
             `已安装 ${name} ${version}（来源：${source}）`,
+        /**
+         * 主题装好那一句（2026-10-05）。
+         *
+         * 报的是**目录名**而不是 manifest 的 `name`：用户在「外观」里看到的、
+         * 要去找的就是目录名，而 `installTheme` 落盘用的也是它（两者通常相同，
+         * 名字不能当目录名时才会分叉）。重装（目录本来就在）走上面那条通用的
+         * `updated` —— 「已更新」比「已安装」更准。
+         */
+        themeInstalled: (id: string, version: string, source: string) =>
+            `已安装主题 ${id} ${version}（来源：${source}）`,
         /**
          * 完成提示里的 `source` 由 `features/installer/downloadSource.ts` 拼好
          * （平台名，或命中镜像时的「Gitee 镜像」）。
@@ -760,6 +922,20 @@ export const zhCN = {
                 `${name} 需要 Obsidian ${minVersion} 或更高版本，当前版本过低，已中止安装。`,
             pluginIdConflict: (pluginId: string, repo: string) =>
                 `插件 id「${pluginId}」已被另一个插件占用，无法安装 ${repo}。`,
+            /**
+             * 主题的同名冲突（2026-10-05）。
+             *
+             * 必须给出**两条**可走的路：这个目录被谁占着、以及怎么让开。只说
+             * 「目录被占用」用户不知道该怎么办 —— 而覆盖是绝对不做的（被覆盖的
+             * 可能正是他当前在用的那个主题，且它不在跟踪列表里，没有重新下载的路）。
+             */
+            themeNameConflict: (id: string, repo: string, existing: string) =>
+                `主题目录「${id}」已经被另一个主题「${existing}」占用，无法用它来装 ${repo}。` +
+                `请先移除或改名那个主题（SyncHub 不会覆盖别的主题）；若它就是你正在用的那个，` +
+                `请在「绑定已安装的插件与主题」里改为跟踪它的来源，而不是重新装一份。`,
+            themeNameInvalid: (repo: string, name: string) =>
+                `${repo} 里的主题名「${name}」不能当目录名（见主题名规则），` +
+                `而仓库名同样不合法，无法决定把它装到哪个目录。`,
             folderMissingRequired: (id: string, file: string, of: string) =>
                 `${of}「${id}」缺少必需文件 ${file}，已中止写入。`,
             writeFailedRolledBack: (id: string, of: string) =>
@@ -786,7 +962,14 @@ export const zhCN = {
         communityLoadFailed: "无法加载社区插件列表",
 
         checkOne: "检查更新",
-        checkAll: "检查全部更新",
+        /**
+         * 顶部按钮行上那个「检查更新」（2026-10-05 用户要求：原来叫「检查全部更新」）。
+         *
+         * 与上面 `checkOne`（列表**每一行**的「检查更新」，只查那一项）文字相同、
+         * 覆盖范围不同：这个查**全部**已跟踪项。刻意保留两个键 —— 它们的语义不同，
+         * 合并成一个以后想区分就来不及了；按钮上的 `refresh-cw` 图标是它们的区别标识。
+         */
+        checkAll: "检查更新",
         updateAll: "更新全部",
         // 以下几条现在同时覆盖插件与主题 —— 用「项」而不是「个插件」，
         // 否则主题更新完会收到一句「已更新 1 个插件」。
@@ -829,7 +1012,14 @@ export const zhCN = {
          */
         remove: "取消绑定（不删除文件）",
 
-        bindTitle: "绑定已安装的插件与主题",
+        /**
+         * 「绑定已有插件或主题」。
+         *
+         * 2026-10-05 用户要求把顶部按钮上那句从「绑定已安装的插件与主题」改成这个。
+         * **这一个键同时是按钮文字与弹窗标题**（与 `modalTitle` 同一个用法）——
+         * 弹窗里要干的事就是它，两处用同一句话是刻意的。
+         */
+        bindTitle: "绑定已有插件或主题",
         bindDesc:
             "扫描当前库中已安装的插件与主题，通过官方社区索引自动识别来源仓库；勾选后加入跟踪列表，即可接收更新检查。不会改动任何文件，也不会切换你当前的主题。",
         bindScanning: "正在扫描已安装的插件与主题…",
@@ -901,6 +1091,21 @@ export const zhCN = {
         statusPulling: "正在拉取…",
         statusPushing: "正在推送…",
         statusCommitting: "正在提交…",
+        /**
+         * 「立即同步」链路里的文案（2026-10-05）。
+         *
+         * 用户的原话是「点击立即同步时，只有左下角状态栏中才显示正在提交，
+         * 不够显眼」。除了给那条目加一个转动的圆环（`styles.css` 的
+         * `.obsync-status-bar-busy`），文案本身也得说清**这是链路里的哪一步**：
+         * 点了「立即同步」却只看到「正在提交…」，用户会以为后面没有拉取与推送，
+         * 看到它不动了就去再点一次 —— 实际整条链路还要跑一阵。
+         *
+         * `statusSyncing` 给侧边栏那条横幅当标题（三个阶段共用）。
+         */
+        statusSyncing: "正在同步…",
+        statusChainCommitting: "正在同步：提交中…",
+        statusChainPulling: "正在同步：拉取中…",
+        statusChainPushing: "正在同步：推送中…",
         notARepo: "当前仓库尚未初始化 git。",
         /**
          * 找不到 git 时的那句话（2026-10-02 补齐）。
@@ -1060,6 +1265,14 @@ export const zhCN = {
          */
         cmdOpenView: "SyncHub：打开仓库同步面板",
         statusBarHint: "点击打开仓库同步面板",
+        /**
+         * 忙碌时那一格的悬停提示（2026-10-05）。
+         *
+         * 与常态的 `statusBarHint` 不同：此刻用户最想知道的是「它在动吗、
+         * 到哪一步了」，而不是「这个面板怎么开」。面板里那条横幅说明了阶段，
+         * 所以这里把「点开就能看到」说出来。
+         */
+        statusBusyHint: "同步进行中，点击打开面板查看进度",
         actRefresh: "刷新",
         actInit: "初始化仓库",
         actStage: "暂存此文件",

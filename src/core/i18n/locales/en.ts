@@ -14,6 +14,16 @@ export const en = {
         ribbonSync: "SyncHub: open the repository sync view",
         ribbonInstaller: "SyncHub: install community plugins",
         ribbonImages: "SyncHub: open the image manager",
+        /**
+         * Tooltip / alt text of the round avatar in the ribbon. It has no action — so
+         * name the account. `host` is the platform's display name ("Gitee" / "GitHub"),
+         * passed in by the assembly layer — the avatar can belong to either platform
+         * (2026-10-06), so the sentence has to say which.
+         */
+        ribbonAvatar: (host: string, account: string) =>
+            account
+                ? `SyncHub: avatar of the ${host} account ${account}`
+                : `SyncHub: avatar of the signed-in ${host} account`,
     },
 
     common: {
@@ -92,7 +102,7 @@ export const en = {
         },
 
         general: {
-            heading: "General",
+            /** The page heading (`heading: "General"`) was removed on 2026-10-06 — the tab label is the page name. */
             showNotices: "Show result notifications",
             showNoticesDesc: "When off, only errors are shown; success and progress notices are silenced.",
             debugLogging: "Verbose logging",
@@ -100,44 +110,55 @@ export const en = {
             statusBarFullWidth: "Status bar spans the full width",
             statusBarFullWidthDesc:
                 "Stretch the status bar across the screen so the sync item can sit at the far left (otherwise there is no free space there). Turning this off restores Obsidian's own layout (a cluster in the bottom-right); the sync item stays first in that cluster — nothing is lost, it just no longer fills the whole strip.",
+            ribbonAvatar: "Show your avatar in the ribbon",
+            ribbonAvatarDesc:
+                "Show a round avatar (of the account your token belongs to) at the bottom of the left ribbon. Which platform's avatar to use is decided by the next item.",
+            /** Which platform's avatar (2026-10-06, split out of the row above). */
+            ribbonAvatarSource: "Use your Gitee avatar",
+            ribbonAvatarSourceDesc:
+                "On: the avatar of the account your Gitee token belongs to. Off: the GitHub one. Set a token for that platform under \"Access tokens\" below first — without one there is no avatar to show, and this toggle stays silent.",
+            /** The avatar can only be changed on the platform itself; this sends the user there (hrefs are constants). */
+            ribbonAvatarChangeLead: "To use a different one, change it on your profile page: ",
+            ribbonAvatarChangeLinkGitee: "gitee.com/profile",
+            ribbonAvatarChangeLinkGithub: "github.com/settings/profile",
         },
 
         installer: {
-            heading: "Plugin installer",
-            enabled: "Enable plugin installer",
-            enabledDesc: "Install and update community plugins from GitHub or Gitee.",
+            /** The page heading was removed on 2026-10-06 — the tab label is the page name. */
+            /** `enabled` / `enabledDesc` were removed on 2026-10-06 — see the zh-cn note. */
             autoCheck: "Check for updates on startup",
             autoCheckDesc: "Check tracked plugins and themes for updates shortly after Obsidian starts. Off by default — the check on opening this settings tab covers most cases.",
             autoCheckDelay: "Startup check delay (seconds)",
             autoCheckDelayDesc: "How long to wait before checking, so startup is not slowed down.",
             autoCheckOnSettingsOpen: "Check when opening settings",
             autoCheckOnSettingsOpenDesc: "Run an update check when this settings page opens. Repeated openings within a short window are skipped to save API quota.",
-            tracked: "Tracked plugins and themes",
-            trackedDesc: "Plugins and themes bound, installed or updated through SyncHub.",
+            /** `tracked` / `trackedDesc` were removed with the card around the button row (2026-10-05). */
             trackedEmpty: "No plugins or themes added yet.",
             selfHeading: "SyncHub itself",
             selfDesc:
                 "Update SyncHub itself. Only the new files are written; the running plugin is not reloaded — the new version takes effect after you restart Obsidian.",
             /**
-             * Says what the default is, what happens when the mirror is down (automatic
-             * fallback to the official repo, announced), how to pin the official repo, and
-             * what happens if the address is wrong — see the zh-cn note.
+             * Self-update source toggle (2026-10-06: changed from a free-text field
+             * to a toggle). Says the default, which address each state uses, what
+             * happens when the mirror is down (automatic fallback to the official
+             * repo, announced), and that a wrong source cannot clobber another plugin
+             * — see the zh-cn note.
              */
-            selfSource: "Self-update source",
-            selfSourceDesc:
-                "Defaults to the Gitee mirror (gitee.com/sofqi/SyncHub); leaving it empty also " +
-                "uses that default. If the mirror is unavailable (for example Gitee's anonymous " +
-                "API is rate limited), the official repository is tried instead and you are told " +
-                "about the fallback. Enter github.com/Dyse-Sofqi/SyncHub to always use the " +
-                "official repository. Before writing, the remote manifest's id must be ob-sync, " +
-                "so a wrong address cannot overwrite another plugin.",
-            selfSourcePlaceholder: "https://gitee.com/sofqi/SyncHub",
+            selfUseGitee: "Use the Gitee mirror for SyncHub updates",
+            selfUseGiteeDesc:
+                "On by default: check for and download SyncHub's own updates from the Gitee " +
+                "mirror (gitee.com/sofqi/SyncHub), which is reachable directly in mainland China. " +
+                "Turn it off to use the official repository (github.com/Dyse-Sofqi/SyncHub). " +
+                "If the mirror is unavailable (for example Gitee's anonymous API is rate " +
+                "limited), the official repository is tried instead and you are told about the " +
+                "fallback. Before writing, the remote manifest's id must be ob-sync, so it " +
+                "cannot overwrite another plugin.",
             mirrorDiscovery: "Discover Gitee mirrors",
             mirrorDiscoveryDesc: "When installing a GitHub plugin, look for a Gitee mirror first: a same-named repository, or a same-named repository under your own Gitee account (the latter needs a Gitee token). Downloads then use the mirror — faster in mainland China.",
         },
 
         sync: {
-            heading: "Vault sync",
+            /** The page heading was removed on 2026-10-06 — the tab label is the page name. */
             /**
              * The "Scheduled sync" row: **interval box + toggle**.
              *
@@ -218,6 +239,15 @@ export const en = {
             strategyMerge: "Merge (keep both histories)",
             strategyRebase: "Rebase (linear history)",
             strategyReset: "Reset (remote wins, local commits dropped)",
+            initRepo: "Initialize a git repository",
+            initRepoDesc:
+                "Create a git repository in the vault root (`git init`). You only need this while the " +
+                "vault is not a repository yet. It also writes a default .gitignore when there is none " +
+                "(an existing one is never overwritten), so workspace.json is not synced and does not " +
+                "conflict across devices.",
+            initDone: "Already a git repository",
+            initNeeded: "Not a git repository yet",
+            initRunning: "Initializing…",
             gitPath: "Git executable path",
             gitPathDesc: "Leave empty to use git from PATH. Only needed on Windows when git is not on PATH.",
             /**
@@ -349,7 +379,7 @@ export const en = {
         },
 
         images: {
-            heading: "Image sync",
+            /** The page heading was removed on 2026-10-06 — the tab label is the page name. */
             notesHeading: "Things to know",
             notes: [
                 "Syncing only ever copies: every round fills the gaps on both sides (download what the " +
@@ -364,6 +394,10 @@ export const en = {
                     "them linkable from outside. To keep them out of git entirely, use \"Stop tracking\" in " +
                     "Vault sync → .gitignore: it appends the ignore rules and makes git forget the images " +
                     "already committed (no local file is touched). SyncHub never edits .gitignore on its own.",
+                "It runs on mobile too (Obsidian exposes no \"Wi-Fi only\" setting): dropping an image " +
+                    "into the vault over cellular uploads it right away. Turn \"Sync after changes\" off " +
+                    "if that matters — new images then wait for the next periodic round, a restart, or " +
+                    "\"Sync now\".",
             ],
             /**
              * The **master switch**, and it covers more than "automatic sync": the startup round,
@@ -462,6 +496,28 @@ export const en = {
             deleteRemoteAlways: "Always sync the cloud",
             deleteRemoteNever: "Never sync the cloud",
             /**
+             * The "Sync after changes" row: **number + unit + toggle** (2026-10-06).
+             *
+             * It and "Periodic sync" below are two different jobs, so the description has to
+             * spell out the difference — otherwise the user asks "I already turned on the
+             * periodic sync, why do I need this":
+             *
+             * - this one covers **this device**: a round after you touched an image;
+             * - the one below covers **elsewhere**: images uploaded by another device, or
+             *   objects edited in the bucket — no local event fires for those, so we have to
+             *   go ask.
+             */
+            changeSync: "Sync after changes",
+            changeSyncDesc:
+                "After an image is added or edited in the managed folders, sync once N seconds " +
+                "(5–600) after you stop. A single editing session (dropping in a batch of images, " +
+                "batch compression) is merged into one round, and it never starts while you are " +
+                "still writing the file. It only covers this device; changes made elsewhere " +
+                "are pulled back by \"Periodic sync\" below. With it off, new and edited images " +
+                "wait for the next periodic round (or \"Sync now\").",
+            /** Aria label for the delay box (no visible label next to it). */
+            changeSyncDelayAria: "Delay before syncing after changes (seconds)",
+            /**
              * The "Periodic sync" row: **number + unit + toggle** (second revision on 2026-10-02).
              *
              * The first revision only reworded "0 disables it"; the user then asked whether the
@@ -472,17 +528,22 @@ export const en = {
              * Renamed from "Automatic sync interval (minutes)": the unit moved into a span after
              * the box, and a row that now carries both a toggle and a period cannot be named
              * "interval".
+             *
+             * 2026-10-06: its **job changed** (local changes moved to the row above), so the
+             * description was rewritten — the old "newly added or edited images are not uploaded
+             * right away" sentence no longer holds.
              */
             autoSync: "Periodic sync",
             autoSyncDesc:
-                "When on, runs a full comparison every N minutes (5–1440) and fills in whatever is " +
-                "missing on either side (uploads and downloads). Turning it off only stops the " +
-                "periodic run — with the switch above on, a round still runs at startup. Note that " +
-                "newly added or edited images are not uploaded right away: they wait for the next " +
-                "round (or \"Sync now\"). Only renames and deletions are handled on the spot. " +
-                "Syncing never deletes anything.",
+                "Checks the cloud every N minutes (5–1440) and pulls back changes made " +
+                "elsewhere (images uploaded by another device, or objects edited in the " +
+                "bucket) — changes made on this device are handled by the item above. Turning it " +
+                "off only stops the periodic run; with the switch above on, a round still runs at " +
+                "startup. Syncing never deletes anything.",
             /** Unit suffix after the interval box (`<input> min <toggle>`), same shape as the vault-sync page. */
             minutesUnit: "min",
+            /** Unit suffix after the change-sync delay box (`<input> sec <toggle>`). */
+            secondsUnit: "sec",
             /** Accessible label for the interval box (it has no visible label of its own). */
             intervalAria: "Periodic sync interval (minutes, 5–1440)",
 
@@ -523,6 +584,8 @@ export const en = {
          * does — Obsidian users search commands by plugin name.
          */
         cmdAddRepo: "SyncHub: Add plugin repository",
+        /** Command palette entry for the theme side of the same dialog (must keep the plugin-name prefix). */
+        cmdAddTheme: "SyncHub: Add theme repository",
         cmdBindExisting: "SyncHub: Bind plugins and themes already installed in this vault",
         cmdCheckUpdates: "SyncHub: Check for plugin and theme updates",
         cmdUpdateAll: "SyncHub: Update all plugins and themes",
@@ -536,6 +599,22 @@ export const en = {
         kindTheme: "theme",
 
         modalTitle: "Add plugin repository",
+        themeModalTitle: "Add theme repository",
+        themeRepoDesc:
+            "Enter owner/repo, or paste a full theme repository URL (the repo needs manifest.json and " +
+            "theme.css). SyncHub never switches themes for you — pick it under Settings → Appearance → Themes.",
+        addTheme: "Add theme repository",
+        themeResolved: (name: string, version: string) => `Theme: ${name} ${version}`,
+        themeInstall: "Install theme",
+        themeAfterInstallHint:
+            "Pick it under Settings → Appearance → Themes — SyncHub never switches themes for you.",
+        /** Shown when the address belongs to the other kind — say what was seen, then offer the fix. */
+        looksLikeTheme:
+            "This repository holds a theme (it has theme.css but no main.js), not a plugin.",
+        looksLikePlugin:
+            "This repository holds a plugin (it has main.js but no theme.css), not a theme.",
+        switchToTheme: "Install it as a theme instead",
+        switchToPlugin: "Install it as a plugin instead",
         repoLabel: "Repository",
         repoDesc: "Enter owner/repo, or paste a full GitHub / Gitee repository URL.",
         repoPlaceholder: "e.g. Dyse-Sofqi/SyncHub or https://gitee.com/owner/repo",
@@ -585,6 +664,9 @@ export const en = {
         installFailed: "Install failed",
         installed: (name: string, version: string, source: string) =>
             `Installed ${name} ${version} (from ${source})`,
+        /** Reports the folder name — that is what the theme picker shows and what we wrote to disk. */
+        themeInstalled: (id: string, version: string, source: string) =>
+            `Installed theme ${id} ${version} (from ${source})`,
         /** `source` is composed by `features/installer/downloadSource.ts`. */
         updated: (name: string, version: string, source: string) =>
             `Updated ${name} to ${version} (from ${source})`,
@@ -663,6 +745,14 @@ export const en = {
                 `${name} requires Obsidian ${minVersion} or newer. Your version is too old, so the install was aborted.`,
             pluginIdConflict: (pluginId: string, repo: string) =>
                 `The plugin id "${pluginId}" is already taken by another plugin; cannot install ${repo}.`,
+            themeNameConflict: (id: string, repo: string, existing: string) =>
+                `The theme folder "${id}" already holds another theme ("${existing}"), so ${repo} cannot ` +
+                `be installed there. Remove or rename that theme first — SyncHub never overwrites another ` +
+                `theme. If it is the one you are using, track its source under "Bind installed plugins and ` +
+                `themes" instead of installing a second copy.`,
+            themeNameInvalid: (repo: string, name: string) =>
+                `The theme name "${name}" in ${repo} cannot be used as a folder name, and neither can the ` +
+                `repository name — there is no folder to install it into.`,
             folderMissingRequired: (id: string, file: string, of: string) =>
                 `The ${of} "${id}" is missing the required file ${file}; install aborted.`,
             writeFailedRolledBack: (id: string, of: string) =>
@@ -703,7 +793,8 @@ export const en = {
         communityLoadFailed: "Could not load the community plugin list",
 
         checkOne: "Check for updates",
-        checkAll: "Check all for updates",
+        /** The button row at the top checks every tracked item (same wording as a row's `checkOne`). */
+        checkAll: "Check for updates",
         updateAll: "Update all",
         // These now cover plugins and themes alike — "item(s)" instead of
         // "plugin(s)", or updating a theme would report "Updated 1 plugin".
@@ -737,7 +828,8 @@ export const en = {
          */
         remove: "Unbind (files are kept)",
 
-        bindTitle: "Bind installed plugins and themes",
+        /** Shared by the button row and the dialog title (`BindExistingModal`). */
+        bindTitle: "Bind existing plugins or themes",
         bindDesc:
             "Scans plugins and themes already installed in this vault and resolves their source repository via the official community index. Selected ones join the tracking list for update checks. No files are touched, and your active theme is never switched.",
         bindScanning: "Scanning installed plugins and themes…",
@@ -802,6 +894,21 @@ export const en = {
         statusPulling: "Pulling…",
         statusPushing: "Pushing…",
         statusCommitting: "Committing…",
+        /**
+         * Chain wording for "Sync now" (2026-10-05).
+         *
+         * The user's words: "when I click Sync now, only the bottom-left status bar shows
+         * how far along it is — that is not prominent enough". Besides the spinning ring on
+         * the status bar item, the wording itself must say **which step of the chain** this is:
+         * after clicking Sync now, "Committing…" reads like the whole action, so the user
+         * assumes pull/push are not coming and clicks again.
+         *
+         * `statusSyncing` is the sidebar banner title (shared by all three stages).
+         */
+        statusSyncing: "Syncing…",
+        statusChainCommitting: "Syncing: committing…",
+        statusChainPulling: "Syncing: pulling…",
+        statusChainPushing: "Syncing: pushing…",
         notARepo: "This vault is not a git repository yet.",
         /**
          * The message when git cannot be found (filled in 2026-10-02).
@@ -938,6 +1045,14 @@ export const en = {
         // SyncHub prefix to be findable in the command palette, panel titles do not.
         cmdOpenView: "SyncHub: Open repository sync panel",
         statusBarHint: "Click to open the repository sync panel",
+        /**
+         * Hover hint while an action is running (2026-10-05).
+         *
+         * Unlike the idle `statusBarHint`, what the user wants to know now is whether it is
+         * still working and how far it has got — not how to open the panel. The panel itself
+         * names the stage, so this just says that opening it shows the progress.
+         */
+        statusBusyHint: "Sync in progress — click to see the progress in the panel",
         actRefresh: "Refresh",
         actInit: "Initialise repository",
         actStage: "Stage this file",

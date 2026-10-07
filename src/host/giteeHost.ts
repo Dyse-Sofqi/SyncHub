@@ -70,6 +70,27 @@ interface GiteeRepo {
 
 interface GiteeUser {
     login: string;
+    /**
+     * 头像地址（实测 2026-10-05：`GET /v5/user` 与公开的
+     * `GET /v5/users/{name}` 是同一个 User 模型，两个都有这个字段）。
+     *
+     * 按可选处理：真机上拿不到它时**只影响头像**，不该让整次校验失败
+     * —— `validateToken` 的判据始终是 `login`（见那里）。
+     */
+    avatar_url?: string;
+}
+
+/**
+ * 把响应里的 `avatar_url` 收敛成一个能直接塞进 `<img src>` 的地址。
+ *
+ * 只认 http(s)：这个值来自远端响应，而它唯一的用途是当图片地址用。
+ * 空串与相对路径要在这里丢掉 —— `<img src="">` 会让浏览器去请求**当前页面**
+ * （功能区那个位置就会挂着一张破图），而调用方判的是「有没有地址」。
+ */
+function normalizeAvatarUrl(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return /^https?:\/\//i.test(trimmed) ? trimmed : undefined;
 }
 
 /**
@@ -375,13 +396,27 @@ export class GiteeHost implements IRepoHost {
         return res.text;
     }
 
+    /**
+     * 校验令牌 —— 顺带把账号名与头像地址带回来。
+     *
+     * 两个字段来自**同一次**调用：`GET /v5/user` 返回的就是当前令牌那个账号的
+     * User 资料（`login` + `avatar_url`），所以功能区那个头像不必再多打一次接口
+     * （Gitee 的配额实测很紧张，能省一次就省一次，见文件头的说明）。
+     *
+     * `avatar_url` 拿不到**不算失败**：判据只有 `login` —— 缺头像只影响一个装饰，
+     * 而「令牌无效」是另一件事（用户会去重新填密钥）。
+     */
     async validateToken(token: string): Promise<TokenInfo> {
         const res = await httpJson<GiteeUser>({
             url: withToken(`${API_BASE}/user`, token),
             headers: this.baseHeaders(),
         });
         if (res.status === 200 && res.data?.login) {
-            return { valid: true, account: res.data.login };
+            return {
+                valid: true,
+                account: res.data.login,
+                avatarUrl: normalizeAvatarUrl(res.data.avatar_url),
+            };
         }
         return { valid: false };
     }

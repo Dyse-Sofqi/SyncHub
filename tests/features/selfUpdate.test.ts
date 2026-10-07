@@ -12,12 +12,12 @@ import {
 } from "../../src/features/installer/installerService";
 import {
     clearPendingRestart,
-    DEFAULT_SELF_SOURCE,
     describeSelfState,
     readPendingRestart,
     resolveSelfRepo,
     selfRepoAttempts,
     selfSourceLabel,
+    selfUpdateUsesGitee,
     SELF_MIRROR,
     SELF_REPO,
 } from "../../src/features/installer/selfUpdate";
@@ -184,34 +184,34 @@ describe("updateSelf（更新自己）", () => {
         expect(settings.installer.tracked).toEqual([]);
     });
 
-    it("来源取设置里的地址 —— 填了 Gitee 镜像就从 Gitee 拉，不碰官方仓库", async () => {
+    it("开着镜像开关时从 Gitee 拉，不碰官方仓库", async () => {
         const fake = createFakeApp(installedObsync());
         const { service, settings } = createService(fake);
-        settings.installer.selfUpdateSource = "https://gitee.com/sofqi/SyncHub";
+        settings.installer.selfUpdateUseGitee = true;
         setupSelfRelease({ version: "0.2.0" });
 
         await service.updateSelf("0.1.0");
 
         expect(calls.some((url) => url.includes("gitee.com/api/v5/repos/sofqi/SyncHub"))).toBe(true);
-        // 关键：**没有**任何请求打到官方仓库 —— 否则「我指定了来源」就是句空话
+        // 关键：**没有**任何请求打到官方仓库 —— 否则「我选了镜像」就是句空话
         expect(
             calls.some((url) => url.includes("api.github.com/repos/Dyse-Sofqi/SyncHub"))
         ).toBe(false);
     });
 
     /**
-     * **不动设置**时走的就是 Gitee 镜像（2026-10-01 起的默认）。
+     * **不动设置**时走的就是 Gitee 镜像（2026-10-01 起的默认，2026-10-06 换成开关）。
      *
-     * 与上一条的区别很重要：上一条验的是「填了会生效」，这一条验的是
-     * 「什么都不填也走镜像」—— 而绝大多数用户永远不会去动那一格。
+     * 与上一条的区别很重要：上一条验的是「开着会生效」，这一条验的是
+     * 「什么都不动也走镜像」—— 而绝大多数用户永远不会去碰那个开关。
      */
-    it("默认来源就是 Gitee 镜像：不填任何东西也从 Gitee 更新，不碰官方", async () => {
+    it("默认就是 Gitee 镜像：不碰任何设置也从 Gitee 更新，不碰官方", async () => {
         const fake = createFakeApp(installedObsync());
         const { service, settings } = createService(fake);
         setupSelfRelease({ version: "0.2.0" });
 
         // 出厂设置（测试里就是 normalizeSettings({}) 的结果）
-        expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+        expect(settings.installer.selfUpdateUseGitee).toBe(true);
 
         await service.updateSelf("0.1.0");
 
@@ -230,6 +230,18 @@ describe("updateSelf（更新自己）", () => {
 
         expect(readPluginFile(fake, "ob-sync", "main.js")).toBe("// same version, rebuilt");
         expect(settings.installer.pendingRestartVersion).toBe("0.1.0");
+    });
+
+    it("更新成功后清掉落盘的「可用更新」（否则标签页那个徽标一直亮着）", async () => {
+        const fake = createFakeApp(installedObsync());
+        const { service, settings } = createService(fake);
+        // 模拟「上一轮检查查到了 0.2.0」
+        settings.installer.selfUpdateAvailable = "0.2.0";
+        setupSelfRelease({ version: "0.2.0" });
+
+        await service.updateSelf("0.1.0");
+
+        expect(settings.installer.selfUpdateAvailable).toBe("");
     });
 
     /**
@@ -298,10 +310,10 @@ describe("updateSelf（更新自己）", () => {
         ).toHaveLength(1);
     });
 
-    it("配的就是官方时**不做无谓的第二次尝试**（回退到自己没有意义）", async () => {
+    it("关掉镜像开关（配的就是官方）时**不做无谓的第二次尝试**（回退到自己没有意义）", async () => {
         const fake = createFakeApp(installedObsync());
         const { service, settings } = createService(fake);
-        settings.installer.selfUpdateSource = "https://github.com/Dyse-Sofqi/SyncHub";
+        settings.installer.selfUpdateUseGitee = false;
         route(/api\.github\.com\/repos\/Dyse-Sofqi\/SyncHub\/releases\/latest$/, () => ({
             status: 403,
             text: '{"message":"rate limit"}',
@@ -564,54 +576,59 @@ describe("selfRepoAttempts / selfSourceLabel（回退顺序与称呼）", () => 
 });
 
 /**
- * 「自身更新来源」的解析。
+ * 「自身更新来源」的选择。
  *
- * 存在的理由：`github.com` 在本机会被时段性阻断，而 Gitee 镜像能直连。用户填一次就该
- * 一直用它 —— 所以这是个**纯函数**，不需要探测，也不受「自动发现 Gitee 镜像」开关影响
- * （那套是给用户装的插件用的：自动探测、只提议、要确认）。
+ * 存在的理由：`github.com` 在本机会被时段性阻断，而 Gitee 镜像能直连。用户选一次
+ * 就该一直用它 —— 所以这是个**纯函数**，不需要探测，也不受「自动发现 Gitee 镜像」
+ * 开关影响（那套是给用户装的插件用的：自动探测、只提议、要确认）。
+ *
+ * 2026-10-06 用户要求把来源从自由地址改成开关，于是这里从「解析字符串」变成了
+ * 「二选一」—— 断言也跟着变成「开 → 镜像、关 → 官方」。
  */
-describe("resolveSelfRepo（自身更新来源）", () => {
-    /**
-     * **默认来源是 Gitee 镜像**（2026-10-01 改的）。
-     *
-     * 空串曾经表示「官方仓库」，而 `data.json` 里存的就是它 —— 所以这条断言同时
-     * 盯着两件事：默认值换成了镜像，以及老数据里那个空值也跟着走镜像（靠
-     * `normalizeSettings` 收敛，见 settings.test.ts 里那一条）。
-     */
-    it("留空 / 全空白 → **Gitee 镜像**（不再回官方）", () => {
-        expect(resolveSelfRepo("")).toEqual(SELF_MIRROR);
-        expect(resolveSelfRepo("   ")).toEqual(SELF_MIRROR);
+describe("resolveSelfRepo（自身更新来源开关）", () => {
+    it("开着（默认）→ **Gitee 镜像**", () => {
+        expect(resolveSelfRepo(true)).toEqual(SELF_MIRROR);
     });
 
-    it("设置里那个默认字符串解析出来的就是 SELF_MIRROR（两个常量不许漂）", () => {
+    it("关掉 → 官方仓库", () => {
+        expect(resolveSelfRepo(false)).toEqual(SELF_REPO);
+    });
+
+    it("两个地址不许漂：镜像在 gitee/sofqi，官方在 github/Dyse-Sofqi", () => {
         // 漂开的话，设置页显示的是一个地址、实际请求的是另一个 —— 而那种错
         // 只会在真机上表现为「从想不到的地方拉了个包」。
-        expect(resolveSelfRepo(DEFAULT_SELF_SOURCE)).toEqual(SELF_MIRROR);
+        expect(SELF_MIRROR).toEqual({ host: "gitee", owner: "sofqi", repo: "SyncHub" });
+        expect(SELF_REPO).toEqual({ host: "github", owner: "Dyse-Sofqi", repo: "SyncHub" });
+    });
+});
+
+/**
+ * 老 `selfUpdateSource` 字符串（v8 及以前）→ 布尔开关的折算。
+ *
+ * 这一组守着升级那一刻：折算规则必须与**当年那套解析**一致，否则老用户的来源会
+ * 在升级时被悄悄换掉。规则本身写在 `selfUpdateUsesGitee` 的注释里。
+ */
+describe("selfUpdateUsesGitee（老字段折算）", () => {
+    it("空串 / 全空白 / 非字符串 → 用镜像（当年空串表示默认 = 镜像）", () => {
+        expect(selfUpdateUsesGitee("")).toBe(true);
+        expect(selfUpdateUsesGitee("   ")).toBe(true);
+        expect(selfUpdateUsesGitee(undefined)).toBe(true);
+        expect(selfUpdateUsesGitee(42)).toBe(true);
     });
 
-    it("Gitee 完整地址 → host 是 gitee（**不是** GitHub 上的同名仓库）", () => {
-        expect(resolveSelfRepo("https://gitee.com/sofqi/SyncHub")).toEqual({
-            host: "gitee",
-            owner: "sofqi",
-            repo: "SyncHub",
-        });
+    it("Gitee 完整地址 → 用镜像", () => {
+        expect(selfUpdateUsesGitee("https://gitee.com/sofqi/SyncHub")).toBe(true);
     });
 
-    it("填官方地址仍然有效（默认换了，退路还在）", () => {
-        expect(resolveSelfRepo("https://github.com/Dyse-Sofqi/SyncHub")).toEqual(SELF_REPO);
+    it("官方地址 → 不用镜像", () => {
+        expect(selfUpdateUsesGitee("https://github.com/Dyse-Sofqi/SyncHub")).toBe(false);
     });
 
-    it("简写按 GitHub 解释 —— 要 Gitee 就写全地址", () => {
-        expect(resolveSelfRepo("sofqi/SyncHub")).toEqual({
-            host: "github",
-            owner: "sofqi",
-            repo: "SyncHub",
-        });
+    it("`owner/repo` 简写按 GitHub 解释（与当年 parseRepoRef 的默认平台一致）", () => {
+        expect(selfUpdateUsesGitee("sofqi/SyncHub")).toBe(false);
     });
 
-    it("地址非法时**抛错**，不静默回退到官方", () => {
-        // 静默回退会让用户以为在走镜像、实际走官方（或反过来）——
-        // 而「到底从哪更新」必须是他能确定的。错误由调用方按错误路径报出来。
-        expect(() => resolveSelfRepo("这不是一个仓库地址")).toThrow();
+    it("解析不出来的自定义地址退回默认（用镜像）", () => {
+        expect(selfUpdateUsesGitee("这不是一个仓库地址")).toBe(true);
     });
 });

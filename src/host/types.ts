@@ -74,6 +74,22 @@ export interface TokenInfo {
     valid: boolean;
     /** 令牌对应的账号名。 */
     account?: string;
+    /**
+     * 令牌对应账号的**头像地址**（`avatar_url`）。
+     *
+     * 与 `account` 来自**同一次** `GET /v5/user` —— 那个响应里两个字段都在，
+     * 所以拿头像不需要多打一次接口（见 `giteeHost.validateToken`）。
+     * 实测形状（2026-10-05，公开的 `/v5/users/{name}` 与它同一个 User 模型）：
+     *
+     *     https://foruda.gitee.com/avatar/{id}/{uid}_{login}_{ts}.png
+     *
+     * 它是**公开**的 CDN 地址：不带令牌也能取到图片本身。但「这个地址属于谁」
+     * 只有拿着令牌问 `/user` 才知道 —— 接口返回的是**当前令牌那个账号**的资料。
+     *
+     * 平台没给这个字段时**保持 `undefined`**，别写空串：调用方判的是「有没有」，
+     * 而空串会让 `<img src="">` 去请求当前页面（浏览器会拿它当相对地址）。
+     */
+    avatarUrl?: string;
 }
 
 /** 注入鉴权后的请求参数。 */

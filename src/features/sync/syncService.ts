@@ -25,7 +25,7 @@ import type {
     SyncOutcome,
     SyncStrategy,
 } from "./types";
-import { StatusBar, type StatusBarActivity } from "./statusBar";
+import { IDLE_ACTIVITY, StatusBar, type StatusBarActivity, type SyncActivity } from "./statusBar";
 
 /**
  * 同步编排：把 GitManager 的原子操作组合成用户语义的动作。
@@ -101,6 +101,18 @@ export class SyncService {
     private pending = 0;
     /** 状态变化订阅者（仓库同步视图）。见 `onStatusChange`。 */
     private readonly statusListeners = new Set<(status: RepoStatus | undefined) => void>();
+
+    /**
+     * 动作变化订阅者（仓库同步视图的「正在同步」横幅）。见 `onActivityChange`。
+     *
+     * 与 `statusListeners` **刻意分开**：两者推的时机与频率都不一样 ——
+     * 状态在动作**结束后**才刷新一次，而动作横幅必须**立刻**出现，
+     * 否则用户点了「立即同步」要等第一个 git 命令跑完才看到任何反应。
+     */
+    private readonly activityListeners = new Set<(activity: SyncActivity) => void>();
+
+    /** 当前正在跑的动作。`idle` 表示没有。 */
+    private activity: SyncActivity = IDLE_ACTIVITY;
 
     /**
      * 最近一次读出来的状态与读它的时刻（`undefined` 也是有效结果：不是仓库）。
@@ -196,6 +208,52 @@ export class SyncService {
         }
     }
 
+    // ── 动作订阅（仓库同步视图的「正在同步」横幅） ────────────────────────
+
+    /**
+     * 当前动作（`idle` 表示没有动作在跑）。
+     *
+     * 面板**打开的那一刻**就得知道：一次同步完全可能在面板关闭时开始
+     * （命令面板 / 定时器），打开时不能只等下一次变化 —— 那时已经是 idle 了，
+     * 「正在同步」横幅就永远出不来。
+     */
+    get currentActivity(): SyncActivity {
+        return this.activity;
+    }
+
+    /**
+     * 订阅动作变化（开始 / 换阶段 / 结束）。
+     *
+     * 面板用它画那条「正在同步」的横幅。与 `onStatusChange` 同构：
+     * 谁改了动作谁通知，订阅者出错绝不影响同步本身。
+     */
+    onActivityChange(listener: (activity: SyncActivity) => void): () => void {
+        this.activityListeners.add(listener);
+        return () => {
+            this.activityListeners.delete(listener);
+        };
+    }
+
+    /**
+     * 标记「正在干什么」——**状态栏与面板的唯一出口**。
+     *
+     * 收在一处是必须的：`sync()` 那条链路要中途换三次阶段
+     * （提交 → 拉取 → 推送），散着写 `statusBar.setActivity()` 的话，
+     * 新加的订阅者迟早会漏掉某一处，症状就是「面板上还写着正在拉取，
+     * 其实已经在推送」。任何新增阶段都必须走这里。
+     */
+    private setActivity(kind: StatusBarActivity, chain = false): void {
+        this.activity = { kind, chain };
+        this.statusBar.setActivity(kind, { chain });
+        for (const listener of this.activityListeners) {
+            try {
+                listener(this.activity);
+            } catch (err) {
+                logger.debug("activity listener failed", err);
+            }
+        }
+    }
+
     // ── 用户动作 ──────────────────────────────────────────────────────────
 
     /**
@@ -218,21 +276,24 @@ export class SyncService {
      *
      * `after` 是**成功之后**的收尾反馈（拿到刚刷新出来的状态）—— 失败时不调，
      * 因为「与远端一致」这种话在出错后说出来只会让人困惑。
+     *
+     * `chain` 一路透给 `setActivity`：链路里的文案与单独动作不同（见 `activityText`）。
      */
     private async withActivity<T>(
         activity: StatusBarActivity,
         run: () => Promise<T>,
-        after?: (result: T, status: RepoStatus | undefined) => Promise<void>
+        after?: (result: T, status: RepoStatus | undefined) => Promise<void>,
+        chain = false
     ): Promise<T> {
-        this.statusBar.setActivity(activity);
+        this.setActivity(activity, chain);
         try {
             const result = await run();
-            this.statusBar.setActivity("idle");
+            this.setActivity("idle");
             const status = await this.refreshStatus();
             if (after) await after(result, status);
             return result;
         } catch (err) {
-            this.statusBar.setActivity("idle");
+            this.setActivity("idle");
             await this.refreshStatus();
             throw err;
         }
@@ -295,24 +356,28 @@ export class SyncService {
 
                     // 每个阶段都更新活动状态 —— 只在开头设一次的话，
                     // 整条链路（含拉取、推送）都会显示「正在提交」，与实际不符。
-                    this.statusBar.setActivity("pulling");
+                    // `chain = true`：这是链路里的一步，文案要说成「正在同步：…」
+                    // （面板那条横幅也靠它把三个阶段画出来）。
+                    this.setActivity("pulling", true);
                     const pulled = await this.doPull();
                     if (pulled.kind === "conflict") return pulled;
                     if (pulled.kind === "pulled") {
                         // 拉下来的文件可能又和本地未提交内容合并出新东西 ——
                         // 二次提交后再推送，保证推上去的是完整状态。
-                        this.statusBar.setActivity("committing");
+                        this.setActivity("committing", true);
                         await this.doCommitAll();
                     }
 
-                    this.statusBar.setActivity("pushing");
+                    this.setActivity("pushing", true);
                     return await this.doPush();
                 },
                 options.announceInSync
                     ? async (_outcome, status) => {
                           await this.announceInSync(status);
                       }
-                    : undefined
+                    : undefined,
+                // 整条链路都算「立即同步」：横幅上的三个阶段才有意义。
+                true
             )
         );
     }

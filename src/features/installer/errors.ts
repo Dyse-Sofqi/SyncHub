@@ -48,6 +48,17 @@ export type InstallerErrorDetail =
     | { kind: "missingBuildArtifacts" }
     | { kind: "incompatibleApp"; name: string; minVersion: string }
     | { kind: "pluginIdConflict"; pluginId: string; repo: string }
+    /**
+     * `themes/{名字}` 已经被**另一个**主题占着 —— 拒绝覆盖。
+     *
+     * 主题没有 id，「写进哪个目录」是由远端 manifest 的 `name` 现算的，而两个
+     * 不同的主题完全可以同名。覆盖的代价不只是丢一个主题：用户当前正在用的很
+     * 可能就是被覆盖的那一个，而它没有「重新下载」这条路（它不在跟踪列表里）。
+     * 所以这里是硬拦，与插件的 `pluginIdConflict` 同一个性质。
+     */
+    | { kind: "themeNameConflict"; id: string; repo: string; existing: string }
+    /** 远端主题名与仓库名都**不能**当目录名（见 `core/themeName.ts`）—— 无从落盘。 */
+    | { kind: "themeNameInvalid"; repo: string; name: string }
     | { kind: "folderMissingRequired"; id: string; file: string; of: TrackedKind }
     | { kind: "writeFailedRolledBack"; id: string; of: TrackedKind }
     | { kind: "writeFailedRollbackFailed"; id: string; of: TrackedKind }
@@ -114,6 +125,10 @@ export function describeInstallerError(
             return e.incompatibleApp(detail.name, detail.minVersion);
         case "pluginIdConflict":
             return e.pluginIdConflict(detail.pluginId, detail.repo);
+        case "themeNameConflict":
+            return e.themeNameConflict(detail.id, detail.repo, detail.existing);
+        case "themeNameInvalid":
+            return e.themeNameInvalid(detail.repo, detail.name);
         case "folderMissingRequired":
             return e.folderMissingRequired(detail.id, detail.file, ofKind(detail.of));
         case "writeFailedRolledBack":

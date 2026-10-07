@@ -442,13 +442,50 @@ describe("GiteeHost 错误映射", () => {
 });
 
 describe("GiteeHost.validateToken", () => {
-    it("成功时返回账号名", async () => {
-        useResponses(() => ({ status: 200, text: JSON.stringify({ login: "sofqi" }) }));
+    /**
+     * 头像与账号名来自**同一次** `GET /v5/user`。
+     *
+     * 这条钉住的是「多打一次接口」这个诱惑：功能区底部那个头像真的需要
+     * `avatar_url`，而顺手再写一个 `getUser()` 会让每次校验变成两次请求 ——
+     * Gitee 的配额实测很紧张（见文件头），能省一次就省一次。
+     */
+    it("成功时返回账号名**与头像地址**，只要一次请求", async () => {
+        useResponses(() => ({
+            status: 200,
+            text: JSON.stringify({
+                login: "sofqi",
+                // 实测形状（2026-10-05，取自 `/v5/users/sofqi`）。
+                avatar_url: "https://foruda.gitee.com/avatar/1788141849167533005/1_sofqi_2.png",
+            }),
+        }));
 
         await expect(new GiteeHost().validateToken("tok")).resolves.toEqual({
             valid: true,
             account: "sofqi",
+            avatarUrl: "https://foruda.gitee.com/avatar/1788141849167533005/1_sofqi_2.png",
         });
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.url).toContain("access_token=tok");
+    });
+
+    it("响应里没有 avatar_url 时仍然是有效令牌（只少了头像）", async () => {
+        // 判据只有 `login`。把「没有头像」报成「令牌无效」的后果是用户跑去
+        // 重新填一个本来就对的密钥，而头像那张图始终不会出现。
+        useResponses(() => ({ status: 200, text: JSON.stringify({ login: "sofqi" }) }));
+
+        const info = await new GiteeHost().validateToken("tok");
+        expect(info).toEqual({ valid: true, account: "sofqi" });
+        expect(info.avatarUrl).toBeUndefined();
+    });
+
+    it("不是 http(s) 的 avatar_url 当作没有（它会被塞进 <img src>）", async () => {
+        for (const value of ["", "  ", "/avatar/sofqi.png", "javascript:alert(1)"]) {
+            useResponses(() => ({ status: 200, text: JSON.stringify({ login: "sofqi", avatar_url: value }) }));
+
+            const info = await new GiteeHost().validateToken("tok");
+            // 空串尤其要拦：`<img src="">` 会让浏览器去请求**当前页面**。
+            expect(info.avatarUrl, `avatar_url=${JSON.stringify(value)}`).toBeUndefined();
+        }
     });
 
     it("401 时返回 valid: false", async () => {

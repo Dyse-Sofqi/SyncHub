@@ -249,8 +249,18 @@ export class ButtonComponent {
     clicks = 0;
     private clickHandler: (() => unknown) | undefined;
 
+    /**
+     * 按钮文字。
+     *
+     * 真机上 `setButtonText` 走的是 `buttonEl.setText(value)` —— **清空整个按钮**
+     * 再写一段文字。替身照做（清掉 children 再 appendText），理由与 `createEl` 那条
+     * 一样：不真的记下来，「按钮里有什么、图标在文字前面还是后面」就断言不了。
+     * 2026-10-05 的「按钮文字前面加 lucide 图标」正需要这个顺序。
+     */
     setButtonText(value: string): this {
         this.text = value;
+        this.buttonEl.empty?.();
+        this.buttonEl.appendText?.(value);
         return this;
     }
     setDisabled(value: boolean): this {

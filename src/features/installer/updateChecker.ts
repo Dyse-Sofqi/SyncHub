@@ -51,18 +51,21 @@ export const SETTINGS_OPEN_CHECK_INTERVAL_MS = 10 * 60 * 1000;
  *
  * 做成纯函数是为了能单测 —— 真正的触发点在设置页里（依赖 Obsidian 的
  * display/hide 时序，node 环境测不了）。
+ *
+ * 这里曾经还有两条：`enabled`（「启用插件安装器」总开关，2026-10-06 随那个字段
+ * 一起删掉）与 `trackedCount`（2026-10-06 删）。`trackedCount` 删掉是因为
+ * 「打开设置页自动检查」现在**两件事一起做**：跟踪列表的更新 + SyncHub 自身，
+ * 而后者跟跟踪列表没有关系 —— 一个插件都没跟踪的用户同样该知道 SyncHub 有没有
+ * 新版本。所以「有没有跟踪项」交给调用方在跑跟踪那一轮时自己判（
+ * `checkAllUpdates` 本来就对空列表直接返回）。
  */
 export function shouldCheckOnSettingsOpen(input: {
-    enabled: boolean;
     autoCheckOnSettingsOpen: boolean;
-    trackedCount: number;
     lastCheckAt: number;
     now: number;
     intervalMs?: number;
 }): boolean {
-    if (!input.enabled) return false;
     if (!input.autoCheckOnSettingsOpen) return false;
-    if (input.trackedCount === 0) return false;
 
     const interval = input.intervalMs ?? SETTINGS_OPEN_CHECK_INTERVAL_MS;
     const elapsed = input.now - input.lastCheckAt;
@@ -118,7 +121,8 @@ export class UpdateChecker {
      * 检查 SyncHub 自己有没有新版本。
      *
      * 与插件同构（远端最新版本 vs 运行中的版本），但不写 `availableUpdates` ——
-     * 它不是跟踪列表里的一项，那张表是「谁该有徽标」的事实来源。
+     * 它不是跟踪列表里的一项，那张表是「谁该有徽标」的事实来源。它写的是自己的
+     * 那一份：`installer.selfUpdateAvailable`（见 `recordSelfUpdateCheck`）。
      *
      * 比较用**运行中**的版本：待重启期间磁盘上已经躺着更新的一份，
      * 拿磁盘那份去比会得到「已是最新」，而用户此刻跑的还不是它 ——
@@ -152,7 +156,15 @@ export class UpdateChecker {
             result = await this.checkSelfOnce(currentVersion, attempts[index]);
         }
 
-        return fellBackFrom ? { ...result, fellBackFrom } : result;
+        const final: SelfUpdateCheck = fellBackFrom ? { ...result, fellBackFrom } : result;
+
+        // 结果落盘（与 `checkAll` → `recordUpdateChecks` 同一个形状）。
+        // 放在这里而不是调用方：**两个入口**（设置页那个按钮、打开设置页时的自动检查）
+        // 都要写同一份记录，各写一遍迟早会有一条漏掉 —— 而漏掉的表现正是
+        // 「检查说没有更新、徽标却还亮着」。
+        await this.service.recordSelfUpdateCheck(final);
+
+        return final;
     }
 
     /** 单次来源的检查（失败时把原因放进 `error`，不抛）。 */

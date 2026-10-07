@@ -20,12 +20,81 @@ import type { RepoStatus } from "./types";
  * 这里改为**由 syncService 在每次状态变化后显式调用** ——
  * 没有变化就不动 DOM，也避免与真实同步动作脱节。
  *
+ * ## 「在动」必须看得出来（2026-10-05）
+ *
+ * 用户的原话是「点击立即同步时，只有左下角状态栏中才显示正在提交，不够显眼」。
+ * 当时这一格的忙碌态与常态**只差几个字**：一样是 12px 灰字，在一排状态条目里
+ * 扫过去看不出任何区别，而同步可能要跑几十秒（网络、代理、大仓库）。
+ *
+ * 于是忙碌时多做两件事，都不碰 DOM 结构：
+ *
+ * 1. 挂 `obsync-status-bar-busy`，由 CSS 画一个**转动的圆环**（`::before`）
+ *    并把文字改成强调色 —— 动的东西才抓得住眼睛（`styles.css` 里那一条）；
+ * 2. 文案说清**这是链路里的哪一步**（「正在同步：提交中…」而不是「正在提交…」），
+ *    见 `activityText` 与 `SyncActivity.chain`。
+ *
+ * 悬停提示也跟着改：忙碌时它说的是「正在同步中，点开面板看进度」，
+ * 而不是常态那句「点击打开仓库同步面板」。
+ *
  * 注意：状态栏元素由调用方用 `plugin.addStatusBarItem()` 创建后传入 ——
  * 这个 API 在 **Plugin** 类上，不在 `app.workspace` 上（猜错会直接
  * TypeError，这正是踩过的坑）。
  */
 
 export type StatusBarActivity = "idle" | "pulling" | "pushing" | "committing";
+
+/** 活动态里**真的有动作在跑**的那几个（`idle` 是「没有动作」）。 */
+export type BusyActivity = Exclude<StatusBarActivity, "idle">;
+
+/**
+ * 「同步模块正在干什么」—— 状态栏与侧边栏面板共用的一份描述。
+ *
+ * `kind` 是阶段；`chain` 说明这次动作是「立即同步」那条**三步链路**
+ * （提交 → 拉取 → 推送）里的一步，还是单独点某个按钮。
+ *
+ * 这个区分是文案准确性的前提：用户点「立即同步」时看到「正在提交…」，
+ * 很容易以为「提交」就是全部动作，于是不再等后面的拉取与推送 ——
+ * 而链路里那一步的实话是「正在同步：提交中…」。
+ */
+export interface SyncActivity {
+    kind: StatusBarActivity;
+    /** 属于「立即同步」的三步链路。 */
+    chain: boolean;
+}
+
+/** 「没有动作在跑」。共享一份只读对象，省得两处各写一个字面量。 */
+export const IDLE_ACTIVITY: SyncActivity = { kind: "idle", chain: false };
+
+/**
+ * 忙碌时的类名（`styles.css` 用它给条目配一个**转动的圆环**与强调色）。
+ *
+ * 为什么需要它：状态栏那一格在一排条目里只有文字，而「正在提交…」与
+ * 「main ~3」的视觉分量完全一样 —— 用户点了「立即同步」之后**看不出**
+ * 它在动。圆环是纯 CSS 的 `::before`，所以不必碰 DOM（条目的 DOM 顺序
+ * 一动不动是这块的硬约束，见文件末尾那组测试）。
+ */
+const BUSY_CLASS = "obsync-status-bar-busy";
+
+/**
+ * 活动态的文案。
+ *
+ * 单独动作沿用原来的短句（「正在提交…」），**链路里换一种说法**
+ * （「正在同步：提交中…」）—— 这样用户一眼能分出「我点的是立即同步」
+ * 与「我点的是提交」，也知道后面还有别的步骤。
+ */
+export function activityText(
+    t: LocaleStrings,
+    activity: BusyActivity,
+    chain: boolean
+): string {
+    if (activity === "pulling") {
+        return chain ? t.sync.statusChainPulling : t.sync.statusPulling;
+    }
+    if (activity === "pushing") {
+        return chain ? t.sync.statusChainPushing : t.sync.statusPushing;
+    }
+    return chain ? t.sync.statusChainCommitting : t.sync.statusCommitting;
+}
 
 export interface StatusBarDeps {
     /** `plugin.addStatusBarItem()` 的返回值。 */
@@ -58,6 +127,8 @@ export class StatusBar {
     private readonly clickable: boolean;
     private status: RepoStatus | undefined;
     private activity: StatusBarActivity = "idle";
+    /** 当前动作是不是「立即同步」那条三步链路里的一步。见 `setActivity`。 */
+    private chain = false;
 
     constructor(deps: StatusBarDeps) {
         this.item = deps.item;
@@ -79,30 +150,41 @@ export class StatusBar {
         this.render();
     }
 
-    /** 标记一次瞬时动作；动作结束后调用 `update()` 恢复。 */
-    setActivity(activity: StatusBarActivity): void {
+    /**
+     * 标记一次瞬时动作；动作结束后调用 `setActivity("idle")` 恢复。
+     *
+     * `chain` 只在「立即同步」那条链路里传 true：它换的是**文案**
+     * （「正在同步：拉取中…」而非「正在拉取…」），见 `activityText`。
+     * 每次调用都重算 —— 传 `idle` 时 `chain` 自然回到 false，
+     * 不会把上一次链路的标记漏给下一个单独动作。
+     */
+    setActivity(activity: StatusBarActivity, options: { chain?: boolean } = {}): void {
         this.activity = activity;
+        this.chain = options.chain ?? false;
         this.render();
     }
 
     private render(): void {
         const t = this.getT();
+        const activity = this.activity;
 
         try {
+            // 忙碌与常态的视觉差别全挂在这一个类上（转圈 + 强调色）。
+            // 它必须跟着状态**摘掉** —— 留着的话同步结束后那一格会一直转。
+            if (activity === "idle") this.item.removeClass(BUSY_CLASS);
+            else this.item.addClass(BUSY_CLASS);
+
             // aria-label 在 Obsidian 里就是悬停提示。每次渲染都写一遍，
             // 这样语言切换后它也变（条目本身不会重建，见 getT 的说明）。
-            if (this.clickable) this.item.setAttribute("aria-label", t.sync.statusBarHint);
-
-            if (this.activity !== "idle") {
-                this.item.setText(
-                    `SyncHub: ${
-                        this.activity === "pulling"
-                            ? t.sync.statusPulling
-                            : this.activity === "pushing"
-                              ? t.sync.statusPushing
-                              : t.sync.statusCommitting
-                    }`
+            if (this.clickable) {
+                this.item.setAttribute(
+                    "aria-label",
+                    activity === "idle" ? t.sync.statusBarHint : t.sync.statusBusyHint
                 );
+            }
+
+            if (activity !== "idle") {
+                this.item.setText(`SyncHub: ${activityText(t, activity, this.chain)}`);
                 return;
             }
 

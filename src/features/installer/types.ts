@@ -185,6 +185,21 @@ export const FILE_SETS = {
     },
 } as const satisfies Record<TrackedKind, FileSet<ItemFileName>>;
 
+/**
+ * 每类对象的**标志性文件**（两者共有的 `manifest.json` 不算）。
+ *
+ * 用途只有一个：用户在错误的入口里填了地址时，判断「这个仓库其实是另一类对象」——
+ * 装主题时缺 `theme.css`、或装插件时缺 `main.js`，读对面那个标志性文件在不在，
+ * 就能给出「改为按主题安装」这种能走下去的下一步，而不是一句「缺少 main.js」。
+ *
+ * 2026-10-05 用户报的正是这个：把主题仓库地址填进「添加插件仓库」，只会拿到
+ * 「缺少必需文件：main.js」。见 `AddRepoModal` 的 `maybeSuggestOtherKind`。
+ */
+export const KIND_MARKER_FILE = {
+    plugin: "main.js",
+    theme: "theme.css",
+} as const satisfies Record<TrackedKind, ItemFileName>;
+
 /** 每种对象在 `configDir` 下的子目录。 */
 export const SUBDIR = {
     plugin: "plugins",
@@ -258,6 +273,31 @@ export interface ThemeUpdateResult {
     origin?: RepoRef;
     /** **疑似镜像**（通过了主题的判据但没被采用）—— 由用户确认，见 `ResolvedRepo.mirror`。 */
     mirror?: RepoRef;
+}
+
+/**
+ * 从仓库地址**新装**一个主题的结果。
+ *
+ * 与 `ThemeUpdateResult` 分成两个类型而不是复用它，是因为新装多了一样调用方
+ * **必须**拿到的东西：`id` —— 这次写进 `themes/` 的目录名。更新那条路上这个名字
+ * 本来就在调用方手里（记录里的 `id` 就是它），新装这条路上它是由远端 manifest 的
+ * `name` 现算的（见 `InstallerService.themeFolderName`），界面得能说出「装成了哪一个」。
+ *
+ * 也没有 `mirror` / `origin`：新装**不做镜像发现**（主题的镜像判据依赖「本地已装的
+ * 是哪一版」，手上还没有时判据不成立，见 `findGiteeMirrorForTheme`）。
+ */
+export interface ThemeInstallResult {
+    manifest: ThemeManifest;
+    channel: InstallChannel;
+    version: string;
+    /** 写进 `themes/` 的目录名 —— 主题的身份，也是用户在「外观」里看到的名字。 */
+    id: string;
+    /** 磁盘上原本就有这个主题（重装/替换），而不是全新写入。 */
+    replaced: boolean;
+    /** 装的正好是当前正在使用的主题（写完请求过一次重载）。 */
+    wasActive: boolean;
+    /** 这次实际下载用的地址。 */
+    repoRef: RepoRef;
 }
 
 /** 更新检查的结果。 */

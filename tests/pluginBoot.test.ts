@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { __setDesktop } from "./stubs/obsidian";
+import { __setDesktop, __setRequestUrlHandler } from "./stubs/obsidian";
 import ObsyncPlugin from "../src/main";
 import { createFakeApp, type FakeApp } from "./helpers/fakeApp";
 
@@ -294,6 +294,20 @@ describe("桌面端启动", () => {
         }
     });
 
+    /**
+     * 「添加主题仓库」那条命令（2026-10-05）。
+     *
+     * 在此之前主题**没有新装入口**：把主题地址填进「添加插件仓库」只会得到
+     * 「缺少必需文件：main.js」。命令面板是插件在设置页之外唯一能挂的入口。
+     */
+    it("注册了「添加主题仓库」命令（主题的新装入口）", async () => {
+        const plugin = createPlugin(fake);
+        await plugin.onload();
+
+        const ids = plugin.registered.commands.map((command) => command.id);
+        expect(ids).toContain("add-theme-repo");
+    });
+
     it("注册了文件右键菜单（在远端打开）", async () => {
         const plugin = createPlugin(fake);
         await plugin.onload();
@@ -345,6 +359,82 @@ describe("桌面端启动", () => {
         // 只断言「不抛同步异常」：回调里是异步的定时器与网络检查，
         // 这里跑的是装配，不是那些行为本身。
         expect(() => fake.runLayoutReady()).not.toThrow();
+    });
+
+    /**
+     * 功能区底部的 Gitee 头像（设置页「通用」）。
+     *
+     * 这两条验的是**接线**，不是渲染细节（渲染在 `ribbonAvatar.test.ts` 里验）：
+     * 插件装配有没有把「设置 → 令牌 → host → 挂到功能区」这条链子接上。
+     * 这类断线在界面上只表现为「拨了开关，左边什么也没出现」—— 与当年那个
+     * 从没被读过的 `sync.enabled` 是同一类问题（见 `scripts/checks.mjs` 第 6 项）。
+     */
+    describe("功能区头像", () => {
+        /** 把 `document.querySelector` 换成一个能记数的替身，并在用例结束时还原。 */
+        function spyQuerySelector(): { calls: number } {
+            const state = { calls: 0 };
+            (document as unknown as { querySelector: () => null }).querySelector = () => {
+                state.calls += 1;
+                return null;
+            };
+            return state;
+        }
+
+        function restoreQuerySelector(): void {
+            delete (document as unknown as { querySelector?: unknown }).querySelector;
+        }
+
+        it("**默认关着**时不碰功能区 DOM（一次查询都不发）", async () => {
+            const plugin = createPlugin(fake);
+            const spy = spyQuerySelector();
+
+            try {
+                await plugin.onload();
+                fake.runLayoutReady();
+                await Promise.resolve();
+
+                expect(spy.calls).toBe(0);
+            } finally {
+                restoreQuerySelector();
+            }
+        });
+
+        it("开关打开且有 Gitee 令牌时，真的会去功能区找位置（装配没有断在这一段）", async () => {
+            const plugin = createPlugin(fake);
+            // 令牌走 localStorage：`fake.app` 上没有 secretStorage，
+            // `SecretStore` 会回退到那条路（与真机上老版本 Obsidian 同一条）。
+            fake.app.saveLocalStorage("obsync-token-gitee", "tok");
+            __setRequestUrlHandler(async () => ({
+                status: 200,
+                text: JSON.stringify({
+                    login: "sofqi",
+                    avatar_url: "https://foruda.gitee.com/avatar/1_sofqi_2.png",
+                }),
+            }));
+            setLoadedData(plugin, { ribbonAvatar: true });
+            const spy = spyQuerySelector();
+
+            try {
+                await plugin.onload();
+                fake.runLayoutReady();
+                // 网络那一段是异步的：多让两个微任务跑完。
+                await Promise.resolve();
+                await Promise.resolve();
+
+                expect(spy.calls).toBeGreaterThan(0);
+            } finally {
+                restoreQuerySelector();
+                __setRequestUrlHandler(undefined);
+            }
+        });
+    });
+
+    it("功能区头像模块挂在布局变化上（功能区被重建时要自己挂回去）", async () => {
+        const plugin = createPlugin(fake);
+        await plugin.onload();
+
+        expect(plugin.ribbonAvatar).toBeDefined();
+        expect(fake.workspaceEvents.map((entry) => entry.event)).toContain("layout-change");
     });
 });
 
@@ -420,5 +510,19 @@ describe("移动端启动", () => {
         await plugin.onload();
 
         expect(() => plugin.onunload()).not.toThrow();
+    });
+
+    /**
+     * 「初始化 git 仓库」在移动端是**空转**。
+     *
+     * 设置页那一行在移动端根本不渲染（`renderSync` 见到 `isSyncAvailable` 为假就
+     * 提前返回），但这个方法是公开的（命令面板 / 面板 / 设置页三个入口共用），
+     * 所以它自己也得扛得住 `sync` 不在场 —— 返回 false 而不是抛错。
+     */
+    it("移动端调用 initRepo 是空转（返回 false，不抛错）", async () => {
+        const plugin = createPlugin(fake);
+        await plugin.onload();
+
+        await expect(plugin.initRepo()).resolves.toBe(false);
     });
 });

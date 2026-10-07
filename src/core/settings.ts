@@ -8,7 +8,7 @@ import {
     type TrackedKind,
 } from "../features/installer/types";
 import { normalizeFolders } from "../features/images/imageScan";
-import { DEFAULT_SELF_SOURCE } from "../features/installer/selfUpdate";
+import { selfUpdateUsesGitee } from "../features/installer/selfUpdate";
 import { isValidPluginId } from "./pluginId";
 import { isValidThemeName } from "./themeName";
 
@@ -20,13 +20,21 @@ import { isValidThemeName } from "./themeName";
  * 这样 `data.json` 可以安全地随仓库同步到多设备而令牌不跟着走。
  */
 
-export const SETTINGS_VERSION = 8;
+export const SETTINGS_VERSION = 10;
 
 export interface InstallerSettings {
-    enabled: boolean;
     /**
      * 启动后是否自动检查已跟踪插件的更新。**默认关闭**（v2 起）——
      * 由「进入设置页时自动检查」承接，后者时机更准（用户正在看列表）。
+     *
+     * ## 它曾经上面还有一个「启用插件安装器」总开关（2026-10-06 删掉）
+     *
+     * 那个 `enabled` 只被两个地方读：本字段与下面 `autoCheckOnSettingsOpen`
+     * 的**前置条件**。也就是说 `enabled = false` 与「把这两个检查开关都关掉」
+     * 完全等价 —— 同一个 off 的第二种说法（与 v7 消掉 `autoCommitMinutes === 0`、
+     * v8 消掉图片周期里的 `0 = 关闭` 同一个方向）。而它的名字比职责大得多：
+     * 功能区图标、命令面板里的安装命令、设置页的按钮**从来不看它**，
+     * 关掉之后「不装了」是错觉。迁移见 `migrateV9ToV10`。
      */
     autoCheckOnStartup: boolean;
     /** 启动检查的延迟秒数 —— 避开 Obsidian 自身的启动流程。 */
@@ -57,29 +65,57 @@ export interface InstallerSettings {
      */
     pendingRestartVersion: string;
     /**
-     * **自身更新来源**（默认 = Gitee 镜像 `gitee.com/sofqi/SyncHub`）。
+     * 最近一次检查发现的 **SyncHub 自身可用更新**的版本号（空串 = 没有）。
      *
-     * 为什么默认走镜像：`github.com` 在目标用户的网络里是**时段性阻断**的，而
-     * Gitee 镜像能直连。默认走官方的话，「检查更新」这个动作本身就经常失败，
-     * 而失败的样子只是「一直报错」—— 用户得自己去翻设置页才知道有个来源可以填。
+     * ## 为什么持久化，而不是只留在设置页的内存里
      *
-     * 为什么允许改：镜像可能落后于官方。填
-     * `https://github.com/Dyse-Sofqi/SyncHub` 就回到官方。
+     * 两个地方要读它，而它们都可能发生在**这一轮没查过**的时候：
      *
-     * **镜像连不上会自动回退到官方仓库，并提示一次**（见 `selfRepoAttempts`）：
-     * Gitee 的匿名接口配额很低，没填令牌时被限流是常事，那条路不该是死路。
-     * 回退**一定说出来** —— 悄悄换来源正是这个模块一直避免的。
+     * 1. 「插件安装器」标签上那个数字徽标（`renderInstallerBadge`）—— 标签栏是在
+     *    页面内容**之前**画的，而检查是异步的，只放内存的话徽标永远慢一拍；
+     * 2. 自身更新那一行的状态文字 —— 用户没点过「检查更新」时也该看得到上次的结论。
      *
-     * **空串 = 用默认**（也就是镜像），不是「用官方」。这一条同时把老 `data.json`
-     * 里那个空值收敛到新默认上 —— 见 `normalizeSettings` 里的说明。
+     * 与 `availableUpdates` 同一条理由（那里写着「持久化而不是只存内存」）：
+     * 重启之后徽标还在，不必等用户先手动点一次才出现 —— 而徽标的意义正是
+     * 「不用点也知道」。
      *
-     * 它**不是**「镜像发现」那套（那套只提议、要用户确认、每次都要探测）：
-     * 这是写死的**固定来源**，填一次就一直用它，不再探测。
+     * 用字符串而不是对象：与 `pendingRestartVersion` 同一个取舍（`mergeWithDefaults`
+     * 对「默认值为 undefined 的对象字段」透传不了），而这里也确实只需要版本号。
      *
-     * 校验照旧：远端 manifest 的 `id` 必须是 `ob-sync`，否则拒绝写盘 ——
-     * 所以地址填错不会把别的插件覆盖掉。
+     * **清除时机**：检查报「无更新」时清掉；`updateSelf` 成功后也清掉（那个版本已经
+     * 落盘了，再挂着「有可用更新」就是假话）。
      */
-    selfUpdateSource: string;
+    selfUpdateAvailable: string;
+    /**
+     * **自身更新是否走 Gitee 镜像**（默认 `true`）。
+     *
+     * 开（默认）→ `gitee.com/sofqi/SyncHub`；关 → 官方仓库
+     * `github.com/Dyse-Sofqi/SyncHub`。两个地址写死在 `selfUpdate.ts`
+     * （`SELF_MIRROR` / `SELF_REPO`），由 `resolveSelfRepo(useGitee)` 二选一。
+     *
+     * ## 为什么默认走镜像
+     *
+     * `github.com` 在目标用户的网络里是**时段性阻断**的，而 Gitee 镜像能直连。
+     * 默认走官方的话，「检查更新」这个动作本身就经常失败，而失败的样子只是
+     * 「一直报错」—— 用户得自己去翻设置页才知道有个来源可以换。
+     *
+     * ## 为什么从「填地址」改成开关（2026-10-06 用户要求）
+     *
+     * 用户的原话是「插件的自更新来源用开关的形式选择」。原先是一个自由文本
+     * `selfUpdateSource`，而它要用户先读懂一串规则才敢动：空串算用默认、
+     * `owner/repo` 简写按 GitHub 解释、非法地址会抛错。两个固定地址之间切换
+     * 本来就是二选一，做成开关就不需要那些规则了。
+     *
+     * 代价说清楚：**不再支持自定义来源**（例如从自己的 fork 更新）。那个场景
+     * 本来也不成立 —— 写盘前校验远端 manifest 的 `id` 必须是 `ob-sync`，
+     * fork 之后 id 通常也改了，填进去只会被拒。
+     *
+     * ## 镜像连不上会自动回退到官方仓库，并提示一次
+     *
+     * 见 `selfRepoAttempts`：Gitee 的匿名接口配额很低，没填令牌时被限流是常事，
+     * 那条路不该是死路。回退**一定说出来** —— 悄悄换来源正是这个模块一直避免的。
+     */
+    selfUpdateUseGitee: boolean;
     /**
      * 已跟踪的插件与主题（同一个列表，靠 `kind` 判别）。
      *
@@ -123,10 +159,11 @@ export interface SyncSettings {
      * 这一行是给下一个人的提醒：这个字段曾经**只被写、从没被读过** ——
      * 设置页有开关、`data.json` 里存着值、README 也列着它，但代码里没有
      * 任何一处读它，于是「关掉同步」之后自动提交照样每 N 分钟把笔记推到远端。
-     * 加字段时顺手确认一下有没有读取方（`installer.enabled` 是正例）。
+     * 加字段时顺手确认一下有没有读取方（`installer.autoCheckOnStartup` 是正例）。
      *
-     * 边界：只管后台自动动作，不管命令面板里的显式命令（与 `installer.enabled`
-     * 同一个边界 —— 那一份管的是「启动时自动检查」，手动入口始终可用）。
+     * 边界：只管后台自动动作，不管命令面板里的显式命令（与
+     * `installer.autoCheckOnStartup` 同一个边界 —— 那一份管的是「启动时自动检查」，
+     * 手动入口始终可用）。
      */
     enabled: boolean;
     /**
@@ -256,11 +293,54 @@ export interface ImageSyncSettings {
     /**
      * 按周期的间隔（分钟），只在 `autoSyncEnabled` 为真时有意义。
      *
-     * 范围 **5–1440**，默认 10。下限 5 的理由与 `compressQuality` 的下限 10 同源：
-     * 每 1 分钟跑一轮整库比对（ListObjects + 逐文件算 hash，还会真的上传下载）
-     * 没有意义，而用户多半是手滑拖到底。
+     * 范围 **5–1440**，默认 **30**（2026-10-06 由 10 改来）。下限 5 的理由与
+     * `compressQuality` 的下限 10 同源：每 1 分钟跑一轮整库比对没有意义，
+     * 而用户多半是手滑拖到底。
+     *
+     * ## 为什么默认从 10 改成 30
+     *
+     * 2026-10-06 加了「变动后自动同步」之后，这一条的**职责变了**：本机改动的
+     * 那半边交给那一项（用户停手 30 秒就同步），它只剩「把别处的变化拉回来」
+     * （另一台设备传的图、桶里被手工改动的对象）—— 而那种变化的时效要求低得多。
+     * 详见 `docs/image-sync-design.md`。
+     *
+     * 改默认值**只影响新用户**：老用户的 `data.json` 里存着 10，`mergeWithDefaults`
+     * 优先用存着的值（那是他们自己的设置，不该被默认值改写）。
      */
     autoSyncMinutes: number;
+    /**
+     * 库里新增 / 改动了受管图片之后，自动同步一次（默认**开**）。
+     *
+     * ## 它解决什么
+     *
+     * 在此之前，用户在库里**直接**动图（拖进来、用外部程序替换、在 Obsidian
+     * 之外编辑）之后，云端要等到「下一轮周期」或「重启后的启动那一轮」才更新 ——
+     * 而 `autoSyncEnabled` 默认是关的，所以实际要等到重启。
+     *
+     * ## 为什么默认开，而 `autoSyncEnabled` 默认关
+     *
+     * 两者不是一类东西：周期同步是「**每隔 N 分钟无条件跑一轮**」（用户没动任何
+     * 东西它也会跑），而这一项是「**你真的动了图之后跑一次**」—— 代价与收益
+     * 一一对应。而且 `enabled` 默认就是 `true`，它的理由（「配好之后还要求用户
+     * 再找一个开关才生效，是多余的一步」）在这里同样成立。
+     *
+     * ## 触发形状：静默期攒批，不是「一有变动就跑」
+     *
+     * 攒批与「什么时候真的跑」全在 `ImageChangeQueue` 里（静默期 + 硬上限 +
+     * 正在跑时不丢）。为什么必须攒：见那个文件的说明（一半是省请求，一半是
+     * **不在用户还在写文件的时候去读它**）。
+     */
+    imageChangeSyncEnabled: boolean;
+    /**
+     * 上面那一项的**静默期**（秒）：这段时间内没有新的变动就同步一次。
+     *
+     * 范围 **5–600**，默认 30。上限 600 的理由：再长就与「按周期同步」那一轮
+     * 重了，没有意义。下限 5：比这更密的话，一次编辑会话会被切成好几轮。
+     *
+     * 另有一个**硬上限**（`maxWaitForQuietMs`）：一直在动时也至少攒那么久就跑，
+     * 否则「连续动几百张图」会让静默期永远不满足、永远不跑。
+     */
+    imageChangeDelaySeconds: number;
     /** 裁剪 / 压缩弹窗里的默认质量（10–100）。png 用不到，界面会灰掉它。 */
     compressQuality: number;
     /** 默认最长边（像素）。0 = 不缩放。**只缩不放**。 */
@@ -302,6 +382,54 @@ export interface ObsyncSettings {
      * 最左 —— 功能不丢，只是不再「占满一整条」。
      */
     statusBarFullWidth: boolean;
+    /**
+     * 功能区（左侧 ribbon）底部是否显示**圆形账号头像**（默认关）。
+     *
+     * ## 为什么默认关
+     *
+     * 与 `statusBarFullWidth` 那条「默认与既有行为一致」不同：这是一个**新增的
+     * 视觉元素**，而且它要把用户的账号头像摆在界面上。加一个开关不该悄悄改变
+     * 任何人的界面 —— 想要的人自己打开。
+     *
+     * ## 数据从哪来
+     *
+     * 平台各自的 `validateToken()` —— 头像地址与账号名在同一次响应里
+     * （见 `TokenInfo.avatarUrl`）。**那个平台没配令牌就什么都不显示**：
+     * 匿名问 `/user` 只会拿到 401（实测），而没有令牌也无从知道「是谁的头像」。
+     *
+     * 所以这个开关的实际效果是「有令牌时，把那个账号的头像挂到功能区底部」；
+     * 设置页那一行的说明必须把这一点写出来，否则没配令牌的用户会以为开关坏了。
+     *
+     * **用哪个平台的头像由 `ribbonAvatarUseGitee` 决定**（2026-10-06 拆出来）。
+     *
+     * ## 为什么它值得进设置
+     *
+     * 头像本身不承载功能（点它没有任何动作），但它回答了插件别处回答不了的
+     * 一个问题：**当前配的令牌是哪个账号**。镜像探测拿这个账号名当候选
+     * （见 `installerService.mirrorOwnerCandidates`），出了偏差时用户以前只能去
+     * 「测试」那个按钮的提示里翻。
+     */
+    ribbonAvatar: boolean;
+    /**
+     * 功能区（左侧 ribbon）底部那张圆形头像**用哪个平台**的（默认 `true` = Gitee）。
+     *
+     * 开（默认）→ Gitee；关 → GitHub。两个平台的头像地址都来自各自的
+     * `validateToken()`（Gitee `GET /v5/user`、GitHub `GET /user`）——
+     * 都是「拿令牌换账号资料」那一次调用，不多打接口。
+     *
+     * ## 为什么从「功能区展示用户头像」里拆出来（2026-10-06 用户要求）
+     *
+     * 用户的原话是「将功能区展示用户头像中gitee部分拆分出来单独设置一个设置项，
+     * 默认开启，开启时使用gitee头像，关闭时使用GitHub头像」。原来那一行把两件事
+     * 挤在一起说：**要不要显示头像**（那个开关）与**显示哪个账号的**（写死的 Gitee）。
+     * 于是没配 Gitee 令牌、只用 GitHub 的用户，那一行对他来说等于「坏掉的开关」——
+     * 而其实换个平台就有头像了。
+     *
+     * 默认 Gitee 是**沿用既有行为**（拆之前写死的正是它），不是新偏好。
+     *
+     * 它只在 `ribbonAvatar` 开着时有意义（设置页在总开关关着时把它置灰）。
+     */
+    ribbonAvatarUseGitee: boolean;
     installer: InstallerSettings;
     sync: SyncSettings;
     images: ImageSyncSettings;
@@ -313,8 +441,12 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
     debugLogging: false,
     // 默认与既有行为一致（一直是全宽）—— 加开关不该悄悄改变任何人的界面。
     statusBarFullWidth: true,
+    // 默认**关**：这是新增的视觉元素，而且它展示的是用户的账号头像。
+    // 理由与「不改变任何人的界面」同源，但方向相反 —— 这里是「不替用户加东西」。
+    ribbonAvatar: false,
+    // 默认 Gitee：拆之前写死的就是它 —— 拆出来是为了能换，不是为了改默认。
+    ribbonAvatarUseGitee: true,
     installer: {
-        enabled: true,
         // v2 起默认关闭：把「检查」放在用户真正在看列表的时刻（进入设置页），
         // 而不是每次启动都无条件打一遍各平台的 API。
         autoCheckOnStartup: false,
@@ -326,7 +458,10 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
         discoverGiteeMirrors: false,
         lastUpdateCheckAt: 0,
         pendingRestartVersion: "",
-        selfUpdateSource: DEFAULT_SELF_SOURCE,
+        // 还没查过 —— 空串表示「没有已知的可用更新」，不是「已是最新」。
+        selfUpdateAvailable: "",
+        // 默认走 Gitee 镜像（国内可直连）—— 见字段说明。
+        selfUpdateUseGitee: true,
         tracked: [],
         availableUpdates: {},
         mirrorSuggestions: {},
@@ -379,10 +514,19 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
         // 回到本地了（见 ImageSyncSettings.deleteRemotePolicy 的说明）。
         deleteRemotePolicy: "ask",
         // 默认关闭：图片同步会真的读写文件与网络，不该在用户没要求时自己跑起来。
-        // 周期另给一个默认值 10（下限 5）—— 上一个开关关着时它不起作用，
+        // 周期另给一个默认值 30（下限 5）—— 上一个开关关着时它不起作用，
         // 而用户打开开关的那一刻就该看到一个合理的数字，而不是 0。
+        //
+        // 2026-10-06 由 10 改成 30：本机改动那半边交给下面 `imageChangeSyncEnabled`
+        // 之后，这一条只剩「把别处的变化拉回来」—— 那种变化的时效要求低得多。
         autoSyncEnabled: false,
-        autoSyncMinutes: 10,
+        autoSyncMinutes: 30,
+        // 默认**开**：它与上面那条不是一类东西（见 `imageChangeSyncEnabled` 的说明）
+        // —— 它只在用户真的动了图之后跑一次，代价与收益一一对应。
+        imageChangeSyncEnabled: true,
+        // 静默 30 秒：一次编辑会话（拖一批图、批量压缩）会被收成一轮，
+        // 而且不会在用户还在写文件的时候去读它。
+        imageChangeDelaySeconds: 30,
         compressQuality: 82,
         compressMaxEdge: 1600,
         compressFormat: "keep",
@@ -417,6 +561,13 @@ function readRawSync(loaded: unknown): Record<string, unknown> | undefined {
     if (!isPlainObject(loaded)) return undefined;
     const sync = loaded.sync;
     return isPlainObject(sync) ? sync : undefined;
+}
+
+/** 读磁盘数据里的 `installer` 原文（v8 → v9 要读已经删掉的 `selfUpdateSource`）。 */
+function readRawInstaller(loaded: unknown): Record<string, unknown> | undefined {
+    if (!isPlainObject(loaded)) return undefined;
+    const installer = loaded.installer;
+    return isPlainObject(installer) ? installer : undefined;
 }
 
 /**
@@ -490,6 +641,7 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
     // 只保留默认值里存在的键 —— 所以原始那一份也要留着。
     const loadedImages = readRawImages(loaded);
     const loadedSync = readRawSync(loaded);
+    const loadedInstaller = readRawInstaller(loaded);
 
     const merged = mergeWithDefaults(
         DEFAULT_SETTINGS as unknown as Record<string, unknown>,
@@ -531,6 +683,16 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
         migrateV7ToV8(merged.images, loadedImages);
     }
 
+    // v8 → v9：自身更新来源从「自由地址」改成「是否走 Gitee 镜像」。见 migrateV8ToV9。
+    if (loadedVersion < 9) {
+        migrateV8ToV9(merged.installer, loadedInstaller);
+    }
+
+    // v9 → v10：删掉「启用插件安装器」那个总开关。见 migrateV9ToV10。
+    if (loadedVersion < 10) {
+        migrateV9ToV10(merged.installer, loadedInstaller);
+    }
+
     // 数值范围钳制 —— data.json 是用户可以手改的。
     merged.installer.autoCheckDelaySeconds = clamp(
         merged.installer.autoCheckDelaySeconds,
@@ -543,19 +705,15 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
     if (typeof merged.installer.pendingRestartVersion !== "string") {
         merged.installer.pendingRestartVersion = "";
     }
-    // 「自身更新来源」：类型不对或**空白**都收敛到默认（Gitee 镜像）。
-    //
-    // 空值这一条同时是一次**对老数据的迁移**：这个字段当年默认是空串、而空串
-    // 表示「官方仓库」，所以已经装过插件的人的 `data.json` 里存着的正是空串。
-    // 不收敛的话，「默认改走镜像」对他们**一个都不生效**。这里刻意不写版本化迁移
-    // —— 「空 = 用默认」本来就是一个每次读都该成立的归一化规则，而它顺带把老数据
-    // 修好了；下次保存时那个空串就变成默认地址落盘。
-    if (
-        typeof merged.installer.selfUpdateSource !== "string" ||
-        merged.installer.selfUpdateSource.trim() === ""
-    ) {
-        merged.installer.selfUpdateSource = DEFAULT_SELF_SOURCE;
+    // 自身可用更新的版本号：与上一行同一个口径（非字符串当没写过）。
+    // 它只是个「记下上次查到了什么」的备忘，不参与任何判断 —— 所以这里不做
+    // 版本号格式校验：真出现脏值时，最多是状态行多写一句，而不是功能出错。
+    if (typeof merged.installer.selfUpdateAvailable !== "string") {
+        merged.installer.selfUpdateAvailable = "";
     }
+    // 「自身更新是否走 Gitee 镜像」是个布尔：`mergeWithDefaults` 已经把类型不对的
+    // 旧值回退到默认 `true`，这里不必再兜。老数据里那个字符串字段的折算在
+    // `migrateV8ToV9` 里做（要读磁盘原文，见那里的说明）。
     // 定时同步的周期：0 / 负数 / 非数字都收敛到默认 —— 新模型里「关」由
     // `enabled` 表达，周期里没有 0 的含义（见 `SyncSettings.intervalMinutes`），
     // 落进一个 0 只会变成「开着却永不触发」的假状态。
@@ -615,6 +773,14 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
         images.autoSyncMinutes = DEFAULT_SETTINGS.images.autoSyncMinutes;
     }
     images.autoSyncMinutes = clamp(images.autoSyncMinutes, 5, 24 * 60);
+    // 「变动后自动同步」的静默期：下限 **5 秒**（比这更密的话，一次编辑会话会被
+    // 切成好几轮），上限 **600 秒**（再长就与「按周期同步」那一轮重了）。
+    // 与上面同一条取舍：0 / 负数 / 非数字收敛到**默认值**，不钳到边界 ——
+    // 5 秒一轮比默认值激进得多，不该是「填错」的结果。
+    if (!(images.imageChangeDelaySeconds >= 5)) {
+        images.imageChangeDelaySeconds = DEFAULT_SETTINGS.images.imageChangeDelaySeconds;
+    }
+    images.imageChangeDelaySeconds = clamp(images.imageChangeDelaySeconds, 5, 600);
     // 下限 10 而不是 1：质量 1 的 jpeg 基本不可看，而用户多半是手滑拖到底。
     images.compressQuality = clamp(images.compressQuality, 10, 100);
     // 上限 20000 像素：再大也不是「压缩」，且画布在部分设备上会直接失败。
@@ -837,6 +1003,62 @@ function migrateV7ToV8(
     }
 
     images.autoSyncEnabled = false;
+}
+
+/**
+ * v8 → v9：自身更新来源从「自由地址字符串」改成「是否走 Gitee 镜像」开关。
+ *
+ * 2026-10-06 用户要求「插件的自更新来源用开关的形式选择」—— 于是
+ * `selfUpdateSource: string` 变成了 `selfUpdateUseGitee: boolean`。老数据里
+ * 那个字符串只能折成二选一，折算规则（含「空串 = 老默认 = 镜像」「简写按 GitHub
+ * 解释」这些历史语义）写在 `selfUpdateUsesGitee` 里，与它同源。
+ *
+ * ## 为什么要版本化迁移，而不是像别的字段那样「每次读都归一化」
+ *
+ * 老的 `selfUpdateSource` 是个**保留用户输入**的自由字段，不是「空 = 用默认」的
+ * 那种可直接归一化的形状：一个手改坏的值、一个自定义地址，都可能存在。折算它
+ * 需要读**磁盘原文**（`mergeWithDefaults` 只保留默认值里存在的键，老字段在
+ * `merged.installer` 上已经看不到了），所以必须走 `readRawInstaller` 这条路。
+ *
+ * 已经有 `selfUpdateUseGitee`（v9 数据，或两台设备版本不一致时较新那台写的）就
+ * 一个字段都不碰 —— 老字段只是残留。
+ */
+function migrateV8ToV9(
+    installer: InstallerSettings,
+    loaded: Record<string, unknown> | undefined
+): void {
+    if (typeof loaded?.selfUpdateUseGitee === "boolean") return;
+
+    installer.selfUpdateUseGitee = selfUpdateUsesGitee(loaded?.selfUpdateSource);
+}
+
+/**
+ * v9 → v10：删掉「启用插件安装器」总开关（2026-10-06）。
+ *
+ * 那个字段只被两处读，且都是**前置条件**：启动检查（`enabled &&
+ * autoCheckOnStartup`）与进入设置页检查（`enabled && autoCheckOnSettingsOpen`）。
+ * 功能区图标、命令面板里的安装命令、设置页的按钮从来不看它 —— 所以它的实际语义
+ * 就是「关掉那两个自动检查」，而那件事下面两个开关各自就能表达。
+ *
+ * 迁移只需处理**关过它**的用户：把他明确表达过的「不要自动检查」落到两个子开关上，
+ * 行为才与升级前一致。`true`（默认）或缺失都不动 —— 那本来就是「没表过态」，
+ * 两个子开关各自保持自己的值即可。
+ *
+ * 读磁盘原文的理由与 `migrateV8ToV9` 同：`mergeWithDefaults` 只保留默认值里存在的
+ * 键，老字段在 `merged.installer` 上已经看不到了。
+ *
+ * 边界（**只有 false 才触发**）：手改成 `"false"` / `0` 这类坏值不当成「用户关过」——
+ * 当年 `mergeWithDefaults` 会把它换成默认 `true`，也就是当年那台设备上它其实是**开着**
+ * 的。这里跟着同一个口径，免得迁移把两个检查开关关掉、凭空改了行为。
+ */
+function migrateV9ToV10(
+    installer: InstallerSettings,
+    loaded: Record<string, unknown> | undefined
+): void {
+    if (loaded?.enabled !== false) return;
+
+    installer.autoCheckOnStartup = false;
+    installer.autoCheckOnSettingsOpen = false;
 }
 
 /**

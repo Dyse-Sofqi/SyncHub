@@ -5,7 +5,6 @@ import {
     SETTINGS_VERSION,
     normalizeSettings,
 } from "../../src/core/settings";
-import { DEFAULT_SELF_SOURCE } from "../../src/features/installer/selfUpdate";
 
 describe("availableUpdateKey（身份键）", () => {
     it("带 kind 前缀 —— 插件 id 与主题目录名是两个命名空间", () => {
@@ -98,57 +97,158 @@ describe("normalizeSettings", () => {
     /**
      * **自身更新的默认来源是 Gitee 镜像**（2026-10-01）。
      *
-     * 这一组盯的是「已经装过插件的人也会跟着走镜像」：当年这个字段默认是空串
-     * （空串表示官方仓库），所以老 `data.json` 里存着的正是空串 —— 不把它收敛到
-     * 新默认，「默认改走镜像」对老用户**一个都不生效**。
+     * 这一组盯的是「已经装过插件的人也会跟着走镜像」：当年这个字段是**自由地址
+     * 字符串**，默认是空串（空串表示官方仓库），所以老 `data.json` 里存着的正是
+     * 空串 —— 不把它折算成「用镜像」，「默认改走镜像」对老用户**一个都不生效**。
+     *
+     * 2026-10-06 该字段从字符串换成了布尔开关（`selfUpdateUseGitee`），所以这一组
+     * 同时验两件事：默认值是 `true`，以及 v8 及以前的老字符串被正确折算。
      */
-    describe("自身更新来源的默认值", () => {
-        it("出厂设置就是 Gitee 镜像地址", () => {
-            expect(DEFAULT_SETTINGS.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+    describe("自身更新来源开关（v8 → v9）", () => {
+        it("出厂设置默认**开着**（走 Gitee 镜像）", () => {
+            expect(DEFAULT_SETTINGS.installer.selfUpdateUseGitee).toBe(true);
         });
 
-        it("老数据里的空串被收敛到默认（当年空串 = 官方）", () => {
+        it("老数据里的空串被折算成「用镜像」（当年空串 = 官方）", () => {
             const settings = normalizeSettings({
                 installer: { selfUpdateSource: "" },
             });
 
-            expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+            expect(settings.installer.selfUpdateUseGitee).toBe(true);
         });
 
-        it("全空白也算「用默认」", () => {
+        it("全空白也算「用镜像」", () => {
             const settings = normalizeSettings({
                 installer: { selfUpdateSource: "   " },
             });
 
-            expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
+            expect(settings.installer.selfUpdateUseGitee).toBe(true);
         });
 
-        it("类型不对（手改坏了）也回落到默认，而不是留一个空值", () => {
-            const settings = normalizeSettings({
-                installer: { selfUpdateSource: 42 },
-            });
-
-            expect(settings.installer.selfUpdateSource).toBe(DEFAULT_SELF_SOURCE);
-        });
-
-        it("用户填了别的地址就原样保留（默认只在没填时生效）", () => {
+        it("老数据里填的是官方地址 → 关掉开关", () => {
             const settings = normalizeSettings({
                 installer: { selfUpdateSource: "https://github.com/Dyse-Sofqi/SyncHub" },
             });
 
-            expect(settings.installer.selfUpdateSource).toBe(
-                "https://github.com/Dyse-Sofqi/SyncHub"
-            );
+            expect(settings.installer.selfUpdateUseGitee).toBe(false);
+        });
+
+        it("老数据里填的是 Gitee 地址 → 保持开着", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: "https://gitee.com/sofqi/SyncHub" },
+            });
+
+            expect(settings.installer.selfUpdateUseGitee).toBe(true);
+        });
+
+        it("老数据里的 `owner/repo` 简写按 GitHub 解释（当年就是这么解析的）→ 关", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: "sofqi/SyncHub" },
+            });
+
+            expect(settings.installer.selfUpdateUseGitee).toBe(false);
+        });
+
+        it("类型不对（手改坏了）也回落到默认（开），而不是留一个空值", () => {
+            expect(
+                normalizeSettings({ installer: { selfUpdateSource: 42 } }).installer
+                    .selfUpdateUseGitee
+            ).toBe(true);
+        });
+
+        it("解析不出来的自定义地址退回默认（开）", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateSource: "这不是一个仓库地址" },
+            });
+
+            expect(settings.installer.selfUpdateUseGitee).toBe(true);
+        });
+
+        it("已经是 v9 数据（有布尔开关）时不被老字段覆盖", () => {
+            const settings = normalizeSettings({
+                installer: {
+                    selfUpdateUseGitee: false,
+                    // 老字段只是残留 —— 两台设备版本不一致时就会这样。
+                    selfUpdateSource: "https://gitee.com/sofqi/SyncHub",
+                },
+            });
+
+            expect(settings.installer.selfUpdateUseGitee).toBe(false);
+        });
+
+        it("开关字段类型不对（手改成数字）时回落到默认（开）", () => {
+            const settings = normalizeSettings({
+                installer: { selfUpdateUseGitee: 42 },
+            });
+
+            expect(settings.installer.selfUpdateUseGitee).toBe(true);
+        });
+    });
+
+    /**
+     * 「启用插件安装器」总开关的删除（2026-10-06，v9 → v10）。
+     *
+     * 那个字段只挡下面两个自动检查（`enabled && autoCheckOnStartup`、
+     * `enabled && autoCheckOnSettingsOpen`），所以它等价于「把这两个都关掉」——
+     * 同一个 off 的第二种说法。删掉它时，**明确关过它的用户**必须把「不要自动检查」
+     * 这件事落到两个子开关上，否则升级后行为会变（他们会开始被自动检查）。
+     */
+    describe("删掉「启用插件安装器」总开关（v9 → v10）", () => {
+        it("关过它的用户 → 两个自动检查开关都置为关（行为不变）", () => {
+            const settings = normalizeSettings({
+                version: 9,
+                installer: { enabled: false },
+            });
+
+            expect(settings.installer.autoCheckOnStartup).toBe(false);
+            expect(settings.installer.autoCheckOnSettingsOpen).toBe(false);
+        });
+
+        it("开着它的用户（默认）→ 两个子开关保持各自的值，不被迁移动", () => {
+            const settings = normalizeSettings({
+                version: 9,
+                installer: { enabled: true, autoCheckOnSettingsOpen: true },
+            });
+
+            expect(settings.installer.autoCheckOnStartup).toBe(false);
+            expect(settings.installer.autoCheckOnSettingsOpen).toBe(true);
+        });
+
+        it("缺这个字段（更老的数据）→ 同样不动两个子开关", () => {
+            const settings = normalizeSettings({ version: 9, installer: {} });
+
+            expect(settings.installer.autoCheckOnStartup).toBe(false);
+            expect(settings.installer.autoCheckOnSettingsOpen).toBe(true);
+        });
+
+        it("手改成坏值（`\"false\"`）不算「关过」—— 当年它其实是开着的", () => {
+            // 当年 `mergeWithDefaults` 会把类型不匹配的值换成默认 `true`，
+            // 也就是那台设备上它一直是**开着**的。跟着同一个口径才不会凭空改行为。
+            const settings = normalizeSettings({
+                version: 9,
+                installer: { enabled: "false" },
+            });
+
+            expect(settings.installer.autoCheckOnSettingsOpen).toBe(true);
+        });
+
+        it("v10 数据里那个字段只是残留，迁移不再触发", () => {
+            const settings = normalizeSettings({
+                version: 10,
+                installer: { enabled: false, autoCheckOnSettingsOpen: true },
+            });
+
+            expect(settings.installer.autoCheckOnSettingsOpen).toBe(true);
         });
     });
 
     it("补齐新增的嵌套设置项，不需要写迁移代码", () => {
         // 模拟「旧版本 data.json 里没有 installer.autoCheckDelaySeconds」
         const settings = normalizeSettings({
-            installer: { enabled: false },
+            installer: { discoverGiteeMirrors: true },
         });
 
-        expect(settings.installer.enabled).toBe(false);
+        expect(settings.installer.discoverGiteeMirrors).toBe(true);
         expect(settings.installer.autoCheckDelaySeconds).toBe(
             DEFAULT_SETTINGS.installer.autoCheckDelaySeconds
         );
@@ -157,11 +257,13 @@ describe("normalizeSettings", () => {
     it("丢弃类型不匹配的旧值", () => {
         const settings = normalizeSettings({
             showNotices: "yes",
-            installer: { enabled: "true" },
+            installer: { discoverGiteeMirrors: "true" },
         });
 
         expect(settings.showNotices).toBe(DEFAULT_SETTINGS.showNotices);
-        expect(settings.installer.enabled).toBe(DEFAULT_SETTINGS.installer.enabled);
+        expect(settings.installer.discoverGiteeMirrors).toBe(
+            DEFAULT_SETTINGS.installer.discoverGiteeMirrors
+        );
     });
 
     it("旧的 data.json 里没有「状态栏占满整屏宽」时补成默认值（**保持既有观感**）", () => {
@@ -822,8 +924,36 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
         // 数字里没有 0 的含义，范围 5–1440。
         expect(DEFAULT_SETTINGS.images.autoSyncEnabled).toBe(false);
         // 而周期本身有个合理默认值 —— 用户打开开关的那一刻就该看到一个数字，
-        // 不是一个 0。
-        expect(DEFAULT_SETTINGS.images.autoSyncMinutes).toBe(10);
+        // 不是一个 0。2026-10-06 由 10 改成 30：本机改动那半边交给
+        // 「变动后自动同步」之后，这一条只剩「把别处的变化拉回来」。
+        expect(DEFAULT_SETTINGS.images.autoSyncMinutes).toBe(30);
+    });
+
+    /**
+     * 「变动后自动同步」默认**开**（2026-10-06 加）。
+     *
+     * 它与上面那条默认关的**不是一类东西**：周期是「每隔 N 分钟无条件跑一轮」，
+     * 而这一项是「你真的动了图之后跑一次」—— 代价与收益一一对应。
+     */
+    it("默认：变动后自动同步**开着**，静默 30 秒", () => {
+        expect(DEFAULT_SETTINGS.images.imageChangeSyncEnabled).toBe(true);
+        expect(DEFAULT_SETTINGS.images.imageChangeDelaySeconds).toBe(30);
+    });
+
+    it("变动同步的静默期会被钳在 5–600 秒，填错则回落到默认值", () => {
+        const withDelay = (value: unknown): number =>
+            normalizeSettings({ images: { imageChangeDelaySeconds: value } }).images
+                .imageChangeDelaySeconds;
+
+        expect(withDelay(60)).toBe(60);
+        // 上限那一侧钳到边界
+        expect(withDelay(10_000)).toBe(600);
+        // 下限那一侧**回落到默认值**，不钳到 5 —— 5 秒比默认激进得多，
+        // 不该是「填错」的结果（与 `autoSyncMinutes` 同一条取舍）
+        expect(withDelay(1)).toBe(30);
+        expect(withDelay(0)).toBe(30);
+        expect(withDelay(-1)).toBe(30);
+        expect(withDelay("30")).toBe(30);
     });
 
     it("默认：总开关开着，但没配好之前它什么也不做", () => {
@@ -1168,11 +1298,13 @@ describe("normalizeSettings：图片同步（v3 → v4）", () => {
          *
          * 2026-10-02 从 6 提到 7（`migrateV6ToV7`：三个间隔合成一个「定时同步」周期），
          * 同一天又提到 8（`migrateV7ToV8`：图片那条「按周期同步」的开关从间隔里拆出来）。
-         * 两个都必须排在 v5 → v6 之后（与上面的链条用例同一个理由）。
+         * 2026-10-06 提到 9（`migrateV8ToV9`：自身更新来源从自由地址换成「是否走 Gitee
+         * 镜像」开关），同一天再提到 10（`migrateV9ToV10`：删掉「启用插件安装器」总开关）。
+         * 每一个都必须排在它前面的那一个之后（与上面的链条用例同一个理由）。
          */
-        it("版本号升到 8", () => {
-            expect(SETTINGS_VERSION).toBe(8);
-            expect(v5({}).version).toBe(8);
+        it("版本号升到 10", () => {
+            expect(SETTINGS_VERSION).toBe(10);
+            expect(v5({}).version).toBe(10);
         });
     });
 });

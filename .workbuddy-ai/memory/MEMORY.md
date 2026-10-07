@@ -182,6 +182,10 @@ HEAD 未出生时报 `fatal: could not resolve 'HEAD'` —— **HEAD 带单引�
   症状像「脚本跑了一半」。`Edit` 工具自己会处理换行。
 - **`/tmp/xxx.mjs` 在 Windows 上被解析成 `F:\tmp\xxx.mjs`**：临时脚本写到工作区内
   再用相对路径调用。
+- **Obsidian 大版本会改核心 DOM 的类名**：1.14 把功能区修饰类从 `mod-left` 改成
+  `mod-primary`。选择器只认旧名字的症状是「功能**静默消失**」（无报错）。**别把版本
+  修饰类写进选择器**，永远留一条不依赖它的兜底；升级 Obsidian 后重抠 `.probe` 的
+  `app.css` 并重跑对应探针。
 
 ### 提交与发版
 

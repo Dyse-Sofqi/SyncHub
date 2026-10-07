@@ -48,39 +48,51 @@ Chinese-first UI with an equal English one.
 **中文**
 
 - **笔记同步** — 提交 → 拉取 → 推送一条链 · 冲突指南（不自动解决）· 定时同步（一个周期跑完整链路） ·
-  仓库同步视图（侧边栏，可点状态栏打开）· 状态栏条目 · 初始化仓库时建 `.gitignore`
-  （设置页里可直接编辑）· **差异视图**（逐文件 / 逐提交 / 当前文件）·
-  在远端打开文件/历史/提交 · 编辑远端 · 连接测试
+  仓库同步视图（侧边栏，可点状态栏打开）· **同步特效横幅**（转圈 + 三个阶段 + 不确定进度条，
+  动作中禁用动作按钮）· 状态栏条目（**忙碌时转圈圆环 + 「正在同步：提交中…」**）·
+  初始化仓库时建 `.gitignore`（设置页里可直接编辑）· **差异视图**（逐文件 / 逐提交 / 当前文件）·
+  在远端打开文件/历史/提交 · 编辑远端 · 连接测试 · 设置页里初始化仓库（状态徽标只问一次）
 - **图片同步** — Cloudflare R2 双副本（只复制不删除）· 删本地时问一句（三档）· 需要图片同步的文件夹 ·
+  **变动后自动同步**（受管文件夹里改动后停手 30 秒跑一轮；周期同步只管其他设备的变化）·
   图片管理面板（本地 / 云端 / 已链接三条轴筛选、缩略图、**点缩略图看大图（滚轮缩放 / 放大后拖动）**、
   **单张重命名**、批量同步 / 压缩 / 重命名 / 删除）·
   笔记内裁剪压缩（保持原格式、只在变小时写回）· Excalidraw 压缩画布的引用也认得出 ·
   公网外链 · 密钥进系统密钥库
 - **插件与主题** — 地址识别（GitHub / Gitee）· release 资产与仓库源码双通道 · 版本选择（含预发布回退）·
   写入前备份 + 失败回滚 · 更新检查（单个/全部/启动/进入设置页）· 常驻更新徽标 · 冻结 ·
-  **版本回退** · 取消绑定（不删文件）· 绑定已装插件与主题 · Gitee 镜像发现 · 自我更新
-- **平台与体验** — 双平台适配层 · 令牌进系统密钥库并从日志脱敏 · 中文优先英文对等 ·
+  **版本回退** · 取消绑定（不删文件）· 绑定已装插件与主题 · **从仓库新装主题（不替你切换）** ·
+  Gitee 镜像发现 · 自我更新（镜像源开关）
+- **平台与体验** — 双平台适配层 · **功能区账号头像（Gitee / GitHub，带换头像链接）** ·
+  令牌进系统密钥库并从日志脱敏 · 中文优先英文对等 ·
   错误文案走类型码 + locale · 移动端可加载（同步仅桌面）
 
 **English**
 
 - **Vault sync** — commit → pull → push in one chain · conflict guide (no auto-resolution) ·
   scheduled sync (one interval running the full chain) · repository sync view (sidebar, openable from the status bar) ·
-  status-bar item · `.gitignore` created on init (editable in the settings page) ·
+  **syncing banner** (spinner + three stages + an indeterminate bar, action buttons disabled while it runs) ·
+  status-bar item (**a spinning ring while busy, reading "Syncing: committing…"**) ·
+  `.gitignore` created on init (editable in the settings page) ·
   **diff view** (per file / per commit / current file) ·
-  open file/history/commit on the remote · edit remote · connection test
+  open file/history/commit on the remote · edit remote · connection test ·
+  initialise the repository from the settings page (status badge asked only once)
 - **Image sync** — Cloudflare R2 mirror (copy only, never delete) · one prompt before deleting a cloud
-  copy (three modes) · folders to sync · image manager (filter on local / cloud / linked, thumbnails,
-  **click a thumbnail for the full-size view — the wheel zooms, drag when it is larger than the
-  window**, **rename a single image**, batch sync / compress / rename / delete) · crop and compress
+  copy (three modes) · folders to sync ·
+  **sync after changes** (a round runs 30 s after you stop editing inside the managed folders; periodic
+  sync only pulls in changes made on *other* devices) · image manager (filter on local / cloud / linked,
+  thumbnails, **click a thumbnail for the full-size view — the wheel zooms, drag when it is larger than
+  the window**, **rename a single image**, batch sync / compress / rename / delete) · crop and compress
   inside the note (keeps the original format, writes back only when smaller) · understands Excalidraw's
   compressed canvas references · public URLs · secret key in the OS keychain
 - **Plugins & themes** — address recognition (GitHub / Gitee) · release assets **and** repository source fallback ·
   version picker (with prerelease fallback) · backup before write + rollback on failure · update checks
   (single / all / on startup / on opening settings) · persistent update badges · freeze ·
   **version rollback** · unbind (keeps files) · adopt already-installed plugins and themes ·
-  Gitee mirror discovery · self-update
-- **Platform & UX** — one platform layer for both hosts · tokens in the OS keychain, redacted from logs ·
+  **install themes from a repository (never switches for you)** · Gitee mirror discovery ·
+  self-update (mirror toggle)
+- **Platform & UX** — one platform layer for both hosts ·
+  **ribbon account avatar (Gitee / GitHub, with a change-avatar link)** ·
+  tokens in the OS keychain, redacted from logs ·
   Chinese-first with an equal English UI · error text via type codes + locales ·
   loadable on mobile (sync is desktop-only)
 
@@ -160,7 +172,7 @@ Chinese-first UI with an equal English one.
   关掉或策略为「重置」挂起时它自己收起来。
   后台那一轮**失败只进日志**（不打扰正在写笔记的你，下一轮多半自愈）—— 但**连续失败 3 次**时
   会说一次，带上归类后的原因（例如「连不上远端…」）与「下一轮仍会自动重试」，成功一次即清零。
-  设置页「仓库同步」标题下有两段**注意事项**（选「重置」时定时同步会被暂停、
+  设置页「仓库同步」**页最上方**有两段**注意事项**（选「重置」时定时同步会被暂停、
   多设备同时编辑同一个文件的风险），配之前值得先看一眼
 - **仓库同步视图**（侧边栏）—— 打开方式：侧栏的 **git 图标**、点一下**状态栏条目**、
   命令 **SyncHub：打开仓库同步面板**，或者设置页「仓库同步」最上面那个**打开仓库同步面板**
@@ -207,6 +219,12 @@ Chinese-first UI with an equal English one.
   并且**可以点开**（打开仓库同步视图）。贴最左需要把状态栏拉成全屏宽，而**那会改变
   状态栏的整体观感**，所以设置页「通用」里给了开关（**状态栏占满整屏宽**，默认开）：
   关掉后状态栏恢复 Obsidian 原样（右下角一簇），同步条目仍在那一簇的最前面
+- **同步看得见** —— 忙碌时状态栏那一格挂一个**转动的圆环**、文字转成强调色，
+  文案也改成「**正在同步：提交中…**」（点「立即同步」时一眼分出这是三步链路里的
+  一步，后面还有拉取与推送；悬停提示同样改口）。侧边栏仓库同步面板的**工具条正下方**
+  还有一条同步特效横幅（转圈 + 三个阶段 + 一根**不确定**进度条 —— git 不会报
+  「推到第几个对象」，编一个百分比就是骗人，三个阶段本身才是真实可得的进度），
+  动作进行中四个动作按钮禁用（**刷新不在其中**，它只读、随时可点）
 - **在浏览器中打开** —— 当前文件、当前文件的修改历史，以及文件右键菜单里的同样两项；
   GitHub 与 Gitee 各按平台拼链接（中文文件名会自动转义）
 - **连接测试** —— 一条递进的检查链：git 可执行文件 → 是否 git 仓库 → 有没有远端 →
@@ -221,6 +239,18 @@ Chinese-first UI with an equal English one.
 
 给库里的图片在 Cloudflare R2 上存一份副本 —— **笔记走 git，图片走对象存储**。
 
+- **什么时候同步：四个触发器各管一件事。**
+
+  | 触发器 | 管什么 | 默认 |
+  | --- | --- | --- |
+  | **变动后自动同步** | **本机**改动 → 云端（停手 30 秒跑一轮，5–600 可调） | **开** |
+  | **按周期同步** | **其他设备**上的变化 → 本机（周期 5–1440 分钟） | 关，30 分钟 |
+  | 编辑器保存 | 单张图要立刻有结果 | 始终 |
+  | 启动后一轮 | 兜住「静默期内关窗」 | 始终 |
+
+  **为什么不能只留「变动后自动同步」把周期删掉**：事件只看得见**本机**的改动 ——
+  另一台设备传的图、或者你在 R2 控制台手工删的对象，本机什么都没发生 → 没有事件 →
+  计时器根本不会被启动。周期那一轮是**唯一**能看见那些变化的。
 - **只复制，从不删除** —— 每一轮比对只做「缺哪边补哪边」（云端多出来的下载回来、
   本地多出来的传上去）。**删除只在你删掉本地那张图、并被问过之后才发生**：
   「一边少了 = 用户删的」这件事本质上判断不准（清单丢失、两台设备各删一边都会错），
@@ -260,6 +290,10 @@ Chinese-first UI with an equal English one.
 
 - **从地址安装** —— 填 `owner/repo` 简写，或直接粘贴 GitHub / Gitee 的完整链接；识别结果会显示平台，
   命中镜像时另有说明
+- **插件与主题是两个入口** —— 「添加插件仓库」与「添加主题仓库」（设置页「插件与主题」页顶部的按钮行，另外各有一条命令）。
+  主题会写进 `themes/` 并纳入跟踪，**装完不替你切换**：到「设置 → 外观 → 主题」里选它。
+  万一填错了入口，失败时插件会探一下对面那个标志性文件（`main.js` / `theme.css`），
+  确有的话直接给一个「改为按主题安装」（或反过来）的按钮 —— 而不是只留一句「缺少 main.js」
 - **两条下载通道** —— 优先 release 资产，仓库没有发 release 时回退到**仓库源码文件**
   （Gitee 上大多数插件仓库没有 release，所以这条通道是必需的，不是补充）
 - **版本选择** —— 默认最新，也可以从 release 列表里挑具体版本；只有预发布版的仓库会回退到预发布版
@@ -295,6 +329,9 @@ Chinese-first UI with an equal English one.
 #### 🔐 平台与体验
 
 - **双平台适配层** —— GitHub 与 Gitee 的差异（鉴权方式、release 排序、raw 通道、限流特性）只实现一次
+- **功能区账号头像**（默认关）—— 左侧功能区**底部**挂一张当前令牌账号的圆形头像，
+  平台由「使用 Gitee 头像」决定；地址与账号名**同一次** `validateToken()` 拿到，
+  那个平台没配令牌时**一个请求都不发**；描述里带**换头像的个人资料页链接**（跟着平台走）
 - **访问令牌存进系统密钥库** —— 不写进 `data.json`、不随库同步到其他设备；
   错误提示与调试日志里的令牌一律脱敏
 - **中文优先、英文对等** —— 所有界面文案与错误信息都走 i18n；错误只携带「类型码 + 参数」，
@@ -313,18 +350,45 @@ Chinese-first UI with an equal English one.
 **只有 GitHub 源**，Gitee 上没有等价物，所以 Gitee 的插件需要手输地址。
 
 库里已经装好的插件不用一个个手输：命令 **SyncHub：绑定库里已安装的插件与主题**
-（或设置页的「绑定已有插件」）会扫描插件与主题目录，按 manifest id 反查来源仓库，一次性纳入跟踪。
+（或设置页「插件与主题」页顶部的「**绑定已有插件或主题**」）会扫描插件与主题目录，
+按 manifest id 反查来源仓库，一次性纳入跟踪。
 
-装完之后想换版本（比如新版有问题要退回旧版）：在设置页「已跟踪插件与主题」里点那一行右侧的
+装完之后想换版本（比如新版有问题要退回旧版）：在设置页「插件与主题」里点那一行右侧的
 **版本管理**按钮，选一个版本即可 —— 旧版本就是回退，选「最新版本」则恢复跟随最新。
+
+#### 安装主题
+
+1. 命令面板 → **SyncHub：添加主题仓库**（或点设置页「插件与主题」页顶部的「添加主题仓库」）
+2. 填 `owner/repo` 简写，或直接粘贴完整链接（仓库里要有 `manifest.json` 与 `theme.css`）
+3. 点「识别」→ 安装
+
+主题会写进 `{configDir}/themes/` 下**以主题名命名的目录**（官方主题商店也这么落），
+并纳入跟踪列表，之后的「检查更新 / 更新」都走同一套。**SyncHub 不会替你切换主题** ——
+装完到「设置 → 外观 → 主题」里选它（插件卸载也不会动你的主题选择）。
+
+> 把主题地址填进「添加插件仓库」时，失败信息里会点明「这个仓库里是主题（有 theme.css、
+> 没有 main.js）」并给一个**改为按主题安装**的按钮 —— 不用自己回去换入口再粘一遍。
+> 反方向（把插件地址填进「添加主题仓库」）同样有对应的按钮。
+
+> 目标目录里已经装着**另一个**主题时会被拒绝（同名不同主题确实存在）。理由：被覆盖的
+> 很可能正是你当前在用的那个，而它不一定在跟踪列表里，没有「重新下载」这条路。
+> 想跟踪一个已经装好的主题，用「绑定已有插件或主题」。
 
 > 所有命令在命令面板里都以 `SyncHub：` 开头，直接搜插件名就能找到。
 
 #### 同步笔记仓库
 
-先在设置页的「仓库同步」里填远端地址（命令 **SyncHub：编辑远端地址**），然后：
+**基本设置全在设置页的「仓库同步」里**，按从上到下的顺序走完即可（这一页的结构就是这样排的）：
 
-- 还不是 git 仓库的话，先执行 **SyncHub：初始化仓库**（仓库同步视图里也有这个按钮）
+1. **初始化 git 仓库** —— 库还不是仓库时点它（右侧徽标会直接告诉你现在是不是）。
+   顺手会建一份默认 `.gitignore`（已经有的绝不覆盖）。
+   命令 / 侧边栏面板里也有一模一样的入口，走的是同一个实现
+2. **远端地址** —— 填仓库地址（也能就地改；命令 **SyncHub：编辑远端地址**）
+3. **git 可执行文件路径** —— 只在 git 不在 PATH 时才需要填
+4. **连接测试** —— 一条递进的检查链（git → 是否仓库 → 有无远端 → 平台 → 真的连一次）
+
+然后就可以同步了：
+
 - **SyncHub：立即同步** —— 提交 → 拉取 → 推送，一条链走完（仓库同步视图的顶部工具条里也有）
 - 「提交」「推送」是**两个动作**，不是一个：提交只写本地仓库，推送只发送**已提交**的
   内容。想一步到位就用「立即同步」
@@ -349,9 +413,14 @@ Chinese-first UI with an equal English one.
   **SyncHub：预览图片同步**（只算不做）
 - 想整理图片：**SyncHub：打开图片管理**（或侧栏的图片图标）—— 筛选、批量同步 / 压缩 /
   重命名 / 删除都在那里
-- 按周期同步默认关闭（「按周期同步」那一行有**独立的开关**；周期 5–1440 分钟，默认 10）。
-  注意它只关掉「按周期跑」—— 只要「自动同步图片」那个开关开着，
-  **每次 Obsidian 启动仍会同步一轮**；要连启动那轮都不跑，就把「自动同步图片」关掉
+- **改完图会自动同步**：「变动后自动同步」默认开着 —— 在受管文件夹里新增或改动图片之后，
+  **停手 30 秒**（5–600 可调）就自动跑一轮。一次编辑会话（拖进一批图、批量压缩）会被
+  合并成一轮，也不会在你还在写文件的时候开始。它只管**本机**的改动。
+- 按周期同步默认关闭（「按周期同步」那一行有**独立的开关**；周期 5–1440 分钟，默认 30）。
+  它管的是**其他设备**上的变化（另一台设备传的图、云端被手工改动的对象）—— 那些在
+  本机不会产生任何事件，只能主动去问。注意它只关掉「按周期跑」—— 只要「自动同步图片」
+  那个开关开着，**每次 Obsidian 启动仍会同步一轮**；要连启动那轮都不跑，就把
+  「自动同步图片」关掉
 - 想让工具条上的「复制云端链接」可用，还要填**公网访问地址**（自定义域名或 `r2.dev` 域名）
 
 设置页「图片同步」那一页把**操作放在最前面**（打开图片管理 + 测试连接 / 预览变更 /
@@ -363,14 +432,24 @@ Chinese-first UI with an equal English one.
 
 | 标签 | 内容 |
 | --- | --- |
-| 已跟踪插件与主题 | 已安装/添加的插件与主题列表，含更新徽标、检查、更新、版本管理（回退）、冻结、打开仓库、取消绑定（不删文件） |
-| 插件安装器 | 启用开关、更新检查时机、Gitee 镜像发现、**访问令牌**（GitHub / Gitee）、SyncHub 自身更新（含**更新来源**） |
-| 仓库同步 | **远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**两项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**） |
-| 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步，排在最前面）、**自动同步图片**（开关）、**按周期同步**（周期 + 开关）、需要图片同步的文件夹（整行的路径框，含「浏览…」/「恢复默认」）、R2 连接与密钥、冲突与删除策略、压缩默认值 |
-| 通用 | 提示开关、调试日志、**状态栏占满整屏宽** |
+| 插件与主题 | 已安装/添加的插件与主题列表。顶部是一排**没有卡片**的按钮：**添加插件仓库**、**添加主题仓库**、**绑定已有插件或主题**（带 `link` 图标）、**检查更新**（带 `refresh-cw` 图标）；每行有更新徽标、检查、更新、版本管理（回退，仅插件）、冻结、打开仓库、取消绑定（不删文件） |
+| 插件安装器 | **SyncHub 自身**（版本状态小字 + 检查更新 / 更新按钮 + **启用 Gitee 镜像源**开关）、**进入设置页时自动检查**（开着时同时查跟踪列表与 SyncHub 自身）、**启动时检查更新** + 启动检查延迟、**自动发现 Gitee 镜像**。标签上有**数字徽标**：SyncHub 自身有可用更新时显示 |
+| 仓库同步 | **初始化 git 仓库**（一行：状态徽标「已是 / 还不是 git 仓库」+ 按钮，已是时置灰）、**远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**三项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**） |
+| 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步，排在最前面）、**自动同步图片**（开关）、**变动后自动同步**（延时 + 开关，默认开 / 30 秒）、**按周期同步**（周期 + 开关，只管其他设备上的变化）、需要图片同步的文件夹（整行的路径框，含「浏览…」/「恢复默认」）、R2 连接与密钥、冲突与删除策略、压缩默认值 |
+| 通用 | 提示开关、调试日志、**状态栏占满整屏宽**、**功能区展示用户头像** + **使用 Gitee 头像**（用哪个平台的头像；那一行的描述里带「去换头像」的链接，跟着平台走）、**访问令牌**（GitHub / Gitee） |
 
 **界面语言跟随 Obsidian**：插件不提供单独的界面语言设置项 —— 你在 Obsidian 里
 用的语言是什么，插件就是什么（中文 / 英文两套文案对等）。
+
+**功能区展示用户头像**（默认关）在左侧功能区（ribbon）**底部**挂一张圆形头像 ——
+就是当前所配**令牌所属账号**的头像（由那个平台的 `validateToken()` 返回的 `avatar_url`，
+与账号名同一次请求拿到，不额外多打一次接口）。它没有点击动作，作用是回答
+「现在配的令牌是哪个账号」—— 镜像探测拿的也正是这个账号名。
+**用哪个平台的头像由下面那一项「使用 Gitee 头像」决定**（默认开 = Gitee，关 = GitHub）。
+那个平台没配令牌时它什么都不显示（匿名问那个接口只有 401，而匿名配额实测极低，
+所以插件**不会**去发这个请求）。头像只能在平台那边换，所以那一行的描述末尾直接给了
+**个人资料页的链接**（选 Gitee 是 `gitee.com/profile`、选 GitHub 是
+`github.com/settings/profile`）—— 点一下就到换头像的地方，不用自己去翻设置。
 
 **令牌只保存在本机**（Obsidian 的密钥存储，老版本回退到 localStorage），
 不会写进 `data.json`，也不会随库同步到其他设备。
@@ -571,6 +650,11 @@ per-platform instructions).
   "reset" suspends automatic sync** — every automatic run would otherwise discard what was just
   committed). If you really do not want the pull to touch your working tree, do it in two steps:
   `Commit` → `Push`
+- **Initialise the repository from the settings page** — the "Initialise git repository" row shares a
+  card with the remote URL and the git path (all three are what a passing connection test depends on)
+  and comes before the connection test, with a status badge ("already a repo" / "not a repo yet", the
+  button greyed out when it is). The badge asks git **only once** and is then cached, so switching into
+  the tab no longer makes it pop in and shove the description down
 - **Initialize repository** — also creates a `.gitignore` (excluding per-device files such as
   `.obsidian/workspace.json` and `.obsidian/plugins/ob-sync/data.json`, which only ever produce
   conflicts). An existing `.gitignore` is **never overwritten**, and you can edit it at any time —
@@ -621,7 +705,7 @@ per-platform instructions).
   round **only goes to the log** (it does not interrupt you and usually heals next round) — but after
   **3 failures in a row** it says so once, with the classified reason (e.g. "cannot reach the remote")
   and a note that it will retry; one success resets the count. The settings page
-  carries **two notes** under the "Vault sync" heading (reset suspends scheduled sync; the risk of
+  carries **two notes** at the top of the "Vault sync" page (reset suspends scheduled sync; the risk of
   editing the same file on several devices) — worth reading before you configure it
 - **Repository sync view** (sidebar) — open it from the **git ribbon icon**, by **clicking the
   status-bar item**, via the command **SyncHub: Open repository sync panel**, or from the **Open
@@ -685,6 +769,13 @@ per-platform instructions).
   the status bar looks**, so the General tab has a switch for it (**"Status bar spans the full width"**,
   on by default): turning it off restores Obsidian's own layout (a bottom-right cluster) with the sync
   item still first in that cluster
+- **Syncing is visible** — while an action runs, that status-bar cell gets a **spinning ring** and its
+  text turns to the accent colour, and the wording becomes **"Syncing: committing…"** (so clicking
+  "Sync now" reads as one step of a three-step chain, with pull and push still to come; the hover
+  tooltip changes too). The repository sync panel adds a **syncing banner right under the toolbar**
+  (spinner + three stages + an **indeterminate** bar — git never reports "object 40 of 90", so an
+  invented percentage would be a lie, while the three stages are real). While an action runs the four
+  action buttons are disabled (**Refresh is not** — it only reads)
 - **Open on the remote** — current file and its history, also in the file context menu,
   with per-platform URLs (Gitee included)
 - **Connection test** — a step-by-step chain: git binary → git repo → remote configured →
@@ -700,6 +791,19 @@ per-platform instructions).
 Keeps a copy of your vault's images on Cloudflare R2 — **notes travel over git, images over object
 storage**.
 
+- **When it syncs: four triggers, each with its own job.**
+
+  | Trigger | Covers | Default |
+  | --- | --- | --- |
+  | **Sync after changes** | **local** edits → the cloud (a round runs 30 s after you stop, 5–600) | **on** |
+  | **Periodic sync** | changes made on **other devices** → this machine (5–1440 min) | off, 30 min |
+  | Editor save | a single image that needs an immediate result | always |
+  | One round after startup | catches "window closed during the quiet period" | always |
+
+  **Why the periodic round cannot be replaced by change-triggered sync**: events only see **local**
+  edits — an image uploaded by another device, or an object you deleted in the R2 console, produces
+  nothing here → no event → the timer is never even started. The periodic round is the **only** thing
+  that sees those.
 - **It only ever copies, never deletes** — each round fills the gaps on both sides (download what the
   cloud has extra, upload what the vault has extra). **Deletion happens only after you delete a local
   image and are asked about it**: "one side is missing it = the user deleted it" cannot be decided
@@ -749,6 +853,12 @@ storage**.
 
 - **Install from an address** — `owner/repo` shorthand or a full GitHub / Gitee URL;
   the resolved platform is shown, and a detected mirror is called out
+- **Plugins and themes are two entries** — "Add plugin repository" and "Add theme repository"
+  (buttons at the top of the Plugins & themes tab, plus one command each). A theme is written under
+  `themes/` and tracked, and **SyncHub never switches your theme** — pick it in Settings → Appearance →
+  Themes. If you fill a theme address into the plugin entry (or the other way round), the failure
+  probes for the other kind's marker file (`main.js` / `theme.css`) and offers a **"Switch to theme
+  install"** button instead of leaving you with a bare "missing main.js"
 - **Two download channels** — release assets first, falling back to **repository source files**;
   most Gitee plugin repos publish no releases, so this fallback is required, not optional
 - **Version picker** — latest by default, or a specific release; repositories that only publish
@@ -779,15 +889,21 @@ storage**.
 - **Long operations are visible** — the icon button you clicked turns into a spinner, and a notice with a
   spinner states **which file is being fetched** ("Trefoil: fetching main.js…"). The first request to GitHub's
   release asset CDN often takes 10+ seconds from mainland China; without this you cannot tell download from stall
-- **Self-update** — check and apply new versions of SyncHub itself (restart required). The
-  **source is configurable**: leave it empty for the official repository, or enter a mirror
-  (e.g. `https://gitee.com/sofqi/SyncHub`) when GitHub is slow or blocked — it is then used
-  every time, with no automatic probing
+- **Self-update** — check and apply new versions of SyncHub itself (restart required). The source is a
+  **toggle**: "Enable Gitee mirror source" (on by default) checks and downloads from the Gitee mirror
+  (`sofqi/SyncHub`), off goes to the official GitHub repository. Either way a failure falls back to the
+  official repo once and says so. SyncHub itself also joins the **on-opening-settings** check, and the
+  Plugins & themes tab carries a **numeric badge** when an update is available
 
 #### 🔐 Platform and UX
 
 - **One platform layer** — every GitHub/Gitee difference (auth style, release ordering, raw channel,
   rate limits) is implemented once
+- **Ribbon account avatar** (off by default) — a round avatar of the **account behind the current
+  token** at the **bottom of the left ribbon**, with the platform chosen by "Use Gitee avatar". The
+  address comes back from the **same** `validateToken()` call as the account name, and **not a single
+  request is sent** when that platform has no token; the description carries a **link to the profile
+  page** to change it (and follows the platform)
 - **Tokens live in the OS keychain** — never written to `data.json`, never synced with the vault,
   and redacted from error messages and debug logs
 - **Chinese-first, English equal** — all UI text and errors go through i18n; errors carry type codes
@@ -808,23 +924,55 @@ Obsidian's own index and **covers GitHub only** (there is no Gitee equivalent), 
 have to be entered by address.
 
 Already-installed plugins do not have to be typed in one by one: the command
-**SyncHub: Bind plugins and themes already installed in this vault** (or "Bind existing" in the
-settings) scans the plugin and theme folders, resolves their source repositories from the manifest
-`id`, and tracks them all at once.
+**SyncHub: Bind plugins and themes already installed in this vault** (or "**Bind existing plugins or
+themes**" at the top of the Plugins & themes tab) scans the plugin and theme folders, resolves their
+source repositories from the manifest `id`, and tracks them all at once.
 
 To switch a version later (for example rolling back after a bad update), click **Version manager**
-on that row under "Tracked plugins and themes" and pick a release — an older one is a rollback,
-while "Latest release" resumes following the newest.
+on that row under "Plugins & themes" and pick a release — an older one is a rollback, while "Latest
+release" resumes following the newest.
+
+#### Installing themes
+
+1. Command palette → **SyncHub: Add theme repository** (or "Add theme repository" at the top of the
+   Plugins & themes tab)
+2. Enter an `owner/repo` shorthand or paste a full URL (the repository needs a `manifest.json` and a
+   `theme.css`)
+3. Click "Resolve" → install
+
+The theme is written into a **folder named after the theme** under `{configDir}/themes/` (the same
+place the official theme store uses) and joins the tracked list, so the usual check / update path
+applies. **SyncHub never switches your theme** — after installing, pick it in Settings → Appearance →
+Themes (uninstalling the plugin does not touch your theme choice either).
+
+> Filling a theme address into "Add plugin repository" makes the failure name the real problem
+> ("this repository holds a theme: it has a `theme.css` and no `main.js`") and offers a **Switch to
+> theme install** button, so you do not have to go back and paste it again. The reverse direction has
+> the matching button.
+
+> A target folder that already holds **another** theme is refused (two different themes can share a
+> name). The reason: the one being overwritten is quite possibly the theme you are using right now,
+> and it may not be in the tracked list, so there is no "download it again" path. To track an
+> already-installed theme, use "Bind existing plugins or themes".
 
 > Every command starts with `SyncHub:` in the palette, so searching the plugin name finds them all.
 
 #### Syncing the vault
 
-First set the remote in the settings page under "Vault sync" (command
-**SyncHub: Edit remote address**), then:
+**All the basic setup lives on the "Vault sync" settings tab**, in top-to-bottom order (the page is
+laid out exactly that way):
 
-- If the vault is not a git repository yet, run **SyncHub: Initialize repository** first (the
-  repository sync view has the same button)
+1. **Initialise the git repository** — click it while the vault is not a repository yet (the badge on
+   the right tells you which it is). A default `.gitignore` is created along the way (an existing one
+   is never overwritten). The command palette and the sidebar panel have the same entry point, backed
+   by the same implementation
+2. **Remote URL** — enter the repository address (editable in place; command **SyncHub: Edit remote
+   address**)
+3. **Git executable path** — only needed when git is not on PATH
+4. **Connection test** — a step-by-step chain (git → repo → remote → platform → a real connection)
+
+Then you can sync:
+
 - **SyncHub: Sync now** — commit → pull → push in one chain (the view's toolbar has it too)
 - "Commit" and "Push" are **two separate actions**: commit writes to the local repository only,
   push sends **committed** content only. Use "Sync now" to do both
@@ -851,10 +999,16 @@ settings tab (the secret goes to the system keychain), then:
   **SyncHub: Preview image sync** (computes, never writes)
 - To tidy up: **SyncHub: Open image manager** (or the ribbon icon) — filtering, batch
   sync / compress / rename / delete all live there
+- **Edits sync themselves**: "Sync after changes" is **on by default** — after you add or modify an
+  image in a managed folder, a round runs once you have stopped for **30 s** (5–600 adjustable). A
+  whole editing session (dragging in a batch of images, batch compression) is merged into one round,
+  and it never starts while you are still writing a file. It only covers **local** edits.
 - Periodic sync is off by default (the "Periodic sync" row has its **own toggle**; the interval is
-  5–1440 minutes, default 10). Note that it only switches off the periodic run — as long as the
-  "Automatic image sync" switch is on, **every Obsidian startup still syncs once**; turn that switch
-  off to stop the startup round too
+  5–1440 minutes, default 30). It covers changes made on **other devices** (an image another device
+  uploaded, an object edited by hand in the bucket) — those produce no event here, so they can only be
+  asked for. Note that it only switches off the periodic run — as long as the "Automatic image sync"
+  switch is on, **every Obsidian startup still syncs once**; turn that switch off to stop the startup
+  round too
 - To enable "copy cloud link" in the toolbar, also fill in the **public base URL** (a custom domain
   or an `r2.dev` domain)
 
@@ -869,13 +1023,26 @@ own switches and timers.
 
 | Tab | Contents |
 | --- | --- |
-| Tracked plugins & themes | The list, with update badges, check, update, version manager (rollback), freeze, open repo, unbind |
-| Plugin installer | Enable switch, update-check timing, Gitee mirror discovery, **access tokens**, self-update |
-| Vault sync | **Remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these two come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**) |
-| Image sync | **Actions first** (**Open image manager** plus test connection / preview changes / sync now), **automatic image sync** (toggle), **periodic sync** (interval + toggle), folders to sync (a full-width path box with "Browse…" / "Restore default"), R2 connection and secret, conflict and deletion policy, compression defaults |
-| General | UI language, notices, debug logging, **status bar spans the full width** |
+| Plugins & themes | The installed/added list. On top, a row of **card-less** buttons: **Add plugin repository**, **Add theme repository**, **Bind existing plugins or themes** (with a `link` icon), **Check for updates** (with a `refresh-cw` icon); each row has an update badge, check, update, version manager (rollback, plugins only), freeze, open repo, unbind (keeps files) |
+| Plugin installer | **SyncHub itself** (a version status line + check / update buttons + an **Enable Gitee mirror source** toggle), **check when opening settings** (checks both the tracked list and SyncHub itself), **check on startup** + startup delay, **auto-discover Gitee mirrors**. The tab carries a **numeric badge** when SyncHub itself has an update |
+| Vault sync | **Initialise git repository** (one row: a "already a repo" / "not a repo yet" badge + a button, greyed out when it is), **remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these three come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**) |
+| Image sync | **Actions first** (**Open image manager** plus test connection / preview changes / sync now), **automatic image sync** (toggle), **sync after changes** (delay + toggle, on by default / 30 s), **periodic sync** (interval + toggle, covers other devices only), folders to sync (a full-width path box with "Browse…" / "Restore default"), R2 connection and secret, conflict and deletion policy, compression defaults |
+| General | notices, debug logging, **status bar spans the full width**, **ribbon account avatar** + **Use Gitee avatar** (which platform's avatar; the description carries a "change your avatar" link that follows the platform), **access tokens** (GitHub / Gitee) |
 
-Tokens are stored **locally only** (Obsidian's secret storage, falling back to localStorage for older
+The interface language follows Obsidian — there is no separate language setting in the plugin.
+
+**Ribbon account avatar** (off by default) puts a round avatar at the **bottom of the left ribbon** —
+that of the account **the configured token belongs to** (the `avatar_url` returned by that platform's
+`validateToken()`, fetched in the same request as the account name, so no extra API call). It has no
+click action; its job is to answer "which account is this token for" — the same account name mirror
+discovery uses. **Which platform's avatar is used is decided by "Use Gitee avatar" below it** (on by
+default = Gitee, off = GitHub). When that platform has no token it shows nothing (an anonymous call to
+that endpoint is a 401, and the anonymous quota is measured to be very low, so the plugin **does not**
+make the request). An avatar can only be changed on the platform itself, so the description ends with a
+**link to the profile page** (Gitee → `gitee.com/profile`, GitHub → `github.com/settings/profile`) —
+one click takes you where you change it.
+
+**Tokens are stored locally only** (Obsidian's secret storage, falling back to localStorage for older
 versions), never in `data.json`, and never synced to other devices.
 
 ### Installation

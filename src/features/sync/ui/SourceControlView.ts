@@ -1,4 +1,4 @@
-import { ItemView, setIcon, Setting, WorkspaceLeaf } from "obsidian";
+import { ItemView, setIcon, Setting, WorkspaceLeaf, type ButtonComponent } from "obsidian";
 import type { LocaleStrings } from "../../../core/i18n";
 import {
     changeFilterOptions,
@@ -8,6 +8,7 @@ import {
 } from "../changeRows";
 import { formatCountdown } from "../countdown";
 import { formatBytes } from "../repoSize";
+import { IDLE_ACTIVITY, type BusyActivity, type SyncActivity } from "../statusBar";
 import { isFullyInSync } from "../syncState";
 import type { SyncService } from "../syncService";
 import type { SimpleGitManager } from "../simpleGitManager";
@@ -172,6 +173,29 @@ export class SourceControlView extends ItemView {
     private unsubscribe: (() => void) | undefined;
 
     /**
+     * 正在进行的动作（由 service 推送，`idle` 表示没有）。见 `applyActivity`。
+     *
+     * 与 `latest` 那套**分开**：`onStatusChange` 推的是仓库状态，而它在动作
+     * **进行中**不会变（`withActivity` 要等收尾才刷新一次）。所以「面板上看得见
+     * 正在同步」只能靠 `onActivityChange` 这条独立的推送。
+     */
+    private activity: SyncActivity = IDLE_ACTIVITY;
+
+    /** 动作横幅的容器；每轮渲染重建（见 `renderToolbar`）。 */
+    private activityEl: HTMLElement | undefined;
+
+    /**
+     * 动作进行中要禁用的按钮（提交 / 拉取 / 推送 / 立即同步）。
+     *
+     * 不禁用也不坏（service 是串行队列），但用户会看到「点了没反应」——
+     * 其实只是排在了后面。**刷新不在这一列**：它只读，同步中随时可点。
+     */
+    private actionButtons: ButtonComponent[] = [];
+
+    /** 动作订阅的退订函数。见 `onActivityChange`。 */
+    private unsubscribeActivity: (() => void) | undefined;
+
+    /**
      * service 推过来的最近一次状态，以及「我们是否已经知道当前状态」。
      *
      * `hasStatus` 不能省：`undefined` 是个**有效结论**（不是仓库），
@@ -230,6 +254,21 @@ export class SourceControlView extends ItemView {
             this.requestRender();
         });
 
+        /**
+         * 动作订阅（2026-10-05，用户要求：「侧边栏同步时也要添加同步特效，
+         * 不然用户不知道是否正在同步」）。
+         *
+         * **不整块重绘**：横幅是纯 DOM（转圈 + 阶段 + 进度条），一次 git 都不用跑。
+         * 走 `requestRender()` 的话，一次「立即同步」会因为三个阶段的变化白跑
+         * 三遍「分支 / 远端 / 体积 / 历史」（实测一次重绘 10 个 git 子进程，
+         * 见类注释）。所以这里直接改那一小块。
+         */
+        this.activity = this.deps.service.currentActivity;
+        this.unsubscribeActivity = this.deps.service.onActivityChange((activity) => {
+            this.activity = activity;
+            this.applyActivity();
+        });
+
         // 首屏只画工具条 —— 一次 git 都不跑。
         this.renderShell();
 
@@ -246,6 +285,8 @@ export class SourceControlView extends ItemView {
         this.stopCountdown();
         this.unsubscribe?.();
         this.unsubscribe = undefined;
+        this.unsubscribeActivity?.();
+        this.unsubscribeActivity = undefined;
         this.contentEl.empty();
     }
 
@@ -503,6 +544,10 @@ export class SourceControlView extends ItemView {
      *
      * 侧边栏窄，这些控件一行多半放不下 —— 交给 CSS（`.obsync-actions`）换行，
      * 总比溢出把控件挤没了好。
+     *
+     * 每个按钮都收进 `this.actionButtons`：动作进行中要把它们禁用（见
+     * `applyActivity`）。工具条下面那一条 `.obsync-sync-banner` 是同步的**特效**
+     * 落点 —— 按钮在哪，进度就在哪。
      */
     private async renderToolbar(
         contentEl: HTMLElement,
@@ -510,32 +555,38 @@ export class SourceControlView extends ItemView {
     ): Promise<void> {
         const t = this.deps.getT();
 
+        // 每轮渲染重建这个列表：按钮是新造的，旧引用已经不挂在文档上了。
+        this.actionButtons = [];
+
         const row = new Setting(contentEl).setClass("obsync-actions");
 
         // 分支在最前（它决定下面三个动作作用在哪条分支上）
         if (status) await this.addBranchDropdown(row, status);
 
-        row.addButton((button) =>
+        row.addButton((button) => {
             button
                 .setButtonText(t.sync.actCommit)
                 .setTooltip(t.sync.actCommitHint)
                 .onClick(() =>
                     void this.run(() => this.deps.service.commitAll({ announce: true }))
-                )
-        );
-        row.addButton((button) =>
+                );
+            this.actionButtons.push(button);
+        });
+        row.addButton((button) => {
             button
                 .setButtonText(t.sync.actPull)
-                .onClick(() => void this.run(() => this.deps.service.pull()))
-        );
-        row.addButton((button) =>
+                .onClick(() => void this.run(() => this.deps.service.pull()));
+            this.actionButtons.push(button);
+        });
+        row.addButton((button) => {
             button
                 .setButtonText(t.sync.actPush)
                 .setTooltip(t.sync.actPushHint)
                 .onClick(() =>
                     void this.run(() => this.deps.service.push({ announceIfUpToDate: true }))
-                )
-        );
+                );
+            this.actionButtons.push(button);
+        });
 
         // 刷新紧挨在立即同步前面（两个都是「让面板动一下」的入口）。
         // 2026-10-04 用户要求：「刷新按钮从图标改成文字吧，和前面三个按钮一样的样式展示」——
@@ -560,7 +611,72 @@ export class SourceControlView extends ItemView {
             // 侧边栏够宽时用 `margin-left: auto` 把它顶到右侧（见 styles.css）——
             // 要的是「在右侧」这个位置，而不只是「排在后面」。
             button.buttonEl.addClass("obsync-action-sync");
+            this.actionButtons.push(button);
         });
+
+        // 动作横幅挂在工具条**正下方**：按钮在哪，进度在哪。
+        // 没有动作时它是空的，由 CSS 的 `:empty` 整块收起来（不占高度）。
+        this.activityEl = contentEl.createDiv({ cls: "obsync-sync-banner" });
+        // 面板比动作晚打开的场合（同步已经在跑，或正好在渲染中间）——
+        // 渲染结束时补画一次，横幅才不会等到下一个阶段才出现。
+        this.applyActivity();
+    }
+
+    // ── 动作横幅（同步特效） ──────────────────────────────────────────────
+
+    /**
+     * 把「正在干什么」画到面板上（**纯 DOM，一次 git 都不跑**）。
+     *
+     * 三件事一起吃：
+     *
+     * 1. 根类 `obsync-syncing` —— CSS 用它给「立即同步」按钮加呼吸感；
+     * 2. 四个动作按钮禁用 —— 同步中再点一次只会往队列里多排一个任务；
+     * 3. 横幅本身：转圈 + 标题 +（链路里的）三个阶段 + 一根不确定进度条。
+     *
+     * 它会在**渲染进行中**被动作推送调起来，那时 `activityEl` 可能刚被
+     * `contentEl.empty()` 摘掉 —— 写到一个脱离文档的节点上不会报错，只是看不见；
+     * 而每轮渲染结束都会再调一次（见 `renderToolbar`），所以不会停在半路。
+     *
+     * 为什么是**不确定**进度条：git 不会报「推到第几个对象」，编一个百分比
+     * 就是骗人。三个阶段本身才是真实可得的进度信息。
+     */
+    private applyActivity(): void {
+        const t = this.deps.getT();
+        const kind = this.activity.kind;
+        const chain = this.activity.chain;
+        const busy = kind !== "idle";
+
+        this.contentEl.toggleClass("obsync-syncing", busy);
+        for (const button of this.actionButtons) button.setDisabled(busy);
+
+        const banner = this.activityEl;
+        if (!banner) return;
+
+        banner.empty();
+        // 空横幅交给 CSS 的 `:empty`（不占高度、不占视线）。
+        if (kind === "idle") return;
+
+        const head = banner.createDiv({ cls: "obsync-sync-banner-head" });
+        head.createSpan({ cls: "obsync-spinner" });
+        head.createSpan({ text: busyTitle(t, kind, chain), cls: "obsync-sync-banner-title" });
+
+        if (chain) {
+            const steps = banner.createDiv({ cls: "obsync-sync-steps" });
+            for (const stage of SYNC_STAGES) {
+                steps.createSpan({
+                    text: stage.label(t),
+                    cls:
+                        stage.kind === kind
+                            ? "obsync-sync-step is-active"
+                            : "obsync-sync-step",
+                });
+            }
+        }
+
+        const hint = busyHint(t, kind, chain);
+        if (hint) banner.createDiv({ text: hint, cls: "obsync-sync-banner-hint" });
+
+        banner.createDiv({ cls: "obsync-sync-progress" });
     }
 
     /**
@@ -1124,6 +1240,51 @@ export function remoteStateText(status: RepoStatus, t: LocaleStrings): string {
     return changeRows(status).length === 0
         ? t.sync.inSyncWithRemote
         : t.sync.inSyncWithPendingChanges;
+}
+
+/**
+ * 动作横幅上的三个阶段（「立即同步」那条链路）。
+ *
+ * 阶段名直接用**工具条上那三个按钮**的字（提交 / 拉取 / 推送）：用户在按钮上
+ * 刚点过它们，横幅上再看到同样的词，两边一眼就对得上，不必再造一套说法。
+ *
+ * 顺序就是链路顺序 —— `chain` 为真时按它画三个胶囊，亮的是当前那一个。
+ */
+export const SYNC_STAGES: Array<{ kind: BusyActivity; label: (t: LocaleStrings) => string }> = [
+    { kind: "committing", label: (t) => t.sync.actCommit },
+    { kind: "pulling", label: (t) => t.sync.actPull },
+    { kind: "pushing", label: (t) => t.sync.actPush },
+];
+
+/**
+ * 横幅标题。
+ *
+ * 链路里三个阶段**共用一个标题**（「正在同步…」）：当前走到哪一步由下面那排
+ * 胶囊回答。分开写三句的话，标题与胶囊说的就是同一件事，反而看不出「这是一条链」。
+ */
+export function busyTitle(t: LocaleStrings, activity: BusyActivity, chain: boolean): string {
+    if (chain) return t.sync.statusSyncing;
+    if (activity === "pulling") return t.sync.statusPulling;
+    if (activity === "pushing") return t.sync.statusPushing;
+    return t.sync.statusCommitting;
+}
+
+/**
+ * 横幅副标题 —— 复用按钮上的那句悬停提示（「提交 → 拉取 → 推送，一条链走完」）。
+ *
+ * 链路里那句话正好回答了「同步到底做了什么」；单独动作各用各的。
+ * **拉取没有对应的提示**（工具条上它本来也没写 tip），返回 undefined ——
+ * 宁可不画这一行，也不编一句话。
+ */
+export function busyHint(
+    t: LocaleStrings,
+    activity: BusyActivity,
+    chain: boolean
+): string | undefined {
+    if (chain) return t.sync.actSyncHint;
+    if (activity === "committing") return t.sync.actCommitHint;
+    if (activity === "pushing") return t.sync.actPushHint;
+    return undefined;
 }
 
 /** ISO 时间 → 简短的本地时间（`YYYY-MM-DD HH:mm`）。解不出来的原样返回。 */

@@ -1,6 +1,7 @@
 import {
     PluginSettingTab,
     Setting,
+    setIcon,
     type App,
     type ButtonComponent,
     type TextComponent,
@@ -93,6 +94,25 @@ export class ObsyncSettingsTab extends PluginSettingTab {
      * 的是已经脱离文档的节点 —— 页面开着久了就是一个缓慢的泄漏。
      */
     private countdowns: number[] = [];
+
+    /**
+     * 上次问出来的「这个库是不是 git 仓库」（`undefined` = 还没问过 / 没问出来）。
+     *
+     * 2026-10-06 用户要求：「监测过已经是 git 仓库的话，每次点进仓库同步设置页就
+     * 不用再主动检测了，直接将标识固定就行，等同步时再验证即可」。那一行原来每次
+     * 重绘都起一个 `git is-repo` 子进程，结果回来才填徽标 —— 于是每次切进这一页都
+     * 能看到徽标「弹」出来（见 `renderInitRow`）。
+     *
+     * ## 为什么只在内存里，不落盘
+     *
+     * 这个值**会变**：用户可能在别处 `rm -rf .git`、也可能从别的设备同步回来一个
+     * 还没初始化的库。写进 `data.json` 的话，那种情况下它就是一句没人会去纠正的
+     * 假话。只放内存 → 重启插件后重新问一次，代价是一次子进程。
+     *
+     * 用户也认了这一点：「等同步时再验证即可」—— 真的不是仓库时，同步链路自己会报
+     * 「请先初始化仓库」，那比一个徽标更靠得住。
+     */
+    private vaultIsRepo?: boolean;
 
     constructor(private readonly obsync: ObsyncPlugin) {
         super(obsync.app, obsync);
@@ -205,6 +225,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             if (tab.id === this.activeTab) button.addClass("is-active");
 
             if (tab.id === "tracked") this.renderTrackedCounts(button);
+            if (tab.id === "installer") this.renderInstallerBadge(button);
 
             button.addEventListener("click", () => {
                 if (this.activeTab === tab.id) return;
@@ -236,44 +257,102 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         }
     }
 
-    /** 标签一：已跟踪的插件与主题 —— 头部栏（标题 + 说明 + 三个主操作）+ 列表。 */
+    /**
+     * 在「插件安装器」标签上挂数字徽标：**SyncHub 自己有可用更新**时显示。
+     *
+     * 2026-10-06 用户要求（与同一轮「进入设置页时也检查 SyncHub 自身」配套）：
+     * 那个更新藏在设置页第二页里，不点进去就不知道 —— 与「已追踪插件」那个
+     * 计数徽标同一个目的：**不必点进去就知道有东西要处理**。
+     *
+     * 数据来自 `installer.selfUpdateAvailable`（持久化，见
+     * `InstallerService.recordSelfUpdateCheck`），所以重启之后徽标还在，
+     * 不必等这一轮检查跑完。
+     *
+     * 只写 `1`：这一页上「要处理的事」只有 SyncHub 自身这一件
+     * （跟踪列表那些归「已追踪插件」页，它有自己的徽标）。写成 `1` 而不是版本号，
+     * 是因为标签栏上那点位置放不下版本号，而徽标的职责只是「这里有东西」——
+     * 具体版本在那一行的状态文字里。
+     */
+    private renderInstallerBadge(button: HTMLElement): void {
+        if (!this.obsync.settings.installer.selfUpdateAvailable) return;
+        button.createSpan({ text: "1", cls: "obsync-tab-count is-update" });
+    }
+
+    /** 标签一：插件与主题 —— 主操作按钮行 + 列表。 */
     private renderTrackedTab(): void {
         const t = this.obsync.t;
 
-        // 标题、说明与主操作放在同一行：左侧文字、右侧按钮，中间不留空。
-        new Setting(this.containerEl)
-            .setName(t.settings.installer.tracked)
-            .setDesc(t.settings.installer.trackedDesc)
-            .setClass("obsync-section-header")
-            .addButton((button) =>
-                button
-                    .setButtonText(t.installer.modalTitle)
-                    .setCta()
-                    // 装完立刻重绘列表 —— 否则新条目要等下一次「检查全部更新」
-                    // 顺带的那次重绘才出现（用户以为没装上）。
-                    .onClick(() => this.obsync.installer.openAddRepoModal(() => this.display()))
-            )
-            .addButton((button) =>
-                button
-                    .setButtonText(t.installer.bindTitle)
-                    .onClick(() =>
-                        this.obsync.installer.openBindExistingModal(() => this.display())
-                    )
-            )
-            .addButton((button) =>
-                button.setButtonText(t.installer.checkAll).onClick(async () => {
-                    // 检查要逐个仓库打接口，可能好几秒 —— 得让用户知道在跑。
-                    // 旁边的「测试」令牌按钮就是这么做的，保持一致。
-                    button.setDisabled(true);
-                    button.setButtonText(t.installer.checking);
-                    try {
-                        await this.checkAllUpdates();
-                    } finally {
-                        button.setDisabled(false);
-                        button.setButtonText(t.installer.checkAll);
-                    }
-                })
-            );
+        /**
+         * 主操作按钮行。
+         *
+         * 2026-10-05 用户要求两件事：
+         *
+         * 1. **「把这排按钮的卡片去掉，只留按钮展示」** —— 这一行原来是一个
+         *    `.obsync-section-header` 卡片：左边「已跟踪的插件与主题」标题 + 说明，
+         *    右边四个按钮。页签名已经叫「插件与主题」、列表下方还有一句空状态提示，
+         *    标题与说明都是重复信息，所以**连同卡片一起去掉了**（那两个 locale 键
+         *    也删了 —— `pnpm check` 的「未使用的 i18n 键」会盯着这件事）。
+         *    外观由 `.obsync-tracked-actions` 负责（背景/边框/内边距全部重置）。
+         * 2. **「在文本前面添加 lucide 图标」**（绑定用 `link`、检查更新用
+         *    `refresh-cw`）—— 见 `addButtonIcon` 的说明：Obsidian 的
+         *    `setButtonText` 与 `setIcon` 不能连用。
+         *
+         * 用 `Setting` 而不是裸 `new ButtonComponent(...)`：设置页的按钮一律经它创建，
+         * 因为「点了没反应」那类问题在测试里靠 `createdSettings` 找按钮 ——
+         * 直接 new 出来的按钮对那套断言是不可见的。
+         */
+        const actions = new Setting(this.containerEl).setClass("obsync-tracked-actions");
+
+        actions.addButton((button) =>
+            button
+                .setButtonText(t.installer.modalTitle)
+                .setCta()
+                // 装完立刻重绘列表 —— 否则新条目要等下一次「检查更新」
+                // 顺带的那次重绘才出现（用户以为没装上）。
+                .onClick(() => this.obsync.installer.openAddRepoModal(() => this.display()))
+        );
+
+        // 「添加主题仓库」是 2026-10-05 加的独立入口：在此之前主题**没有新装入口**
+        // （只有「绑定库里已装的」与「更新已跟踪的」），而把主题地址填进上面
+        // 那个按钮只会得到「缺少必需文件：main.js」。
+        actions.addButton((button) =>
+            button
+                .setButtonText(t.installer.addTheme)
+                .onClick(() => this.obsync.installer.openAddThemeModal(() => this.display()))
+        );
+
+        actions.addButton((button) => {
+            button
+                .setButtonText(t.installer.bindTitle)
+                .onClick(() => this.obsync.installer.openBindExistingModal(() => this.display()));
+            addButtonIcon(button, "link");
+        });
+
+        actions.addButton((button) => {
+            /**
+             * 「检查更新」在跑的时候要把文字换成「正在检查更新…」（用户得知道它在动，
+             * 见原来的注释），而 `setButtonText` 会把按钮**清空** —— 所以每次换文字
+             * 都要把图标重新插一次（这也是 `addButtonIcon` 的调用约定）。
+             */
+            const relabel = (label: string): void => {
+                button.setButtonText(label);
+                addButtonIcon(button, "refresh-cw");
+            };
+
+            relabel(t.installer.checkAll);
+            button.onClick(async () => {
+                // 检查要逐个仓库打接口，可能好几秒 —— 得让用户知道在跑。
+                // 旁边的「测试」令牌按钮就是这么做的，保持一致。
+                button.setDisabled(true);
+                relabel(t.installer.checking);
+                try {
+                    await this.checkAllUpdates();
+                } finally {
+                    button.setDisabled(false);
+                    relabel(t.installer.checkAll);
+                }
+            });
+        });
 
         // 重复 id 警告放在列表**上方**：它说的是「你看到的不一定是你跑的」，
         // 放在列表下面会被当成脚注忽略掉。
@@ -301,21 +380,66 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         });
     }
 
-    /** 打开设置页时的自动检查（受设置与节流控制）。 */
+    /**
+     * 打开设置页时的自动检查（受设置与节流控制）。
+     *
+     * ## 两件事一起做（2026-10-06 用户要求）
+     *
+     * 用户的原话是「打开该设置项时，进入设置页检查更新的同时也检查 SyncHub 自身」。
+     * 在此之前这里只查跟踪列表，自己那一份得手动点「检查更新」才会查 —— 于是
+     * 「插件安装器」标签上的徽标永远不会自己出现。
+     *
+     * 自己那一份**不受「有没有跟踪项」影响**：它跟跟踪列表没有关系，一个插件都没
+     * 跟踪的用户同样该知道 SyncHub 有没有新版本（`trackedCount` 因此从
+     * `shouldCheckOnSettingsOpen` 的入参里去掉了）。
+     *
+     * 两次检查都会落盘（`recordUpdateChecks` / `recordSelfUpdateCheck`），所以
+     * 收尾这一次重绘同时更新了标签栏的徽标与自身更新那一行的状态文字。
+     */
     private async autoCheckOnOpen(): Promise<void> {
         const installer = this.obsync.settings.installer;
         const due = shouldCheckOnSettingsOpen({
-            enabled: installer.enabled,
             autoCheckOnSettingsOpen: installer.autoCheckOnSettingsOpen,
-            trackedCount: installer.tracked.length,
             lastCheckAt: installer.lastUpdateCheckAt,
             now: Date.now(),
         });
         if (!due) return;
 
-        // 自动检查静默：全部最新时不弹提示（用户只是打开设置页看一眼，
-        // 不需要被打扰）；有更新时列表徽标本身就是提示。
-        await this.checkAllUpdates({ quietWhenNone: true });
+        try {
+            await this.checkSelfUpdate();
+            // `redraw: false`：重绘由下面统一负责（见 `checkAllUpdates` 的说明）。
+            // 跟踪列表为空时它直接返回 —— 那次重绘同样落在下面。
+            await this.checkAllUpdates({ quietWhenNone: true, redraw: false });
+        } finally {
+            this.display();
+        }
+    }
+
+    /**
+     * 静默查一次 SyncHub 自身。
+     *
+     * **只在真有更新时说一句**：它是「顺手做的事」，没更新或查不动都不该打扰用户
+     * （失败的样子是状态行里那句「检查失败」，不必再弹一次）。
+     *
+     * 结果由 `checkSelf` 内部落盘（`recordSelfUpdateCheck`），所以调用方不必关心
+     * 记录 —— 徽标与状态行下一次重绘就是对的。
+     */
+    private async checkSelfUpdate(): Promise<void> {
+        const t = this.obsync.t;
+        const currentVersion = this.obsync.manifest.version;
+
+        try {
+            const check = await this.obsync.installer.checker.checkSelf(currentVersion);
+            if (check.hasUpdate) {
+                this.obsync.notifier.info(
+                    t.installer.selfUpdateAvailable(currentVersion, check.latestVersion)
+                );
+            }
+        } catch (err) {
+            // `checkSelf` 自己吞掉了网络错误（结果里带 `error`），走到这里只可能是
+            // 意料之外的问题 —— 记一笔日志，不打扰用户。
+            logger.debug("the automatic self-update check failed", err);
+        }
     }
 
     /** 设置改完后统一走这里：落盘 + 重算派生状态 + 重绘。 */
@@ -500,6 +624,12 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         return component as TextComponent;
     }
 
+    /**
+     * 访问令牌一节。
+     *
+     * 由 `renderGeneral()` 调用（2026-10-06 从「插件安装器」页移来）—— 令牌是
+     * 私有仓库访问与接口配额的凭据，安装器与仓库同步都要用，不属于安装器。
+     */
     private renderTokens(): void {
         const t = this.obsync.t;
 
@@ -556,6 +686,9 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     dirty = false;
                     this.obsync.secretStore.setToken(host, pending);
                     refreshStatus();
+                    // 令牌可能换了一个账号 —— 功能区底部那张头像跟着换。
+                    // 头像那个开关就在本页上面，但改令牌不必重画整页：直接刷新即可。
+                    this.obsync.refreshRibbonAvatar();
                 });
             })
             .addButton((button) =>
@@ -564,6 +697,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     if (!token) {
                         this.obsync.secretStore.clearToken(host);
                         refreshStatus();
+                        this.obsync.refreshRibbonAvatar();
                         this.obsync.notifier.info(t.settings.token.cleared);
                         return;
                     }
@@ -571,6 +705,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     this.obsync.secretStore.setToken(host, token);
                     dirty = false;
                     refreshStatus();
+                    this.obsync.refreshRibbonAvatar();
 
                     button.setDisabled(true);
                     button.setButtonText(t.settings.token.testing);
@@ -609,6 +744,8 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                         dirty = false;
                         setting.settingEl.empty();
                         this.display();
+                        // 令牌没了 → 功能区那张头像也得摘掉（同 blur 那条）。
+                        this.obsync.refreshRibbonAvatar();
                         this.obsync.notifier.info(t.settings.token.cleared);
                     })
             );
@@ -621,16 +758,27 @@ export class ObsyncSettingsTab extends PluginSettingTab {
     }
 
     /**
-     * 标签四：通用 —— 提示与日志。
+     * 通用 —— 提示、日志、两个界面开关，以及访问令牌。
      *
      * 这里原来第一行是「界面语言」下拉，2026-10-01 删了：界面语言一律跟随
      * Obsidian（见 `core/i18n/index.ts` 的文件头），留一个能与 Obsidian 不一致的
      * 开关只会让「界面语言不对」变成用户自己能造出来的状态。
+     *
+     * 两个开关都走 `commit()` → `applyDerivedSettings()`，所以拨完**立刻**生效
+     * （一个给 body 加类，一个画/摘功能区底部那张头像，见 `main.ts`）。
+     *
+     * ## 令牌为什么在这一页（2026-10-06 用户要求）
+     *
+     * 用户的原话是「将访问令牌的设置项移到通用里」。它原先挂在「插件安装器」页
+     * 末尾，而它管的从来不只是安装器：仓库同步（私有仓库 push/pull）与
+     * 「功能区展示用户头像」都要读同一个令牌。放在「通用」才配得上它的作用范围。
      */
     private renderGeneral(): void {
         const t = this.obsync.t;
 
-        new Setting(this.containerEl).setName(t.settings.general.heading).setHeading();
+        // 这一页**没有页首标题**（2026-10-06 删）：页签「通用」已经写着页名，
+        // 再顶一行同名标题是重复信息。下面「访问令牌」那个小标题是**节内**的，
+        // 留着 —— 它管的是页面中段那一块，不是页名。
 
         new Setting(this.containerEl)
             .setName(t.settings.general.showNotices)
@@ -665,20 +813,120 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                         await this.commit();
                     })
             );
+
+        new Setting(this.containerEl)
+            .setName(t.settings.general.ribbonAvatar)
+            .setDesc(t.settings.general.ribbonAvatarDesc)
+            .addToggle((toggle) =>
+                toggle.setValue(this.obsync.settings.ribbonAvatar).onChange(async (value) => {
+                    this.obsync.settings.ribbonAvatar = value;
+                    // `commit(true)` → `applyDerivedSettings()` → `RibbonAvatar.apply()`
+                    // 按新值立刻画/摘。没有令牌时它什么都不画 —— 描述里已经写明
+                    // 这一点，否则用户会以为开关坏了。
+                    //
+                    // **`redraw = true` 是必须的**：下面那一行的可用性由它决定，
+                    // 不重绘的话置灰状态要等切走再切回来才跟上（见 `commit` 的说明）。
+                    await this.commit(true);
+                })
+            );
+
+        /**
+         * 头像用哪个平台（2026-10-06 用户要求从上面那一行里拆出来）。
+         *
+         * 用户的原话是「将功能区展示用户头像中gitee部分拆分出来单独设置一个设置项，
+         * 默认开启，开启时使用gitee头像，关闭时使用GitHub头像」。拆之前平台是写死的
+         * Gitee，于是**只用 GitHub 的用户那一行等于坏掉的开关** —— 其实换个平台
+         * 就有头像了。
+         *
+         * 总开关关着时它没有意义 → 置灰（**不改它的值**：`setDisabled` 而不是
+         * `setValue(false)`，用户关掉头像再打开时选择还在）。这与「启动检查延迟」
+         * 那一行的做法一致。
+         */
+        const avatarSourceRow = new Setting(this.containerEl)
+            .setName(t.settings.general.ribbonAvatarSource)
+            .setDesc(t.settings.general.ribbonAvatarSourceDesc)
+            .addToggle((toggle) => {
+                toggle
+                    .setValue(this.obsync.settings.ribbonAvatarUseGitee)
+                    .setDisabled(!this.obsync.settings.ribbonAvatar)
+                    .onChange(async (value) => {
+                        this.obsync.settings.ribbonAvatarUseGitee = value;
+                        await this.commit();
+                    });
+            });
+
+        /**
+         * 「换头像」的入口（2026-10-05 用户要求：「在功能区展示头像设置项中，添加用户的
+         * gitee 设置页链接，方便用户更换头像」）。
+         *
+         * 头像**不可能在插件里改** —— 它是平台账号的资料，只能去那个平台换。所以这一行
+         * 能做的就是把人送过去，并且说清**去哪儿**（两个常量见文件末尾那段说明：
+         * 网址不随语言变，所以不进 locale）。
+         *
+         * 2026-10-06 随平台开关一起从上面那一行挪到这里：链接指向**当前选中的**平台
+         * （选 GitHub 就把人送去 GitHub 的 profile 页）—— 留在总开关那一行的话，
+         * 它会与「用哪个平台」脱节，指错地方。
+         *
+         * 链接接在描述**末尾**（同一个元素里，与 git 路径那一行的下载链接同一套做法）：
+         * 设置页的描述是纯文本，光写网址用户得自己复制到浏览器；而 `target=_blank`
+         * 就够了 —— Obsidian 的主进程把 http(s) 一律交给系统浏览器。
+         */
+        const useGitee = this.obsync.settings.ribbonAvatarUseGitee;
+        avatarSourceRow.descEl.appendText(t.settings.general.ribbonAvatarChangeLead);
+        avatarSourceRow.descEl.createEl("a", {
+            text: useGitee
+                ? t.settings.general.ribbonAvatarChangeLinkGitee
+                : t.settings.general.ribbonAvatarChangeLinkGithub,
+            attr: {
+                href: useGitee ? GITEE_PROFILE_URL : GITHUB_PROFILE_URL,
+                target: "_blank",
+                rel: "noopener",
+            },
+        });
+
+        // 访问令牌放本页最后（2026-10-06 从「插件安装器」页移来）——
+        // 它是各平台/功能共用的凭据，不专属于安装器，见 `renderGeneral` 的说明。
+        this.renderTokens();
     }
 
+    /**
+     * 标签二：插件安装器 —— 自身更新、自动检查时机、镜像发现。
+     *
+     * ## 顺序（2026-10-06 用户要求）
+     *
+     * 「将当前版本 0.1.9 · 尚未检查更新的小字提示放到最前面，然后展示 SyncHub 自身
+     * 更新卡片，然后是启用 gitee 镜像源更新 SyncHub 设置项，再然后是进入设置页时
+     * 自动检查设置项，……最后展示启动时检查更新、启动检查延迟、自动发现 gitee 镜像
+     * 设置项。」
+     *
+     * 也就是把原来沉在本页最后的「SyncHub 自身」整块提到最前 —— 它是这一页里
+     * **用户最常来办的事**（看看自己是不是最新、顺手更新），而上面那几个开关是
+     * 配一次就不再动的。**没有页首标题**（2026-10-06 删，与其余三页一致）：页签
+     * 「插件安装器」已经写着页名，状态小字就是这一页的第一条内容。
+     *
+     * 三块内容分居三个方法/段落，顺序即 DOM 顺序：
+     * `renderSelfUpdate()`（状态行 → 卡片 → 镜像源开关）→ 进入设置页时自动检查 →
+     * 启动检查 / 延迟 → 镜像发现。
+     */
     private renderInstaller(): void {
         const t = this.obsync.t;
         const settings = this.obsync.settings.installer;
 
-        new Setting(this.containerEl).setName(t.settings.installer.heading).setHeading();
+        // 这里原来第一行是「启用插件安装器」总开关（2026-10-06 删掉）：它只挡下面
+        // 那两个自动检查，等价于把它们都关掉 —— 是同一个 off 的第二种说法，而名字
+        // 却让人以为关掉就不装了（功能区图标与安装命令从来不看它）。
+        // 见 `core/settings.ts` 的 `migrateV9ToV10`。
 
+        // ① 状态小字 + ② 自身更新卡片 + ③ 镜像源开关（见 `renderSelfUpdate`）。
+        this.renderSelfUpdate();
+
+        // ④ 进入设置页时自动检查。开着时这一页打开就会跑一轮：跟踪列表 + SyncHub 自身。
         new Setting(this.containerEl)
-            .setName(t.settings.installer.enabled)
-            .setDesc(t.settings.installer.enabledDesc)
+            .setName(t.settings.installer.autoCheckOnSettingsOpen)
+            .setDesc(t.settings.installer.autoCheckOnSettingsOpenDesc)
             .addToggle((toggle) =>
-                toggle.setValue(settings.enabled).onChange(async (value) => {
-                    settings.enabled = value;
+                toggle.setValue(settings.autoCheckOnSettingsOpen).onChange(async (value) => {
+                    settings.autoCheckOnSettingsOpen = value;
                     await this.commit();
                 })
             );
@@ -688,6 +936,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         // 用户打开开关后会发现下面的输入框还是灰的，得切走再切回来。
         let delayField: TextComponent | undefined;
 
+        // ⑤ 启动时检查更新 + 启动检查延迟。
         new Setting(this.containerEl)
             .setName(t.settings.installer.autoCheck)
             .setDesc(t.settings.installer.autoCheckDesc)
@@ -695,16 +944,6 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                 toggle.setValue(settings.autoCheckOnStartup).onChange(async (value) => {
                     settings.autoCheckOnStartup = value;
                     delayField?.setDisabled(!value);
-                    await this.commit();
-                })
-            );
-
-        new Setting(this.containerEl)
-            .setName(t.settings.installer.autoCheckOnSettingsOpen)
-            .setDesc(t.settings.installer.autoCheckOnSettingsOpenDesc)
-            .addToggle((toggle) =>
-                toggle.setValue(settings.autoCheckOnSettingsOpen).onChange(async (value) => {
-                    settings.autoCheckOnSettingsOpen = value;
                     await this.commit();
                 })
             );
@@ -727,6 +966,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             }
         );
 
+        // ⑥ 自动发现 Gitee 镜像。
         new Setting(this.containerEl)
             .setName(t.settings.installer.mirrorDiscovery)
             .setDesc(t.settings.installer.mirrorDiscoveryDesc)
@@ -736,18 +976,15 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     await this.commit();
                 })
             );
-
-        // SyncHub 自身放在本页最后：它是自举用的，与「装别的插件」不是一类事，
-        // 但同属「来源与版本」的范畴（跟踪列表那边是「用户装了什么」，自己不在其中）。
-        this.renderSelfUpdate();
-
-        // 令牌属于「怎么访问插件来源」的范畴，跟着安装器页走 ——
-        // 列表与操作按钮已移到「已追踪插件」页。
-        this.renderTokens();
     }
 
     /**
-     * 「SyncHub 自身」一节：检查更新 + 更新 + 一行状态。
+     * 「SyncHub 自身」一节：**状态行 → 检查/更新卡片 → 镜像源开关**。
+     *
+     * 顺序是 2026-10-06 用户要求的：「将当前版本 0.1.9 · 尚未检查更新的小字提示
+     * 放到最前面，然后展示 SyncHub 自身更新卡片，然后是启用 gitee 镜像源更新
+     * SyncHub 设置项」。所以状态行**先于**卡片创建（DOM 顺序即创建顺序），
+     * 镜像源开关跟在卡片后面。
      *
      * 状态行由 `describeSelfState` 拼（纯函数，单测覆盖）—— 这里只负责在合适的
      * 时机重绘它：**不能**用 `this.display()` 重绘整页来刷新状态，那会把用户
@@ -755,6 +992,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
      */
     private renderSelfUpdate(): void {
         const t = this.obsync.t;
+        const settings = this.obsync.settings.installer;
         const currentVersion = this.obsync.manifest.version;
 
         let check: SelfUpdateCheck | undefined;
@@ -763,14 +1001,31 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         let updateButton: ButtonComponent | undefined;
         let status: HTMLElement | undefined;
 
+        /**
+         * 这一轮没查过时，用**上次落盘的结果**兜底。
+         *
+         * 没有它的话，用户打开设置页看到的是「尚未检查更新」，即使上一轮刚查出来
+         * 有新版本 —— 而标签栏那个徽标同时亮着，两处自相矛盾。
+         * `describeSelfState` 的优先级（待重启 > 出错 > 有更新 > 已是最新）不受影响：
+         * 它只是把 `check` 从「本轮结果」放宽成「已知的最近结果」。
+         */
+        const knownCheck = (): SelfUpdateCheck | undefined => {
+            if (check) return check;
+            if (!settings.selfUpdateAvailable) return undefined;
+            return {
+                currentVersion,
+                latestVersion: settings.selfUpdateAvailable,
+                hasUpdate: true,
+            };
+        };
+
         const renderStatus = (): void => {
             status?.setText(
                 describeSelfState(
                     {
                         currentVersion,
-                        check,
-                        pendingRestartVersion:
-                            this.obsync.settings.installer.pendingRestartVersion,
+                        check: knownCheck(),
+                        pendingRestartVersion: settings.pendingRestartVersion,
                         busy,
                     },
                     t
@@ -785,6 +1040,11 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             renderStatus();
         };
 
+        // ① 状态行 —— 本页第一条内容，先于卡片创建。
+        status = this.containerEl.createEl("p", { cls: "setting-item-description" });
+        renderStatus();
+
+        // ② 自身更新卡片：标题 + 说明 + 检查 / 更新两个按钮。
         new Setting(this.containerEl)
             .setName(t.settings.installer.selfHeading)
             .setDesc(t.settings.installer.selfDesc)
@@ -797,6 +1057,10 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                         // —— 与 `updateSelf` **同一个入口**。传一份解析结果进来
                         // 也能对，但那就多了一处「两边各读一次设置」的机会，而
                         // 分叉的症状正是「检查说没有更新、更新却从另一个仓库拉」。
+                        //
+                        // 结果由 `checkSelf` 自己落盘（`recordSelfUpdateCheck`），
+                        // 所以标签栏的徽标要等下一次重绘才更新 —— 那一次重绘由
+                        // 状态行之外的路径负责，这里不 `display()`（会丢滚动位置）。
                         check = await this.obsync.installer.checker.checkSelf(currentVersion);
                     } finally {
                         setBusy(undefined);
@@ -818,6 +1082,8 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                             );
                             // 检查结果作废：磁盘上已经是那个版本了，接下来该显示的是
                             // 「待重启」（由 pendingRestartVersion 驱动，重启后自动消失）。
+                            // `updateSelf` 也顺手清掉了落盘的 `selfUpdateAvailable`
+                            // —— 否则标签栏那个徽标会一直亮着。
                             check = undefined;
                         } catch (err) {
                             this.obsync.notifier.reportError(err, t.installer.selfUpdateFailed);
@@ -827,39 +1093,31 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     });
             });
 
-        // 状态行放在按钮行下方 —— 先渲染 Setting 再创建它，保证顺序。
-        status = this.containerEl.createEl("p", { cls: "setting-item-description" });
-        renderStatus();
-
-        /**
-         * 自身更新的**来源**。
-         *
-         * 放在按钮行下面而不是上面：它是「不常改、改了就一直生效」的配置，而上面那两个
-         * 按钮是每次发新版都要点的动作 —— 先把常用动作给出来。
-         *
-         * **默认是 Gitee 镜像**（`selfUpdate.ts` 的 `DEFAULT_SELF_SOURCE`，国内可直连）；
-         * 留空也表示用它。要回官方仓库就把 `https://github.com/Dyse-Sofqi/SyncHub`
-         * 填进来 —— 这一格是「写死的固定来源」，填了就不再探测（与「Gitee 镜像发现」
-         * 是两回事：那套是自动探测 + 只提议 + 要用户确认，每次都要探一遍）。
-         */
+        // ③ 自身更新的来源开关。
+        //
+        // 用户的原话是「插件的自更新来源用开关的形式选择，即『启用 gitee 镜像源
+        // 更新 SyncHub』，默认开启，开启后使用 gitee.com/sofqi/SyncHub 更新，
+        // 关闭时则使用 GitHub 地址」。所以它从自由文本框换成了一个开关：
+        // 开 → `SELF_MIRROR`，关 → `SELF_REPO`（见 `resolveSelfRepo`）。
+        //
+        // 默认**开**（走 Gitee 镜像，国内可直连）。镜像不可用时会自动回退到官方
+        // 仓库重试并提示一次，所以默认开是安全的。
         new Setting(this.containerEl)
-            .setName(t.settings.installer.selfSource)
-            .setDesc(t.settings.installer.selfSourceDesc)
-            .addText((text) =>
-                text
-                    .setPlaceholder(t.settings.installer.selfSourcePlaceholder)
-                    .setValue(this.obsync.settings.installer.selfUpdateSource)
+            .setName(t.settings.installer.selfUseGitee)
+            .setDesc(t.settings.installer.selfUseGiteeDesc)
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(settings.selfUpdateUseGitee)
                     .onChange(async (value) => {
-                        // 原样存（去掉首尾空白）：空串是**合法**的，意思是「用默认来源」。
-                        // 归一化（空 → 默认地址）在 `normalizeSettings` 里做，于是这里
-                        // 不必要在用户还在打字时就把内容替换掉。
-                        this.obsync.settings.installer.selfUpdateSource = value.trim();
+                        settings.selfUpdateUseGitee = value;
                         await this.commit();
                     })
             );
     }
 
-    private async checkAllUpdates(options: { quietWhenNone?: boolean } = {}): Promise<void> {
+    private async checkAllUpdates(
+        options: { quietWhenNone?: boolean; redraw?: boolean } = {}
+    ): Promise<void> {
         const t = this.obsync.t;
         const tracked = this.obsync.settings.installer.tracked;
 
@@ -883,14 +1141,19 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             this.obsync.notifier.reportError(err, t.installer.checkFailed);
         } finally {
             // 徽标常驻在列表里（availableUpdates 已由 checkAll 落盘），重绘让它可见。
-            this.display();
+            //
+            // `redraw: false` 给「打开设置页自动检查」那条路用：它还要顺手查一次
+            // SyncHub 自身，两件事合并成**一次**重绘（否则刚打开的页面会被连着
+            // 重画两遍，用户正在读的那一行会闪）。
+            if (options.redraw !== false) this.display();
         }
     }
 
     private renderSync(): void {
         const t = this.obsync.t;
 
-        new Setting(this.containerEl).setName(t.settings.sync.heading).setHeading();
+        // 这一页**没有页首标题**（2026-10-06 删）：页签「仓库同步」已经写着页名。
+        // 于是「注意事项」直接成为这一页的第一条内容（见下）。
 
         // 移动端没有系统 git，直接说明原因，而不是给一堆点了没用的控件。
         if (!this.obsync.isSyncAvailable) {
@@ -901,7 +1164,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             return;
         }
 
-        // 注意事项：放在标题正下方，而不是塞进各设置项的描述里。
+        // 注意事项：放在**页面最上方**，而不是塞进各设置项的描述里。
         // 两条都是**组合条件**才踩得到的坑（策略选「重置」+ 开着自动同步；
         // 多设备同时编辑同一个文件），写进单项描述没人读得到 ——
         // 用户是在配好之后才出问题，那时早就不翻设置了。
@@ -913,16 +1176,21 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         }
 
         /**
-         * **连接测试的两个前提**：远端地址与 git 可执行文件路径。
+         * **连接测试的三个前提**：库本身是 git 仓库、远端地址、git 可执行文件路径。
          *
-         * 2026-10-04 的两条用户要求把它们放到了这里：
+         * 这一页的结构约定（2026-10-04 用户的话）：**「连接测试」之前的每一项都必须是
+         * 「测试能通过」的充要条件**。连接测试的第一项就是「这个库是不是 git 仓库」
+         * （`SyncService.diagnose` 的第 2 步），不通过就停在那里 —— 所以 2026-10-05
+         * 又补了最前面那一行「初始化 git 仓库」（用户要求：「把仓库初始化按钮也放入
+         * 设置页，保证仓库同步的基本设置能全部在设置页中就完成」）。
+         *
+         * 另外两条是 2026-10-04 的用户要求：
          *
          * 1. 「git 可执行文件路径应该移上来，在远端地址设置项后面展示」——
-         *    理由是这一页的结构约定（用户的话）：**「连接测试」之前的每一项都必须是
-         *    「测试能通过」的充要条件**。连接测试查的正是这两件事（git 能不能跑、
-         *    远端能不能连），原来 git 路径沉在「定时同步 / 提交模板 / 整合策略」后面。
+         *    连接测试查的正是这些事（git 能不能跑、远端能不能连），原来 git 路径
+         *    沉在「定时同步 / 提交模板 / 整合策略」后面。
          * 2. 「这两个设置项之间用分割线隔开就好，不用分成两个圆角背景」——
-         *    所以两行放**同一个设置组**里（一张卡片、两行之间一条分割线），
+         *    所以几行放**同一个设置组**里（一张卡片、行之间一条分割线），
          *    而不是各自一行各占一张卡片。
          *
          * 远端那一行里还并着「打开仓库同步面板」按钮：地址是**配置**，打开面板是配完
@@ -930,6 +1198,8 @@ export class ObsyncSettingsTab extends PluginSettingTab {
          * 卡片加一行标题）。按钮的说明文字挂在它的 tooltip 上。
          */
         const prerequisites = this.openGroup();
+        // 初始化排最前：三者里它最底层 —— 没有仓库，地址与 git 路径都谈不上。
+        this.renderInitRow(prerequisites);
         this.renderRemoteRow(prerequisites);
         this.renderGitPathRow(prerequisites);
 
@@ -1151,29 +1421,17 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         areaEl.spellcheck = false;
         areaEl.value = pending;
         /**
-         * 宽度与 `box-sizing` 走**内联**，不留在 CSS 类里。
+         * 宽度与 `box-sizing` 写在 CSS 类 `.obsync-gitignore` 里，**不内联**。
          *
-         * 这一格已经因此回归过两次（09-24 一次、09-25 一次），两次形态完全一样：
-         * 只要宽度只写在 `styles.css` 里，就会出现「改了 CSS、框还是窄的」——
-         * 插件样式表**不保证**在重载时被重新读入，而 Hot Reload 的重载是
-         * `disablePlugin` + `enablePlugin`，不保证重新注入那一份 CSS。
+         * 这里曾经内联过（`el.style.width = FULL_WIDTH`，`FULL_WIDTH` 是个常量），
+         * 理由是「插件样式表不保证在重载时被重新读入，宽度只写在类里会回归」。
+         * 但那正是 `obsidianmd/no-static-styles-assignment` 要拦的事 ——
+         * 规则只拦**字面量**赋值，用一个 `const` 就能绕过，绕过的是形式、不是判据：
+         * 静态宽度本来就该待在类里（社区审核原文：Sets styles directly instead of
+         * using CSS classes）。现在按审核规范收回类里。
          *
-         * 为什么只有宽度必须这样：颜色、字体、内边距丢了顶多难看，宽度丢了就是**坏的**
-         * —— 这一格当初就是为了「12 行规则看得清」才从 `Setting` 的控件区搬出来的，
-         * 缩回右侧那几百像素等于白搬。
-         *
-         * 社区审核的 `obsidianmd/no-static-styles-assignment` 拦的是**字面量**赋值：
-         * `el.style.width = "100%"` 会报，而规则自带的 valid 用例里
-         * `const w = "100px"; el.style.width = w;` 不报。
-         * （`setCssProps({ "box-sizing": … })` 也不行 —— 那条规则只放行 `--*` 键。）
-         *
-         * 说实话这就是在踩规则的形式边界：宽度本身是静态的、本该待在类里，但它必须
-         * 活过样式表缓存，而规则只留了这一条路。
+         * 开发时的「改了 CSS 不生效」用**完整重载 Obsidian** 解决，而不是写进元素。
          */
-        const FULL_WIDTH = "100%";
-        const BORDER_BOX = "border-box";
-        areaEl.style.width = FULL_WIDTH;
-        areaEl.style.boxSizing = BORDER_BOX;
         areaEl.addEventListener("input", () => {
             pending = areaEl.value;
             dirty = true;
@@ -1418,7 +1676,8 @@ export class ObsyncSettingsTab extends PluginSettingTab {
     /**
      * 标签四：图片同步（R2 双副本）。
      *
-     * 与「仓库同步」页同构：标题 → 注意事项 → 设置项 → 操作与结果。
+     * 与「仓库同步」页同构：**注意事项 → 设置项 → 操作与结果**（两页都没有页首标题，
+     * 2026-10-06 删 —— 页签名就是页名）。
      * 差别在注意事项的分量 —— 那页的坑是「数据可能丢」，这页的坑是
      * 「文件可能被**删掉**」，所以三条提示必须留在最上方，不能塞进单项描述。
      */
@@ -1426,8 +1685,6 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         const t = this.obsync.t;
         const images = this.obsync.settings.images;
         const service = this.obsync.images?.service;
-
-        new Setting(this.containerEl).setName(t.settings.images.heading).setHeading();
 
         const notes = this.containerEl.createDiv({ cls: "obsync-image-notes" });
         notes.createDiv({
@@ -1492,6 +1749,39 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     await this.commit();
                 })
             );
+
+        // 「变动后自动同步」：`[延时] 秒 [开关]`，与下面「按周期同步」同一形状。
+        //
+        // 2026-10-06 加（用户提议、讨论后定形，见 `docs/image-sync-design.md`）。
+        // 它排在总开关下面、周期那一行上面，因为它是**本机改动的主力**：
+        // 周期那条现在只管「把别处的变化拉回来」。
+        const changeSync = new Setting(basics)
+            .setName(t.settings.images.changeSync)
+            .setDesc(t.settings.images.changeSyncDesc);
+
+        this.addNumberField(changeSync, {
+            get: () => images.imageChangeDelaySeconds,
+            apply: async (value) => {
+                images.imageChangeDelaySeconds = value;
+                await this.commit();
+            },
+            // 与 `normalizeSettings` 里那一句钳制一致。
+            // 下限 5 秒：比这更密的话，一次编辑会话会被切成好几轮；
+            // 上限 600 秒：再长就与下面「按周期同步」那一轮重了。
+            min: 5,
+            max: 600,
+            ariaLabel: t.settings.images.changeSyncDelayAria,
+            unit: t.settings.images.secondsUnit,
+        });
+
+        changeSync.addToggle((toggle) =>
+            toggle
+                .setValue(images.imageChangeSyncEnabled)
+                .onChange(async (value) => {
+                    images.imageChangeSyncEnabled = value;
+                    await this.commit();
+                })
+        );
 
         // 「按周期同步」紧跟在总开关下面（2026-10-02 挪的；原先它排在「冲突与删除」
         // 那一节的**末尾**，与它实际管的事毫无关系）。
@@ -2230,6 +2520,106 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         );
     }
 
+    /**
+     * 「初始化 git 仓库」那一行（2026-10-05 用户要求）。
+     *
+     * ## 为什么它必须在这一页
+     *
+     * 用户的原话：「把仓库同步中远端地址的设置项移到了设置页了，但是把仓库 git 初始化
+     * 漏在了侧边栏面板里，请把仓库初始化按钮也放入设置页，保证仓库同步的基本设置能
+     * 全部在设置页中就完成」。在此之前「初始化」只在两处：仓库同步面板「不是仓库」
+     * 时的那个按钮、命令面板。而远端地址已经在这一页 —— 于是**新库**上第一步就断了：
+     * 没有仓库，地址填了也没用（`diagnose` 第 2 项就是「是不是 git 仓库」，不通过就停）。
+     *
+     * ## 状态徽标只问**一次**（2026-10-06 用户要求）
+     *
+     * 用户的原话：「我认为监测过已经是 git 仓库的话，每次点进仓库同步设置页就不用再
+     * 主动检测了，直接将标识固定就行，等同步时再验证即可」。在此之前每次重绘都起一个
+     * `git is-repo` 子进程，结果回来才填徽标 —— 于是**每切进这一页都能看到徽标「弹」
+     * 出来**，既分散注意力、又把下面的说明文字挤下去（那一截由
+     * `vaultIsRepo` 与 `.obsync-badge` 的样式一起解决：前者让它一开始就有，后者让
+     * 它出现时不再改变行高）。
+     *
+     * 缓存只活在**内存**里（见 `vaultIsRepo`），所以重启插件后会重新问一次。
+     *
+     * ## 读不到时什么都不说
+     *
+     * **不猜「不是仓库」**：把「问不出来」说成「还没有仓库」会让用户去点一个不该点的
+     * 按钮 —— 真的不行时 `initRepo` 会报出具体原因，那比这里的猜测准。
+     *
+     * 已经是仓库时按钮**置灰**（`git init` 幂等，点了也不会坏，但一个「点了什么都不会
+     * 发生」的按钮会让人怀疑插件坏了）。为此这一行用了 `initRunning` 那种进度文案 ——
+     * 与连接测试那个按钮同一套做法。
+     */
+    private renderInitRow(container: HTMLElement): void {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        const row = new Setting(container)
+            .setName(t.settings.sync.initRepo)
+            .setDesc(t.settings.sync.initRepoDesc);
+
+        // 状态徽标（「已是 git 仓库」/「还不是 git 仓库」）—— 与令牌那一行同一个类。
+        const badge = row.nameEl.createSpan({ cls: "obsync-badge" });
+
+        let button: ButtonComponent | undefined;
+
+        /** 把已知的结果填上去（徽标 + 按钮可用性）。 */
+        const apply = (isRepo: boolean): void => {
+            badge.setText(isRepo ? t.settings.sync.initDone : t.settings.sync.initNeeded);
+            badge.toggleClass("obsync-badge-ok", isRepo);
+            badge.toggleClass("obsync-badge-muted", !isRepo);
+            button?.setDisabled(isRepo);
+        };
+
+        const refresh = (): void => {
+            // 已经问过了 → **同步**填上，不再起子进程、也就不会有「弹出来」那一下。
+            if (this.vaultIsRepo !== undefined) {
+                apply(this.vaultIsRepo);
+                return;
+            }
+
+            void sync.git
+                .isRepo()
+                .then((isRepo) => {
+                    this.vaultIsRepo = isRepo;
+                    apply(isRepo);
+                })
+                .catch((err) => {
+                    logger.debug("could not tell whether the vault is a git repository", err);
+                    // 问不出来**不记**（下一次还会再试），界面上也什么都不说。
+                    badge.setText("");
+                    button?.setDisabled(false);
+                });
+        };
+
+        row.addButton((created) => {
+            button = created;
+            created.setButtonText(t.sync.actInit).onClick(async () => {
+                created.setDisabled(true);
+                created.setButtonText(t.settings.sync.initRunning);
+                try {
+                    // 与命令面板 / 侧边栏面板走**同一个**插件方法：提示文案与
+                    // `.gitignore` 的处理完全一致（见 `ObsyncPlugin.initRepo`）。
+                    if (await this.obsync.initRepo()) {
+                        // 刚跑完 `git init` 就是答案，**不再去问一次 git**。
+                        this.vaultIsRepo = true;
+                        apply(true);
+                    }
+                } finally {
+                    created.setButtonText(t.sync.actInit);
+                    // 可用性按**已知的事实**恢复 —— 这里不能无条件
+                    // `setDisabled(false)`：那会把刚被 `apply(true)` 置灰的按钮
+                    // 重新点亮，于是「点完之后还能再点」。
+                    created.setDisabled(this.vaultIsRepo === true);
+                }
+            });
+        });
+
+        refresh();
+    }
+
     private renderDiagnostics(): void {
         const t = this.obsync.t;
         const sync = this.obsync.sync;
@@ -2346,10 +2736,62 @@ function isDefaultFolders(folders: string[]): boolean {
 }
 
 /**
+ * 在按钮的**文字前面**插一个 lucide 图标。
+ *
+ * ## 为什么不能直接用 `button.setIcon()`
+ *
+ * Obsidian 的两个实现都在这条路上埋了坑（从真实的 `main.js` 里读出来的）：
+ *
+ * - `setButtonText(text)` → `buttonEl.setText(text)`，而那一位是
+ *   **清空整个元素再写一段文字**（`setText` 收字符串时就是 `textContent = text`）；
+ * - `setIcon(icon)`（`ButtonComponent` 上那个）→ `setIcon(buttonEl, icon)`，而
+ *   `setIcon` 的实现是「若第一个子节点不是同一个图标，**先删掉它**，再把图标
+ *   append 进去」。
+ *
+ * 两者连用的后果是**只剩图标**：`setButtonText("绑定…").setIcon("link")` 时，
+ * 第一个子节点正是刚写进去的那段文字，被 `setIcon` 删掉了。
+ *
+ * ## 所以自己拼
+ *
+ * 建一个 `.obsync-button-icon` 容器装图标，再 `prepend` 到文字前面。
+ * **顺序**：先 `setButtonText`，再调这个函数；**每次换文字之后都要重新调一次**
+ * （「检查更新」那个按钮就是：`setButtonText` 会把上一个图标一起清掉）。
+ * 换文字时旧图标已经被 `setText` 清走了，所以这里不需要（也没办法可靠地）去清理它。
+ */
+function addButtonIcon(button: ButtonComponent, icon: string): void {
+    const { buttonEl } = button;
+    const holder = buttonEl.createSpan({ cls: "obsync-button-icon" });
+    setIcon(holder, icon);
+    // `createSpan` 是**追加**在文字后面的，所以还要挪到最前面去。
+    // （DOM 的 `prepend` 对已在文档里的节点是「移动」，不会产生第二份。）
+    buttonEl.prepend(holder);
+}
+
+/**
  * git 官方下载页。设置页「git 可执行文件路径」那一行下方的链接指向它。
  *
  * 写成常量而不是放进 locale：**网址不随语言变**，而且这是唯一一处用到它的地方。
  */
 const GIT_DOWNLOAD_URL = "https://git-scm.com/downloads";
+
+/**
+ * Gitee 的**个人资料页**（设置 → 基本设置 → 个人资料），头像就在这一页换。
+ *
+ * 实测 2026-10-05：`https://gitee.com/profile` 可用；`/profile/avatar` 是 404 ——
+ * 头像没有独立的子页面。Gitee 帮助中心的「个人信息设置」里，`个人资料` / `基本信息`
+ * 两个链接指向的也正是这个地址。
+ *
+ * 与 `GIT_DOWNLOAD_URL` 同一条规矩：**网址不随语言变**，所以是常量而不是 locale。
+ * （链接的**文字**在 locale 里，与 `gitPathLink` 一致。）
+ */
+const GITEE_PROFILE_URL = "https://gitee.com/profile";
+
+/**
+ * GitHub 的**个人资料页**（头像就在这一页换）。
+ *
+ * 与 `GITEE_PROFILE_URL` 成对：设置页那个平台开关选哪个，链接就指向哪个。
+ * 网址不随语言变，所以是常量而不是 locale（链接的**文字**在 locale 里）。
+ */
+const GITHUB_PROFILE_URL = "https://github.com/settings/profile";
 
 

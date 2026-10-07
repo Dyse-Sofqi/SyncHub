@@ -6,6 +6,7 @@ import type { Notifier } from "../../core/notice";
 import type { ObsyncSettings } from "../../core/settings";
 import type { SecretStore } from "../../core/secretStore";
 import { describeImageSyncError } from "./errors";
+import { ImageChangeQueue, maxWaitForQuietMs } from "./imageChangeQueue";
 import { isImagePath, isInsideFolders, normalizeFolders } from "./imageScan";
 import { ImageSyncService } from "./imageSyncService";
 import type { DeleteImagesResult, RemoteObject, SyncSummary } from "./types";
@@ -43,6 +44,21 @@ export interface ImageSyncModule {
      * 文件时发生，而这是唯一能观察到那个动作的地方。
      */
     noteDeleted(file: TAbstractFile): void;
+    /**
+     * 库里新增 / 改动了一个文件（由主类挂在 `vault.on("create")` / `("modify")` 上）。
+     *
+     * 2026-10-06 加：在此之前，用户在库里**直接**动图（拖进来、外部程序替换）
+     * 之后，云端要等到下一轮周期（默认根本没开）或者重启后的启动那一轮才更新 ——
+     * 而「按周期同步」默认是关的，所以实际上要等到重启。
+     *
+     * 它**只入队、不同步**：攒批与「什么时候真的跑」全在 `ImageChangeQueue` 里
+     * （静默期 + 硬上限 + 正在跑时不丢），取舍见 `docs/image-sync-design.md`。
+     *
+     * **删除不走这里**：删除已经有自己的即时处置（问一句 + 记墓碑），而同步
+     * 从不删云端 —— 触发一轮唯一可能的效果是把云端那份**拉回来**，
+     * 那不是「刚删完」该看到的反馈。
+     */
+    noteChanged(file: TAbstractFile): void;
     /**
      * 库里有个文件被**改名**了（由主类挂在 `vault.on("rename")` 上）。
      *
@@ -92,6 +108,14 @@ export interface ImageSyncModuleDeps {
 
 /** `setTimeout` 的参数是 32 位有符号整数，超时会立即触发。 */
 const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * 「我们自己写的」标记活多久（见 `selfWrites`）。
+ *
+ * 10 秒足够宽：写入与它的事件都在毫秒级内发生。它只是一个**保险丝** ——
+ * 标记正常由事件消费掉，这里管的是「写失败、事件没来」那种残留。
+ */
+const SELF_WRITE_TTL_MS = 10_000;
 
 /**
  * 攒多久再问「云端也删吗」。
@@ -211,6 +235,20 @@ export function createImageSyncModule(deps: ImageSyncModuleDeps): ImageSyncModul
     // 用户能看懂的话在这里按类型码拼。注册后所有调用点自动生效，不会漏。
     deps.notifier.registerErrorTranslator(describeImageSyncError);
 
+    /**
+     * 插件自己刚写进本地的路径（只可能是下载）→ 标记时刻。
+     *
+     * 「变动后自动同步」听着 `create` / `modify`，而下载**也会**发那两个事件 ——
+     * 不标记的话每下载一张就会再触发一轮（幂等，会立刻判成 `in-sync`，但白跑一次
+     * R2 `ListObjects`）。标记是**消费一次**的：下一个同名事件把它取走
+     * （见 `noteChanged`）。
+     *
+     * 为什么值要存时刻而不是用一个裸 `Set`：标记靠事件来消费，而**写失败时
+     * 不会有事件**（`writeLocal` 直接抛错）—— 那样标记会一直留着，把用户
+     * **后来**对同一个文件的真实改动吃掉。加一个过期时间，那种残留自己就失效了。
+     */
+    const selfWrites = new Map<string, number>();
+
     const service = new ImageSyncService({
         app: deps.app,
         notifier: deps.notifier,
@@ -218,9 +256,66 @@ export function createImageSyncModule(deps: ImageSyncModuleDeps): ImageSyncModul
         getSettings: deps.getSettings,
         secretStore: deps.secretStore,
         onFinished: deps.onFinished,
+        onLocalWrites: (paths) => {
+            const now = Date.now();
+            for (const path of paths) selfWrites.set(path, now);
+        },
     });
 
     const automatics = new ImageAutomatics(service, () => deps.getSettings().images);
+
+    /**
+     * 「变动后自动同步」的攒批器（2026-10-06）。
+     *
+     * 静默期与硬上限都**每次现读设置**：用户拨了延时值之后，下一批就按新值走
+     * （队列的 `arm()` 每次都重新问）。
+     */
+    const changeQueue = new ImageChangeQueue({
+        quietMs: () => deps.getSettings().images.imageChangeDelaySeconds * 1000,
+        maxWaitMs: () =>
+            maxWaitForQuietMs(deps.getSettings().images.imageChangeDelaySeconds * 1000),
+        isBusy: () => service.isBusy,
+        fire: (paths) => void flushChangedPaths(paths),
+    });
+
+    /**
+     * 把攒下的变动交给同步。
+     *
+     * 用 `syncSelection` 而不是 `syncPath`：后者是**无条件上传**（不查远端、
+     * 不看冲突策略），只在「用户刚保存完这一份」时才成立（编辑器那条路）。
+     * 这里必须走完整计划的判据 —— 否则「另一台设备也改过这一张」会被本地版本
+     * 盖掉。多付的是一次 `ListObjects`，而它覆盖任意数量的路径
+     * （逐个 `HeadObject` 才是 N 次往返）。
+     *
+     * 失败只记日志：自动动作不该弹窗（与 `ImageAutomatics.fire()` 同一套）。
+     */
+    async function flushChangedPaths(paths: string[]): Promise<void> {
+        try {
+            await service.syncSelection(paths);
+        } catch (error) {
+            // 撞上「正在跑」的竞态（队列查过 `isBusy()`，但手动同步可能刚好挤进来）：
+            // 把这些路径**放回去**，等空闲了再补。丢掉它们要等下次启动才补得上。
+            changeQueue.note(...paths);
+            logger.warn("image change sync failed", error);
+        }
+    }
+
+    /**
+     * 这个路径该不该进变动队列：受管范围 + 两个开关 + 配置齐不齐。
+     *
+     * 抽出来给 `noteChanged` 与 `noteRenamed` 共用，避免两处判据分叉 ——
+     * 「该同步的没同步」与「不该动的动了」都是从这里漏出去的。
+     */
+    function shouldQueueChange(path: string): boolean {
+        const settings = deps.getSettings().images;
+        // 总开关关掉 = 用户明确说了「别在背后动我的图片」，那连记都不记。
+        if (!settings.enabled) return false;
+        if (!settings.imageChangeSyncEnabled) return false;
+        // 配置不全时跑了也白跑（会抛 configProblem）。
+        if (!service.isConfigured()) return false;
+        // 边界之外的文件不归我们管 —— 与同步、删除用的是同一个边界。
+        return isInsideFolders(path, normalizeFolders(settings.folders));
+    }
 
     /**
      * 刚被删掉、还没问过用户的图片路径。
@@ -305,10 +400,15 @@ export function createImageSyncModule(deps: ImageSyncModuleDeps): ImageSyncModul
             automatics.stop();
             // 待问的那一批也丢掉：插件都卸载了，不该再弹窗。
             cancelPendingDeletions();
+            // 攒下的变动同理：不该在卸载之后再跑一轮。
+            changeQueue.clear();
         },
 
         reload(): void {
             automatics.restart();
+            // 用户刚把「变动后自动同步」关掉 → 攒下的那些不再有意义，丢掉。
+            // （关着的时候 `shouldQueueChange` 也不会再放新的进来。）
+            if (!deps.getSettings().images.imageChangeSyncEnabled) changeQueue.clear();
         },
 
         noteDeleted(file: TAbstractFile): void {
@@ -363,6 +463,24 @@ export function createImageSyncModule(deps: ImageSyncModuleDeps): ImageSyncModul
             deletionTimer = window.setTimeout(flushDeletions, DELETE_PROMPT_DELAY_MS);
         },
 
+        noteChanged(file: TAbstractFile): void {
+            if (!(file instanceof TFile)) return;
+
+            // 我们自己刚下载写进去的那一份 —— 消费掉这次标记，别再触发一轮。
+            // 放在最前面：它是「我们干的」，与边界、开关都无关。
+            // 过期的标记当没有（见 `selfWrites`：写失败时不会有事件来消费它）。
+            const markedAt = selfWrites.get(file.path);
+            if (markedAt !== undefined) {
+                selfWrites.delete(file.path);
+                if (Date.now() - markedAt < SELF_WRITE_TTL_MS) return;
+            }
+
+            if (!isImagePath(file.path)) return;
+            if (!shouldQueueChange(file.path)) return;
+
+            changeQueue.note(file.path);
+        },
+
         /**
          * 改名之后把云端那一份搬到新键（见接口上的说明）。
          *
@@ -388,6 +506,11 @@ export function createImageSyncModule(deps: ImageSyncModuleDeps): ImageSyncModul
             // （文件夹改名时每个文件各一次）。失败已经由 service 报出去了。
             // 总开关关掉时它只记账、不发请求（见 `renameRemoteBackup`）。
             void service.renameRemoteBackup(oldPath, file.path);
+
+            // 顺手排进变动队列：`renameRemoteBackup` 万一失败（云端 COPY 不通），
+            // 那一轮会把新路径当「本地有、云端没有」补传上去；成功时它判成
+            // `in-sync`、白跑一次 ListObjects —— 这个代价换「改名失败能自愈」值得。
+            if (shouldQueueChange(file.path)) changeQueue.note(file.path);
         },
 
         async deleteImages(

@@ -16,6 +16,7 @@ import { findGiteeMirror, findGiteeMirrorForTheme } from "./mirrorFinder";
 import { fetchFiles, PLUGIN_SPEC, THEME_SPEC, type FetchSpec } from "./installFiles";
 import { createBackup, writeItemFiles } from "./itemFolder";
 import { parsePluginManifest, parseThemeManifest } from "./manifest";
+import { isValidThemeName } from "../../core/themeName";
 import {
     enablePlugin,
     isPluginEnabled,
@@ -34,6 +35,7 @@ import {
 } from "./selfUpdate";
 import {
     getActiveTheme,
+    readThemeManifestInFolder,
     readThemeManifestVersion,
     requestThemeReload,
     resolveThemeFolder,
@@ -41,17 +43,21 @@ import {
 import { compareVersions } from "./versions";
 import {
     itemRepoRef,
+    KIND_MARKER_FILE,
     MANIFEST_FILE,
     type InstallChannel,
     type InstallResult,
     type InstallSource,
     type PluginFileName,
     type PluginManifest,
+    type ThemeInstallResult,
+    type ThemeManifest,
     type ThemeUpdateResult,
     type TrackedItem,
     type TrackedKind,
     type TrackedPlugin,
     type TrackedTheme,
+    type SelfUpdateCheck,
     type UpdateCheckResult,
 } from "./types";
 
@@ -127,6 +133,29 @@ export interface VersionOption {
     label: string;
     publishedAt?: string;
     prerelease: boolean;
+}
+
+/**
+ * **新装**一个主题的请求。
+ *
+ * 比 `InstallRequest` 少三样东西（版本、镜像、启用）—— 这不是「还没实现」，
+ * 而是主题没有那些概念：没有版本钉选（身份是目录名，更新恒取最新的源码文件）、
+ * 新装不做镜像发现（见 `installTheme`）、也没有「启用」这个状态（只有「当前用的是
+ * 哪一个」，而那件事我们绝不替用户做）。
+ */
+export interface ThemeInstallRequest {
+    /** 用户输入的仓库地址（`owner/repo`、URL、scp 形式均可）。 */
+    repo: string;
+    /** 用于 `owner/repo` 简写时的默认平台。 */
+    defaultHost?: HostKind;
+    /** 取文件时的逐文件回调（理由见 `InstallRequest.onProgress` —— 这一步最慢）。 */
+    onProgress?: (file: string) => void;
+}
+
+/** 主题仓库的识别结果（「添加主题」弹窗的「识别」那一步）。 */
+export interface ResolvedThemeRepo {
+    ref: RepoRef;
+    manifest: ThemeManifest;
 }
 
 /**
@@ -214,7 +243,7 @@ export class InstallerService {
      * `UpdateChecker.checkSelf` 拿它当默认参数，`updateSelf` 也用它。
      */
     selfRepo(): RepoRef {
-        return resolveSelfRepo(this.settings.installer.selfUpdateSource);
+        return resolveSelfRepo(this.settings.installer.selfUpdateUseGitee);
     }
 
     /**
@@ -329,6 +358,59 @@ export class InstallerService {
         } catch (err) {
             logger.debug("could not resolve the Gitee account name", err);
             return undefined;
+        }
+    }
+
+    /**
+     * 识别一个**主题**仓库，并把它的 manifest 读回来校验（弹窗「识别」那一步）。
+     *
+     * 与 `resolveRepo` 分开而不是给它加一个 kind 参数：那一个是围绕**插件的镜像
+     * 发现**写的（判据是 manifest 的 `id`），而主题既没有 id，新装时也没有可用的
+     * 镜像判据（见 `installTheme`）。这里只做一件事：地址解析成 `RepoRef`，再把
+     * 远端 manifest 读回来解析一次 —— 地址打错、或者那其实是个插件仓库时，用户
+     * 在**安装之前**就能看到原因（与 `bindThemeToRepo` 的校验同一条思路）。
+     */
+    async resolveThemeRepo(
+        input: string,
+        defaultHost: HostKind = "github"
+    ): Promise<ResolvedThemeRepo> {
+        const ref = parseRepoRef(input, defaultHost);
+        const repoLabel = formatRepoId(ref);
+        const raw = await getHost(ref.host).readFile(ref, MANIFEST_FILE, {
+            token: this.tokenFor(ref.host),
+            ref: "HEAD",
+        });
+
+        if (raw === undefined) {
+            throw new InstallerError({ kind: "missingManifest", repo: repoLabel, of: "theme" });
+        }
+        return { ref, manifest: parseThemeManifest(raw, repoLabel) };
+    }
+
+    /**
+     * 这个仓库里装的是**另一类**对象吗？
+     *
+     * 只服务于一件事：用户在错误的入口里填了地址时给出下一步（「改为按主题安装」）。
+     * 所以它读的是**标志性文件**（`main.js` / `theme.css`）而不是 manifest ——
+     * 后者两类对象都有，分辨不出来。
+     *
+     * ## 为什么只在失败之后调
+     *
+     * 它要真的把一个文件读下来（走源码 raw 通道，**不花 API 配额**，但 `main.js`
+     * 可能有几百 KB）。正常路径上一次都不调；只有安装已经失败、用户正卡在那里时，
+     * 多读一个文件换取一句能走下去的提示是划算的。
+     */
+    async looksLikeKind(ref: RepoRef, kind: TrackedKind): Promise<boolean> {
+        const marker = KIND_MARKER_FILE[kind];
+        try {
+            const raw = await getHost(ref.host).readFile(ref, marker, {
+                token: this.tokenFor(ref.host),
+                ref: "HEAD",
+            });
+            return raw !== undefined;
+        } catch (err) {
+            logger.debug(`could not probe ${marker} in ${formatRepoId(ref)}`, err);
+            return false;
         }
     }
 
@@ -526,6 +608,143 @@ export class InstallerService {
             logger.error(`install of ${manifest.id} failed after writing files`, err);
             throw err;
         }
+    }
+
+    // ── 安装（主题） ──────────────────────────────────────────────────────
+
+    /**
+     * 从仓库地址**新装**一个主题：写进 `{configDir}/themes/{名字}` 并记入跟踪列表。
+     *
+     * ## 为什么需要它
+     *
+     * 在它之前，主题只有两条路：**绑定**库里已经装好的（`bindExistingThemes` /
+     * `bindThemeToRepo`）和**更新**已跟踪的（`updateTheme`）。也就是说 SyncHub 从来
+     * 没能把一个主题装到磁盘上 —— 把主题仓库地址填进「添加插件仓库」只会得到一句
+     * 「缺少必需文件：main.js」（2026-10-05 用户报的正是这个）。
+     *
+     * ## 四处与插件安装不同的地方
+     *
+     * 1. **目录名由远端 manifest 的 `name` 现算**（不能当目录名时回落到仓库名）——
+     *    主题没有 id，目录名就是它的身份，官方主题商店也是这么落的
+     *    （`themes/Minimal`）。`updateTheme` 那条「绝不改名」说的是**已存在**的主题，
+     *    与这里不冲突。
+     * 2. **不做镜像发现**：主题的镜像判据是「名字相同 + 版本不比源旧」，它依赖本地
+     *    已经装好的那一版；新装时手上没有它，判据不成立（见 `findGiteeMirrorForTheme`）。
+     *    所以这里 `allowMirror: false`，而不是让它去跑插件那套（按 `manifest.id`
+     *    判断的）发现。
+     * 3. **兼容性检查照跑**：`fetchItem` 里那段对两类对象都生效（主题的
+     *    `minAppVersion` 是可选字段，写了就检查，这是主题唯一的「不兼容」信号）。
+     * 4. **绝不替用户切换主题**：装完只提示「到 设置 → 外观 → 主题 里选它」。
+     *    主题没有启用/禁用，唯一的对应动作是切换，而那是用户的界面 —— 与
+     *    `themeFolder.ts` 刻意不收 `setTheme` 是同一条规矩。
+     *
+     * 覆盖已有的**同名不同主题**会被拦下（`themeNameConflict`），见
+     * `assertThemeFolderFree`。
+     */
+    async installTheme(request: ThemeInstallRequest): Promise<ThemeInstallResult> {
+        const { files, manifest, channel, repoRef } = await this.fetchItem(
+            THEME_SPEC,
+            request.repo,
+            "latest",
+            {
+                allowMirror: false,
+                defaultHost: request.defaultHost,
+                onProgress: request.onProgress,
+            }
+        );
+
+        const id = this.themeFolderName(manifest, repoRef);
+        const folder = await resolveThemeFolder(this.app, id);
+        await this.assertThemeFolderFree(folder, repoRef, manifest);
+
+        const backup = await createBackup(this.app, "theme", id, folder);
+        await writeItemFiles(this.app, files, backup);
+
+        const active = getActiveTheme(this.app);
+        const wasActive = active !== undefined && active.toLowerCase() === id.toLowerCase();
+        if (wasActive) requestThemeReload(this.app);
+
+        await this.recordItem({
+            kind: "theme",
+            repoRef,
+            id,
+            name: manifest.name,
+            version: manifest.version,
+            channel,
+        });
+
+        return {
+            manifest,
+            channel,
+            version: manifest.version,
+            id,
+            // 目录本来就在 = 重装/替换，与新装是两句不同的话（「已安装」/「已更新」）。
+            replaced: backup.folderExisted,
+            wasActive,
+            repoRef,
+        };
+    }
+
+    /**
+     * 新装的主题写进哪个目录名。
+     *
+     * 优先 manifest 的 `name`：那既是用户在「外观」里看到的名字，也是官方主题商店
+     * 用的目录名（`themes/Minimal`），两者一致时用户核对起来最省事。
+     *
+     * 它不能当目录名时（`isValidThemeName`：空串、`.`、路径分隔符、首尾空白……）
+     * 回落到**仓库名**。仓库名同样是远端数据、同样要过一遍校验 —— 两条都不行就报错，
+     * 而不是「随便拼一个」：目录名会成为 `rmdir(folder, true)` 递归删除的目标
+     * （见 `core/themeName.ts` 的文件头）。
+     */
+    private themeFolderName(manifest: ThemeManifest, ref: RepoRef): string {
+        const name = typeof manifest.name === "string" ? manifest.name.trim() : "";
+        if (isValidThemeName(name)) return name;
+
+        logger.warn(
+            `theme name ${JSON.stringify(manifest.name)} cannot be used as a folder name — ` +
+                `falling back to the repository name for ${formatRepoId(ref)}`
+        );
+        if (isValidThemeName(ref.repo)) return ref.repo;
+
+        throw new InstallerError({
+            kind: "themeNameInvalid",
+            repo: formatRepoId(ref),
+            name: String(manifest.name),
+        });
+    }
+
+    /**
+     * `themes/{名字}` 已经被**另一个**主题占着吗？占着就抛错，绝不覆盖。
+     *
+     * 两种「不算冲突」要分清：
+     *
+     * - **读不到 manifest 的目录**：Obsidian 自己会把这种目录当成版本 `0.0.0` 的主题
+     *   加载（可能是损坏的、也可能是用户手工拷进来的半个主题），而它的目录名与我们
+     *   要写的是同一个 —— 那就是同一个主题，覆盖它正是「重装」该做的事；
+     * - **同名（大小写不敏感）**：`themes/minimal` 与 manifest 里的 `Minimal` 在
+     *   Windows / macOS 上本就是同一个目录。
+     *
+     * 除了这两种，其余一律拦下：两个不同的主题完全可以同名，而覆盖掉的可能是用户
+     * 正在用的那一个 —— 它不在跟踪列表里，没有「重新下载」这条路。
+     */
+    private async assertThemeFolderFree(
+        folder: string,
+        ref: RepoRef,
+        incoming: ThemeManifest
+    ): Promise<void> {
+        const existing = await readThemeManifestInFolder(this.app, folder);
+        if (!existing) return;
+        // 两边都 trim 再比：manifest 的 `name` 只要非空就过解析，带空白的
+        // `"Minimal "` 与 `"Minimal"` 在这里必须是同一个主题
+        // （`themeFolderName` 也是先 trim 再当目录名的）。
+        if (existing.name.trim().toLowerCase() === incoming.name.trim().toLowerCase()) return;
+
+        throw new InstallerError({
+            kind: "themeNameConflict",
+            id: folder.slice(folder.lastIndexOf("/") + 1),
+            repo: formatRepoId(ref),
+            existing: existing.name,
+        });
     }
 
     // ── 更新（主题） ──────────────────────────────────────────────────────
@@ -799,6 +1018,10 @@ export class InstallerService {
         await writeItemFiles(this.app, files, backup);
 
         setPendingRestart(this.settings, manifest.version);
+        // 那个「可用更新」已经落盘了，再挂着它会让标签页的徽标一直亮着
+        // （徽标读的正是 `selfUpdateAvailable`）—— 用户会以为更新没生效。
+        // 重启之后状态行由「待重启」那条接管，不需要这一份。
+        this.settings.installer.selfUpdateAvailable = "";
         await this.deps.saveSettings();
 
         logger.info(`SyncHub updated to ${manifest.version}; restart required`);
@@ -1264,6 +1487,32 @@ export class InstallerService {
             } else {
                 delete store[key];
             }
+        }
+
+        await this.deps.saveSettings();
+    }
+
+    /**
+     * 把自身更新检查的结果写进 `installer.selfUpdateAvailable` 并落盘。
+     *
+     * 与 `recordUpdateChecks` 同一套取舍：
+     *
+     * - **有更新** → 记下版本号（「插件安装器」标签上的数字徽标与那一行的状态文字
+     *   都读它，见 `InstallerSettings.selfUpdateAvailable`）；
+     * - **无更新** → 清掉旧记录（那个版本已经装上了 / 远端撤了）；
+     * - **检查失败** → 不动旧记录（过期信息好过没有 —— 与那里一字不差）。
+     *
+     * 顺带刷新 `lastUpdateCheckAt`：**即使这次失败也算「检查过了」**。这一条在这里
+     * 比在 `recordUpdateChecks` 更要紧 —— 那边只在 `results.length > 0` 时才写，
+     * 而一个跟踪项都没有的用户走不到那条路；不在这里写的话，他每次打开设置页都会
+     * 重新打一遍 Gitee 的接口。
+     */
+    async recordSelfUpdateCheck(result: SelfUpdateCheck): Promise<void> {
+        const settings = this.settings;
+        settings.installer.lastUpdateCheckAt = Date.now();
+
+        if (result.error === undefined) {
+            settings.installer.selfUpdateAvailable = result.hasUpdate ? result.latestVersion : "";
         }
 
         await this.deps.saveSettings();

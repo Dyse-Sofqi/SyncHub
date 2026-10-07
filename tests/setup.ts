@@ -25,6 +25,22 @@ if (typeof globalThis.document === "undefined") {
                 (element.children as unknown[]).push(child);
                 return child;
             },
+            /**
+             * `prepend` 在真机上就是「插到最前面」，而且对**已经在文档里**的节点是
+             * **移动**（不会出现两份）。这里照这个语义实现：先摘掉、再 unshift。
+             *
+             * 为什么需要它：按钮里「图标 + 文字」的顺序只能靠它建立
+             * （`setButtonText` 把文字写在按钮里，`createSpan` 建的图标容器默认追加
+             * 在后面，见 `settingsTab.addButtonIcon`）。
+             */
+            prepend(...nodes: unknown[]) {
+                for (const node of nodes) {
+                    const index = (element.children as unknown[]).indexOf(node);
+                    if (index >= 0) (element.children as unknown[]).splice(index, 1);
+                }
+                (element.children as unknown[]).unshift(...nodes);
+                return undefined;
+            },
             removeChild() {},
             empty() {
                 element.children = [];

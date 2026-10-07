@@ -8,6 +8,7 @@ import {
     normalizeSettings,
     type ObsyncSettings,
 } from "./core/settings";
+import { RibbonAvatar } from "./features/avatar/ribbonAvatar";
 import { createImageSyncModule, type ImageSyncModule } from "./features/images";
 import { isEditableImage, isImagePath, isInsideFolders, normalizeFolders } from "./features/images/imageScan";
 import { ImageEditorModal } from "./features/images/ui/ImageEditorModal";
@@ -29,6 +30,7 @@ import { EditRemoteModal } from "./features/sync/ui/EditRemoteModal";
 import { DIFF_VIEW_TYPE, DiffView, type DiffRequest } from "./features/sync/ui/DiffView";
 import { SourceControlView, SYNC_VIEW_TYPE } from "./features/sync/ui/SourceControlView";
 import { setHttpDebugLogger } from "./host/http";
+import { getHost } from "./host/hostRegistry";
 import { redactUrl } from "./host/redact";
 import { ObsyncSettingsTab } from "./settingsTab";
 
@@ -113,6 +115,14 @@ export default class ObsyncPlugin extends Plugin {
     images?: ImageSyncModule;
 
     /**
+     * 功能区（左侧 ribbon）底部的 Gitee 头像（设置页「通用」里的开关）。
+     *
+     * 与 `sync` 不同，**移动端也装**：它只是一次 `requestUrl` 加一个 `<img>`，
+     * 手机上的抽屉功能区同样挂得上（见 `findRibbonContainer` 的选择器清单）。
+     */
+    ribbonAvatar?: RibbonAvatar;
+
+    /**
      * 当前语言的翻译表。
      *
      * 界面语言**跟随 Obsidian**（没有设置项，见 `core/i18n/index.ts`）：字段
@@ -138,6 +148,24 @@ export default class ObsyncPlugin extends Plugin {
         this.notifier = new Notifier({
             getShowNotices: () => this.settings.showNotices,
             getT: () => this.translations,
+        });
+
+        // 功能区底部的账号头像。**必须在 `applyDerivedSettings()` 之前装好**：
+        // 那个方法会按设置立刻画一次（见它里面的 `this.ribbonAvatar?.apply()`）。
+        // 它只依赖下面这几样已经就绪的东西（设置 / 令牌存储 / 翻译表）。
+        //
+        // 平台**每次问一次**（`avatarHost`）而不是在这里快照：用户拨那个开关之后
+        // 要立刻换头像，而 `apply()` 是同步调用的（见 `RibbonAvatar.apply`）。
+        this.ribbonAvatar = new RibbonAvatar({
+            isEnabled: () => this.settings.ribbonAvatar,
+            avatarHost: () => (this.settings.ribbonAvatarUseGitee ? "gitee" : "github"),
+            getToken: (host) => this.secretStore.getToken(host),
+            // 头像地址与账号名来自**同一次** `validateToken()`（见 `TokenInfo.avatarUrl`）。
+            lookup: (host, token) => getHost(host).validateToken(token),
+            // `() => this.t` 而不是快照：这个模块是常驻的，界面语言可能在它活着
+            // 的时候变（与设置页/视图的 `getT` 同一条理由）。
+            // 平台名走 `displayName`（「Gitee」/「GitHub」）—— 与设置页令牌那一行同源。
+            getLabel: (host, account) => this.t.plugin.ribbonAvatar(getHost(host).displayName, account),
         });
 
         this.applyDerivedSettings();
@@ -197,6 +225,21 @@ export default class ObsyncPlugin extends Plugin {
             this.app.vault.on("rename", (file, oldPath) =>
                 this.images?.noteRenamed(file, oldPath)
             )
+        );
+
+        // 库里新增 / 改动了图片 → 攒一小会儿再自动同步一次（2026-10-06）。
+        //
+        // 两个事件都要挂，因为「拖进来」是 `create`、「外部程序替换 / 在 Obsidian
+        // 里编辑」是 `modify` —— 只挂一个会漏掉一半。什么时候真的跑由模块里的
+        // `ImageChangeQueue` 决定（静默期 + 硬上限），这里只负责把事件转过去。
+        //
+        // **删除不挂**：它已经有自己的即时处置（问一句 + 记墓碑），而同步从不删
+        // 云端 —— 触发一轮唯一可能的效果是把云端那份拉回来（见 `noteChanged`）。
+        this.registerEvent(
+            this.app.vault.on("create", (file) => this.images?.noteChanged(file))
+        );
+        this.registerEvent(
+            this.app.vault.on("modify", (file) => this.images?.noteChanged(file))
         );
 
         this.installer = createInstallerModule(this.createInstallerHost(), this.app);
@@ -286,8 +329,24 @@ export default class ObsyncPlugin extends Plugin {
         this.registerSyncCommands();
         this.registerImageCommands();
 
+        /**
+         * 功能区被重建时把头像挂回去。
+         *
+         * 我们那个 `<img>` 是**插进 Obsidian 的核心节点**里的（功能区底部那一组），
+         * 而那个节点会在布局变动时被重建 —— 切换「显示功能区」、拖动面板、
+         * 换主题都可能发生。重建之后我们手上那个节点就掉出文档了，界面上表现为
+         * 「头像自己消失了」。`apply()` 是幂等的：节点还在就什么都不做，
+         * 掉出去了就按缓存重新挂回去（不会再发请求）。
+         */
+        this.registerEvent(
+            this.app.workspace.on("layout-change", () => this.ribbonAvatar?.apply())
+        );
+
         // 等 Obsidian 自身启动完成后再做后台动作，避免争抢资源。
         this.app.workspace.onLayoutReady(() => {
+            // 顺带再画一次头像：插件加载时功能区**可能还没建出来**
+            // （那时 `findRibbonContainer()` 返回 null），这里补一次。
+            this.ribbonAvatar?.apply();
             this.installer.scheduleStartupCheck();
             this.sync?.start();
             this.images?.start();
@@ -312,6 +371,9 @@ export default class ObsyncPlugin extends Plugin {
         // body 上（CSS 由 Obsidian 继续加载到下次重载），状态栏会莫名其妙
         // 保持全宽，而且谁也看不出是谁干的。
         applyStatusBarWidth(false);
+        // 同理，头像那个节点也**必须摘掉**：它插在 Obsidian 自己的功能区里，
+        // 插件被禁用后 CSS 仍然在，而谁也不会想到那张图是已经关掉的插件留下的。
+        this.ribbonAvatar?.destroy();
         logger.info("plugin unloaded");
     }
 
@@ -350,11 +412,26 @@ export default class ObsyncPlugin extends Plugin {
             this.settings.debugLogging ? (message) => logger.debug(message) : undefined
         );
         applyStatusBarWidth(this.settings.statusBarFullWidth);
+        // 开关拨动后立刻重画（与状态栏那条同一个时序：`commit()` → 这里），
+        // 所以设置页上的开关是**立刻**生效的，不用重载插件。
+        this.ribbonAvatar?.apply();
         this.sync?.reload();
         // 图片同步的开关与间隔变了要重起定时器。与 `sync.reload()` 同一个理由：
         // 只在设置页改值而不通知逻辑层，会让「拨了开关没反应」。
         // `?.` 是必需的：`applyDerivedSettings()` 在 `onload` 里**先于**模块装配被调用。
         this.images?.reload();
+    }
+
+    /**
+     * 重画功能区头像。
+     *
+     * 设置页在**令牌**变化后（失焦保存 / 测试 / 清除）调它。为什么不能只靠
+     * `applyDerivedSettings()`：令牌输入框在「插件安装器」那一页，而头像开关在
+     * 「通用」那一页 —— 用户填完令牌走开这条路上**一次 `commit()` 都没有**，
+     * 于是头像不会自己出现，得等到下一次设置变更或重启。
+     */
+    refreshRibbonAvatar(): void {
+        this.ribbonAvatar?.apply();
     }
 
     /** 供安装器模块使用的依赖。 */
@@ -374,6 +451,12 @@ export default class ObsyncPlugin extends Plugin {
             id: "add-plugin-repo",
             name: this.t.installer.cmdAddRepo,
             callback: () => this.installer.openAddRepoModal(),
+        });
+
+        this.addCommand({
+            id: "add-theme-repo",
+            name: this.t.installer.cmdAddTheme,
+            callback: () => this.installer.openAddThemeModal(),
         });
 
         this.addCommand({
@@ -915,20 +998,36 @@ export default class ObsyncPlugin extends Plugin {
         }
     }
 
-    private async initRepo(): Promise<void> {
+    /**
+     * 初始化 git 仓库（`git init` + 必要时建一份默认 `.gitignore`）。
+     *
+     * **三个入口共用这一份实现**，所以它是公开的：
+     *
+     * 1. 命令面板（`SyncHub：初始化仓库`）；
+     * 2. 仓库同步面板里「当前库还不是仓库」时那个按钮（`SourceControlView`）；
+     * 3. 设置页「仓库同步」最上面那一行（2026-10-05 用户要求：
+     *    「把仓库初始化按钮也放入设置页，保证仓库同步的基本设置能全部在设置页中就完成」）。
+     *
+     * 走 service 而不是直接 `git.init()`：service 会顺带处理 `.gitignore`
+     * （没有就建一份默认的，避免用户把 `workspace.json` 同步出去）。
+     *
+     * @returns 是否成功。设置页拿它决定要不要刷新那一行的状态徽标；失败时的
+     *   提示已经由 `runSyncAction` 发过了。
+     */
+    async initRepo(): Promise<boolean> {
         const sync = this.sync;
-        if (!sync) return;
+        if (!sync) return false;
 
         try {
-            // 走 service 而不是直接 git.init()：service 会顺带处理 .gitignore
-            // （没有就建一份默认的，避免用户把 workspace.json 同步出去）。
             const { createdGitignore } = await sync.service.initRepo();
             this.notifier.success(this.t.sync.repoInited);
             if (createdGitignore) {
                 this.notifier.info(this.t.sync.gitignoreCreated);
             }
+            return true;
         } catch (err) {
             await this.runSyncAction(() => Promise.reject(err));
+            return false;
         }
     }
 
