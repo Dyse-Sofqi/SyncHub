@@ -168,6 +168,7 @@ HEAD 未出生时报 `fatal: could not resolve 'HEAD'` —— **HEAD 带单引�
 
 注释用中文，写**为什么**而不是「做了什么」；不复刻参考项目的兼容包袱；
 敏感项（令牌、R2 secret）**绝不进 `data.json`**，走 `core/secretStore`。
+**静态样式放 CSS 类**：`no-static-styles-assignment` 只拦字面量，用 `const` 绕过是形式（2026-10-08 已收 `.obsync-gitignore` 的宽度）。
 
 ### 工具坑
 
