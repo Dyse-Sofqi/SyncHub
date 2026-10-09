@@ -62,8 +62,8 @@ Chinese-first UI with an equal English one.
   写入前备份 + 失败回滚 · 更新检查（单个/全部/启动/进入设置页）· 常驻更新徽标 · 冻结 ·
   **版本回退** · 取消绑定（不删文件）· 绑定已装插件与主题 · **从仓库新装主题（不替你切换）** ·
   Gitee 镜像发现 · 自我更新（镜像源开关）
-- **平台与体验** — 双平台适配层 · **功能区账号头像（Gitee / GitHub，带换头像链接）** ·
-  令牌进系统密钥库并从日志脱敏 · 中文优先英文对等 ·
+- **平台与体验** — 双平台适配层 · **功能区账号头像（Gitee / GitHub，带换头像链接；点头像直达设置「通用」页）** ·
+  状态栏条目贴靠最左侧（可关，只改自己的顺序）· 令牌进系统密钥库并从日志脱敏 · 中文优先英文对等 ·
   错误文案走类型码 + locale · 移动端可加载（同步仅桌面）
 
 **English**
@@ -91,7 +91,8 @@ Chinese-first UI with an equal English one.
   **install themes from a repository (never switches for you)** · Gitee mirror discovery ·
   self-update (mirror toggle)
 - **Platform & UX** — one platform layer for both hosts ·
-  **ribbon account avatar (Gitee / GitHub, with a change-avatar link)** ·
+  **ribbon account avatar (Gitee / GitHub, with a change-avatar link; click it to jump straight to the General settings tab)** ·
+  status-bar item pinned first (can be turned off; only its own order changes) ·
   tokens in the OS keychain, redacted from logs ·
   Chinese-first with an equal English UI · error text via type codes + locales ·
   loadable on mobile (sync is desktop-only)
@@ -215,10 +216,11 @@ Chinese-first UI with an equal English one.
   内容被截断、文件过大各有明确说明 —— 空白会被读成「没有改动」，那是完全不同的结论。
   合并提交也能看（git 默认对它不输出差异）
 - **状态栏条目** —— 分支 / `↑ahead ↓behind` / `~脏文件数` / `⚠冲突数`，以及进行中的动作；
-  贴在状态栏**最左侧**（这是刻意的：它回答「现在同步到哪了」，不该藏在右下角），
-  并且**可以点开**（打开仓库同步视图）。贴最左需要把状态栏拉成全屏宽，而**那会改变
-  状态栏的整体观感**，所以设置页「通用」里给了开关（**状态栏占满整屏宽**，默认开）：
-  关掉后状态栏恢复 Obsidian 原样（右下角一簇），同步条目仍在那一簇的最前面
+  排在状态栏**最左侧**（这是刻意的：它回答「现在同步到哪了」，不该藏在右下角），
+  并且**可以点开**（打开仓库同步视图）。它只改自己的视觉顺序（CSS 的 `order`），
+  **不动别人的条目** —— 状态栏仍是 Obsidian 原样（右下角一簇）。
+  不想贴最左可以关掉：设置页「通用」里的**状态栏同步条目贴靠最左侧**（默认开），
+  关掉后条目按默认顺序排，不作特殊处理
 - **同步看得见** —— 忙碌时状态栏那一格挂一个**转动的圆环**、文字转成强调色，
   文案也改成「**正在同步：提交中…**」（点「立即同步」时一眼分出这是三步链路里的
   一步，后面还有拉取与推送；悬停提示同样改口）。侧边栏仓库同步面板的**工具条正下方**
@@ -331,7 +333,12 @@ Chinese-first UI with an equal English one.
 - **双平台适配层** —— GitHub 与 Gitee 的差异（鉴权方式、release 排序、raw 通道、限流特性）只实现一次
 - **功能区账号头像**（默认关）—— 左侧功能区**底部**挂一张当前令牌账号的圆形头像，
   平台由「使用 Gitee 头像」决定；地址与账号名**同一次** `validateToken()` 拿到，
-  那个平台没配令牌时**一个请求都不发**；描述里带**换头像的个人资料页链接**（跟着平台走）
+  那个平台没配令牌时**一个请求都不发**；描述里带**换头像的个人资料页链接**（跟着平台走）。
+  **点它打开设置窗口并停靠「通用」页**（换平台、改令牌都在那一页）；头像外侧**常驻**一圈
+  柔灰虚影环，**悬停时**环加深并晕开一团保守的模糊扩散，但**光标保持默认**
+- **状态栏同步条目贴靠最左侧**（默认开）—— 同步条目排在状态栏那一簇的**最左侧**
+  （只改自己的视觉顺序，不动其他条目）；关掉后不作特殊处理，按 Obsidian 默认顺序排。
+  状态栏本身不碰（仍是 Obsidian 原样的右下角一簇）
 - **访问令牌存进系统密钥库** —— 不写进 `data.json`、不随库同步到其他设备；
   错误提示与调试日志里的令牌一律脱敏
 - **中文优先、英文对等** —— 所有界面文案与错误信息都走 i18n；错误只携带「类型码 + 参数」，
@@ -436,20 +443,25 @@ Chinese-first UI with an equal English one.
 | 插件安装器 | **SyncHub 自身**（版本状态小字 + 检查更新 / 更新按钮 + **启用 Gitee 镜像源**开关）、**进入设置页时自动检查**（开着时同时查跟踪列表与 SyncHub 自身）、**启动时检查更新** + 启动检查延迟、**自动发现 Gitee 镜像**。标签上有**数字徽标**：SyncHub 自身有可用更新时显示 |
 | 仓库同步 | **初始化 git 仓库**（一行：状态徽标「已是 / 还不是 git 仓库」+ 按钮，已是时置灰）、**远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**三项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**） |
 | 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步，排在最前面）、**自动同步图片**（开关）、**变动后自动同步**（延时 + 开关，默认开 / 30 秒）、**按周期同步**（周期 + 开关，只管其他设备上的变化）、需要图片同步的文件夹（整行的路径框，含「浏览…」/「恢复默认」）、R2 连接与密钥、冲突与删除策略、压缩默认值 |
-| 通用 | 提示开关、调试日志、**状态栏占满整屏宽**、**功能区展示用户头像** + **使用 Gitee 头像**（用哪个平台的头像；那一行的描述里带「去换头像」的链接，跟着平台走）、**访问令牌**（GitHub / Gitee） |
+| 通用 | 提示开关、调试日志、**状态栏同步条目贴靠最左侧**（默认开；关掉后条目按默认顺序排，不作特殊处理）、**功能区展示用户头像** + **使用 Gitee 头像**（用哪个平台的头像；那一行的描述里带「去换头像」的链接，跟着平台走）、**访问令牌**（GitHub / Gitee） |
 
 **界面语言跟随 Obsidian**：插件不提供单独的界面语言设置项 —— 你在 Obsidian 里
 用的语言是什么，插件就是什么（中文 / 英文两套文案对等）。
 
 **功能区展示用户头像**（默认关）在左侧功能区（ribbon）**底部**挂一张圆形头像 ——
 就是当前所配**令牌所属账号**的头像（由那个平台的 `validateToken()` 返回的 `avatar_url`，
-与账号名同一次请求拿到，不额外多打一次接口）。它没有点击动作，作用是回答
+与账号名同一次请求拿到，不额外多打一次接口）。它回答
 「现在配的令牌是哪个账号」—— 镜像探测拿的也正是这个账号名。
 **用哪个平台的头像由下面那一项「使用 Gitee 头像」决定**（默认开 = Gitee，关 = GitHub）。
 那个平台没配令牌时它什么都不显示（匿名问那个接口只有 401，而匿名配额实测极低，
 所以插件**不会**去发这个请求）。头像只能在平台那边换，所以那一行的描述末尾直接给了
 **个人资料页的链接**（选 Gitee 是 `gitee.com/profile`、选 GitHub 是
 `github.com/settings/profile`）—— 点一下就到换头像的地方，不用自己去翻设置。
+
+**点头像可以打开设置窗口**，并直接停靠「通用」页（换平台、改令牌都在那一页）。
+它外侧**常驻**一圈**虚影环**（柔灰、2px、紧贴头像边缘，中间没有缝）；**悬停时**
+环会加深，并晕开一团**模糊扩散**（范围保守，不超出功能区），但**光标保持默认** ——
+这张头像首先是一张头像，点击只是顺手的入口，不摆出按钮的样子。
 
 **令牌只保存在本机**（Obsidian 的密钥存储，老版本回退到 localStorage），
 不会写进 `data.json`，也不会随库同步到其他设备。
@@ -763,12 +775,11 @@ per-platform instructions).
   say what they are — blank space reads as "nothing changed", which is a different conclusion.
   Merge commits work too (git prints no diff for them by default)
 - **Status-bar item** — branch / `↑ahead ↓behind` / `~dirty` / `⚠conflicts` plus the action in progress;
-  pinned to the **far left** of the status bar on purpose, and **clickable** (opens the repository
-  sync view).
-  Pinning it there requires stretching the status bar to the full window width, and **that changes how
-  the status bar looks**, so the General tab has a switch for it (**"Status bar spans the full width"**,
-  on by default): turning it off restores Obsidian's own layout (a bottom-right cluster) with the sync
-  item still first in that cluster
+  ordered **first in the status bar** on purpose, and **clickable** (opens the repository
+  sync view). It only changes its own visual order (CSS `order`) — **no one else's items
+  move**, and the status bar itself stays exactly as Obsidian lays it out (bottom-right cluster).
+  Don't want it first? Turn off **Keep the sync item at the left of the status bar** in the
+  General tab (on by default) — the item then falls back to the default order
 - **Syncing is visible** — while an action runs, that status-bar cell gets a **spinning ring** and its
   text turns to the accent colour, and the wording becomes **"Syncing: committing…"** (so clicking
   "Sync now" reads as one step of a three-step chain, with pull and push still to come; the hover
@@ -903,7 +914,12 @@ storage**.
   token** at the **bottom of the left ribbon**, with the platform chosen by "Use Gitee avatar". The
   address comes back from the **same** `validateToken()` call as the account name, and **not a single
   request is sent** when that platform has no token; the description carries a **link to the profile
-  page** to change it (and follows the platform)
+  page** to change it (and follows the platform). **Clicking it opens the settings window on the
+  General tab** (that is where you switch platform and edit tokens); a **soft grey halo ring is always
+  there**, deepening on hover into a **conservative blurred bloom** — while the **cursor stays default**
+- **Keep the sync item at the left of the status bar** (on by default) — the sync item is ordered
+  **first in the status bar** (only its own visual order changes; no other item moves). Turn it off
+  and the item falls back to Obsidian's default order. The status bar itself is never touched
 - **Tokens live in the OS keychain** — never written to `data.json`, never synced with the vault,
   and redacted from error messages and debug logs
 - **Chinese-first, English equal** — all UI text and errors go through i18n; errors carry type codes
@@ -1027,20 +1043,27 @@ own switches and timers.
 | Plugin installer | **SyncHub itself** (a version status line + check / update buttons + an **Enable Gitee mirror source** toggle), **check when opening settings** (checks both the tracked list and SyncHub itself), **check on startup** + startup delay, **auto-discover Gitee mirrors**. The tab carries a **numeric badge** when SyncHub itself has an update |
 | Vault sync | **Initialise git repository** (one row: a "already a repo" / "not a repo yet" badge + a button, greyed out when it is), **remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these three come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**) |
 | Image sync | **Actions first** (**Open image manager** plus test connection / preview changes / sync now), **automatic image sync** (toggle), **sync after changes** (delay + toggle, on by default / 30 s), **periodic sync** (interval + toggle, covers other devices only), folders to sync (a full-width path box with "Browse…" / "Restore default"), R2 connection and secret, conflict and deletion policy, compression defaults |
-| General | notices, debug logging, **status bar spans the full width**, **ribbon account avatar** + **Use Gitee avatar** (which platform's avatar; the description carries a "change your avatar" link that follows the platform), **access tokens** (GitHub / Gitee) |
+| General | notices, debug logging, **keep the sync item at the left of the status bar** (on by default; off = default order, no special treatment), **ribbon account avatar** + **Use Gitee avatar** (which platform's avatar; the description carries a "change your avatar" link that follows the platform), **access tokens** (GitHub / Gitee) |
 
 The interface language follows Obsidian — there is no separate language setting in the plugin.
 
 **Ribbon account avatar** (off by default) puts a round avatar at the **bottom of the left ribbon** —
 that of the account **the configured token belongs to** (the `avatar_url` returned by that platform's
-`validateToken()`, fetched in the same request as the account name, so no extra API call). It has no
-click action; its job is to answer "which account is this token for" — the same account name mirror
+`validateToken()`, fetched in the same request as the account name, so no extra API call). Its job is to
+answer "which account is this token for" — the same account name mirror
 discovery uses. **Which platform's avatar is used is decided by "Use Gitee avatar" below it** (on by
 default = Gitee, off = GitHub). When that platform has no token it shows nothing (an anonymous call to
 that endpoint is a 401, and the anonymous quota is measured to be very low, so the plugin **does not**
 make the request). An avatar can only be changed on the platform itself, so the description ends with a
 **link to the profile page** (Gitee → `gitee.com/profile`, GitHub → `github.com/settings/profile`) —
 one click takes you where you change it.
+
+**Clicking the avatar opens the settings window**, parked on the **General** tab (that is where you
+switch platform and edit tokens). A **soft grey halo ring** is **always there**, right against the
+avatar's edge (2px, no gap in between); **on hover** the ring deepens and a **blurred bloom** joins it
+(kept conservative — it never spills out of the ribbon), while the **cursor stays default** — the
+avatar is an avatar first; clicking it is just a handy entrance, so it is deliberately not dressed up
+as a button.
 
 **Tokens are stored locally only** (Obsidian's secret storage, falling back to localStorage for older
 versions), never in `data.json`, and never synced to other devices.

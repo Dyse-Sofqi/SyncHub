@@ -324,29 +324,51 @@ describe("桌面端启动", () => {
     });
 
     /**
-     * 状态栏全宽开关（设置页「通用」）。
+     * 「同步条目贴靠状态栏最左侧」开关（设置页「通用」，默认开）。
      *
-     * 这条规则用到了 `:has()`，只能写在 CSS 里，所以开关的做法是**给 body 加类**
-     * （见 `main.ts` 的 `applyStatusBarWidth`）。三件事都要钉住：
-     * 开着时加上、关掉时摘掉、**卸载时也摘掉**。
+     * 位置规则只能写在 CSS 里（`order` 作用于 flex 布局），所以开关的做法是
+     * **给 body 加类**（见 `main.ts` 的 `applyStatusBarLeftAlign`）。三件事都要
+     * 钉住：开着时加上、关掉时摘掉、**卸载时也摘掉**。
      *
-     * 最后那条最容易漏：不摘的话插件禁用后全宽规则还挂在 body 上，状态栏莫名
-     * 保持全宽，而谁也看不出是谁干的。
+     * 最后那条最容易漏：不摘的话插件禁用后那条贴最左的规则还挂在 body 上
+     * （CSS 由 Obsidian 继续加载到下次重载）。条目本身随插件消失，所以实际无害，
+     * 但谁也说不好下一条挂在同一类下的规则会不会有副作用。
+     *
+     * 注意这与 2026-10-09 删掉的「状态栏占满整屏宽」是两件事：那个碰的是
+     * **状态栏的宽度**（贴屏幕最左），已整条删除；这个只管**条目在状态栏里
+     * 的顺序**。
      */
-    it("按设置给 body 加/摘「状态栏全宽」的类，卸载时也会摘掉", async () => {
+    it("按设置给 body 加/摘「条目贴靠最左侧」的类，卸载时也会摘掉", async () => {
         const plugin = createPlugin(fake);
         await plugin.onload();
 
         // 默认开着（与既有行为一致）
-        expect(document.body.hasClass("obsync-status-bar-full-width")).toBe(true);
+        expect(document.body.hasClass("obsync-status-bar-left")).toBe(true);
 
-        plugin.settings.statusBarFullWidth = false;
+        plugin.settings.statusBarLeftAlign = false;
         plugin.applyDerivedSettings();
+        expect(document.body.hasClass("obsync-status-bar-left")).toBe(false);
+
+        plugin.settings.statusBarLeftAlign = true;
+        plugin.applyDerivedSettings();
+        expect(document.body.hasClass("obsync-status-bar-left")).toBe(true);
+
+        plugin.onunload();
+        expect(document.body.hasClass("obsync-status-bar-left")).toBe(false);
+    });
+
+    /**
+     * 状态栏拉全宽（2026-10-09 按用户要求删除，含当时的开关）。
+     *
+     * 拉全宽能让同步条目贴到屏幕最左，但会把状态栏的整体观感从「右下角一簇」
+     * 变成「底部一条」—— 用户选择不要这个代价，规则连同类一起删了。
+     * 这条用例守着「别再悄悄加回来」：插件**不碰状态栏的宽度**。
+     */
+    it("不给 body 加「状态栏全宽」的类（规则已删）", async () => {
+        const plugin = createPlugin(fake);
+        await plugin.onload();
+
         expect(document.body.hasClass("obsync-status-bar-full-width")).toBe(false);
-
-        plugin.settings.statusBarFullWidth = true;
-        plugin.applyDerivedSettings();
-        expect(document.body.hasClass("obsync-status-bar-full-width")).toBe(true);
 
         plugin.onunload();
         expect(document.body.hasClass("obsync-status-bar-full-width")).toBe(false);
@@ -426,6 +448,48 @@ describe("桌面端启动", () => {
                 restoreQuerySelector();
                 __setRequestUrlHandler(undefined);
             }
+        });
+
+        /**
+         * 点头像 → 打开设置窗口并停靠「通用」页（2026-10-09 用户要求）。
+         *
+         * 这条用例盯的是**装配层那根线**：头像节点自己的点击在
+         * `ribbonAvatar.test.ts` 里验，`openGeneral()` 的逻辑在
+         * `settingsTabRender.test.ts` 里验，这里验「main.ts 把三者接上了」——
+         * 具体说就是 `onClick` 真的传进了 `RibbonAvatar`，并且一路走到
+         * `app.setting.openTabById(插件 id)`。
+         *
+         * 这类断线的症状是「点了头像什么也没发生」，而它是**纯粹的接线错**：
+         * 三个部件各自都对，只有装配那一行漏了。
+         */
+        it("点头像走完整条链：打开设置窗并选中 SyncHub 页签", async () => {
+            const plugin = createPlugin(fake);
+            const opened: string[] = [];
+            let openCalls = 0;
+            // `app.setting` 不在 obsidian.d.ts 里（`main.ts` 里有说明），
+            // 这里按同一形状垫一个可断言的替身。
+            (fake.app as unknown as {
+                setting: { open(): void; openTabById(id: string): void };
+            }).setting = {
+                open: () => {
+                    openCalls += 1;
+                },
+                openTabById: (id) => opened.push(id),
+            };
+
+            await plugin.onload();
+
+            // 从装配好的 RibbonAvatar 里取出注入的 onClick 再调它 —— 这才是
+            // 「点头像」真正走的那条路。直接调 openGeneralSettings 会绕过
+            // 「传没传 onClick」这个最可能的接线错，所以必须走这里。
+            const onClick = (
+                plugin.ribbonAvatar as unknown as { deps: { onClick?: () => void } }
+            ).deps.onClick;
+            expect(typeof onClick).toBe("function");
+            onClick!();
+
+            expect(openCalls).toBe(1);
+            expect(opened).toEqual(["ob-sync"]);
         });
     });
 

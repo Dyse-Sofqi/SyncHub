@@ -158,6 +158,25 @@ export class ObsyncSettingsTab extends PluginSettingTab {
     }
 
     /**
+     * 打开设置页并停靠「通用」标签。
+     *
+     * 功能区头像点它就走这条（2026-10-09 用户要求：「点击后打开设置窗口，
+     * 跳转插件通用设置页」）。顺序很重要：**先把 `activeTab` 定下来再开窗** ——
+     * Obsidian 是在页签被选中的那一刻调 `display()` 的，那时读的就是这个值。
+     *
+     * `tabOpen` 那条路是给「设置窗已经开着」用的：就地重绘，不再开一次窗。
+     * 头像被点时其实走不到（设置模态框挡着功能区），但将来从别处调也一样对。
+     */
+    openGeneral(): void {
+        this.activeTab = "general";
+        if (this.tabOpen) {
+            this.display();
+            return;
+        }
+        this.obsync.openSettings();
+    }
+
+    /**
      * 打开设置页时用**磁盘上的事实**校正记录里的版本号。
      *
      * 记录里的 `installedVersion` 是装的那一刻的快照，之后被别的工具改过、被同步回来
@@ -801,13 +820,13 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             );
 
         new Setting(this.containerEl)
-            .setName(t.settings.general.statusBarFullWidth)
-            .setDesc(t.settings.general.statusBarFullWidthDesc)
+            .setName(t.settings.general.statusBarLeftAlign)
+            .setDesc(t.settings.general.statusBarLeftAlignDesc)
             .addToggle((toggle) =>
                 toggle
-                    .setValue(this.obsync.settings.statusBarFullWidth)
+                    .setValue(this.obsync.settings.statusBarLeftAlign)
                     .onChange(async (value) => {
-                        this.obsync.settings.statusBarFullWidth = value;
+                        this.obsync.settings.statusBarLeftAlign = value;
                         // `commit()` → `applyDerivedSettings()` → 给 body 加/摘那个类，
                         // 所以拨开关是**立刻**生效的（不用重载插件、也不用重开设置页）。
                         await this.commit();

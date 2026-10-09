@@ -68,6 +68,14 @@ function createTab(
             checker: {} as UpdateChecker,
         },
         openImageManager(): void {},
+        /**
+         * `openGeneral()`（功能区头像点它）在设置窗没开时会调它去开窗。
+         * **必须记一笔**：不记的话「点了头像到底有没有去开设置」验不了。
+         */
+        openSettingsCalls: 0,
+        openSettings(): void {
+            plugin.openSettingsCalls += 1;
+        },
         // 令牌输入框在保存 / 测试 / 清除后会调它重画功能区头像（见 `main.ts`）。
         // 这一页的用例不驱动那几个入口，但替身上缺了它，将来补一条令牌用例时
         // 会以一个与被测行为无关的 TypeError 失败。
@@ -529,7 +537,7 @@ describe("设置页 · 通用页", () => {
         (tab as unknown as { renderGeneral(): void }).renderGeneral();
     }
 
-    it("渲染不抛错，且四行都在（提示 / 调试日志 / 状态栏全宽 / 功能区头像 / 头像平台）", () => {
+    it("渲染不抛错，且各行都在（提示 / 调试日志 / 条目贴最左 / 功能区头像 / 头像平台）", () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
 
@@ -538,10 +546,13 @@ describe("设置页 · 通用页", () => {
         const names = createdSettings.map((setting) => setting.name);
         expect(names).toContain(zhCN.settings.general.showNotices);
         expect(names).toContain(zhCN.settings.general.debugLogging);
-        expect(names).toContain(zhCN.settings.general.statusBarFullWidth);
+        expect(names).toContain(zhCN.settings.general.statusBarLeftAlign);
         expect(names).toContain(zhCN.settings.general.ribbonAvatar);
         // 2026-10-06 从上面那一行里拆出来的「用哪个平台」。
         expect(names).toContain(zhCN.settings.general.ribbonAvatarSource);
+        // 「状态栏占满整屏宽」那一行 2026-10-09 删了（连同拉全宽的规则）——
+        // 状态栏整体观感是用户自己的界面，不值得为贴屏幕最左把它变成底部一条。
+        expect(names).not.toContain("状态栏占满整屏宽");
     });
 
     it("**没有页首标题**：第一条内容就是「显示操作结果提示」（2026-10-06）", () => {
@@ -552,6 +563,57 @@ describe("设置页 · 通用页", () => {
 
         const names = createdSettings.map((setting) => setting.name);
         expect(names[0]).toBe(zhCN.settings.general.showNotices);
+    });
+
+    /**
+     * `openGeneral()` —— 功能区头像的点击动作（2026-10-09 用户要求：
+     * 「点击后打开设置窗口，跳转插件通用设置页」）。
+     *
+     * 两半各自钉住：
+     * - **没开窗时**：`activeTab` 先被定成「通用」再开窗。顺序要紧 ——
+     *   Obsidian 是在页签被选中的那一刻调 `display()` 的，那时读的就是这个值；
+     *   先开窗再切页会闪一下用户上次看的那一页。
+     * - **已经开着时**：就地重绘，不再开一次窗（连开两次设置窗是很显眼的错）。
+     */
+    describe("openGeneral（功能区头像点它）", () => {
+        /** 私有状态读出来断言（与这个文件里其它地方同一套做法）。 */
+        function stateOf(tab: ObsyncSettingsTab): {
+            activeTab: string;
+            openSettingsCalls: number;
+        } {
+            const inner = tab as unknown as {
+                activeTab: string;
+                obsync: { openSettingsCalls: number };
+            };
+            return {
+                activeTab: inner.activeTab,
+                openSettingsCalls: inner.obsync.openSettingsCalls,
+            };
+        }
+
+        it("没开窗时：切到「通用」页并打开设置窗", () => {
+            const tab = createTab(createFakeApp());
+
+            (tab as unknown as { openGeneral(): void }).openGeneral();
+
+            expect(stateOf(tab).activeTab).toBe("general");
+            expect(stateOf(tab).openSettingsCalls).toBe(1);
+        });
+
+        it("已经开着时：就地重绘到「通用」页，不再开一次窗", () => {
+            const tab = createTab(createFakeApp());
+            // `tabOpen` 是 Obsidian 每次选中这个页签时由 `display()` 置 true 的。
+            (tab as unknown as { tabOpen: boolean }).tabOpen = true;
+
+            (tab as unknown as { openGeneral(): void }).openGeneral();
+
+            expect(stateOf(tab).activeTab).toBe("general");
+            expect(stateOf(tab).openSettingsCalls).toBe(0);
+            // 就地重绘的证据：容器里画出来的是通用页的内容。
+            const names = createdSettings.map((setting) => setting.name);
+            expect(names).toContain(zhCN.settings.general.showNotices);
+            expect(names).toContain(zhCN.settings.general.ribbonAvatar);
+        });
     });
 
     /**
@@ -583,19 +645,34 @@ describe("设置页 · 通用页", () => {
         expect(names).not.toContain(zhCN.settings.token.githubName);
     });
 
-    it("状态栏全宽默认是**开着**的（加开关不该悄悄改掉所有人的界面）", () => {
+    /**
+     * 「条目贴靠最左侧」默认是**开着**的（加开关不该悄悄改掉所有人的界面）。
+     *
+     * 2026-10-09 删掉的「状态栏占满整屏宽」曾经占着这个位置 —— 那个碰的是
+     * **状态栏宽度**（贴屏幕最左，代价是整体观感从一簇变成一条），已整条删除。
+     * 这一行只管**条目在状态栏里的顺序**，默认开 = 一直以来的表现。
+     */
+    it("「状态栏同步条目贴靠最左侧」**默认开着**，描述说清关掉会怎样", () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
 
         renderGeneralPage(tab);
 
         const row = createdSettings.find(
-            (setting) => setting.name === zhCN.settings.general.statusBarFullWidth
+            (setting) => setting.name === zhCN.settings.general.statusBarLeftAlign
         );
         expect(row?.toggles[0]?.value).toBe(true);
-        expect(row?.desc).toBe(zhCN.settings.general.statusBarFullWidthDesc);
+        expect(DEFAULT_SETTINGS.statusBarLeftAlign).toBe(true);
+        expect(row?.desc).toBe(zhCN.settings.general.statusBarLeftAlignDesc);
     });
 
+    /**
+     * 拨开关的落盘路径（`commit()` → 保存 + 重算派生状态）。
+     *
+     * 拨的是「条目贴靠最左侧」那一行 —— 它的效果**依赖** `applyDerivedSettings()`
+     * （那里才给 body 加/摘类，见 pluginBoot 的用例），所以这条用例盯的正是
+     * 「拨了要落盘 + 要立刻重算」。
+     */
     it("拨动开关会把设置**真的写进去**，并立刻重算派生状态（不用重载插件）", async () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
@@ -611,13 +688,13 @@ describe("设置页 · 通用页", () => {
 
         renderGeneralPage(tab);
         const row = createdSettings.find(
-            (setting) => setting.name === zhCN.settings.general.statusBarFullWidth
+            (setting) => setting.name === zhCN.settings.general.statusBarLeftAlign
         );
 
         row!.toggles[0]!.toggle(false);
         await Promise.resolve();
 
-        expect(plugin.settings.statusBarFullWidth).toBe(false);
+        expect(plugin.settings.statusBarLeftAlign).toBe(false);
         // 落盘 + 重算派生状态（后者才会给 body 加/摘那个类 —— 见 pluginBoot 的用例）
         expect(plugin.saved).toBe(1);
         expect(plugin.applied).toBe(1);

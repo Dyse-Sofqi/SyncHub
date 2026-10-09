@@ -266,17 +266,27 @@ describe("normalizeSettings", () => {
         );
     });
 
-    it("旧的 data.json 里没有「状态栏占满整屏宽」时补成默认值（**保持既有观感**）", () => {
-        // 这个开关是后加的：老用户的库里没有这个字段，而他们看到的一直是全宽状态栏。
+    it("旧的 data.json 里残留的「状态栏占满整屏宽」会被丢掉（设置项 2026-10-09 删除）", () => {
+        // 那个开关连同「把状态栏拉成全屏宽」的规则一起删了：拉宽能让条目贴到
+        // 屏幕最左，但代价是状态栏整体观感从「右下角一簇」变成「底部一条」。
+        // 老用户的 data.json 里还留着这个字段 —— `mergeWithDefaults` 只保留
+        // 默认值里有的键，所以它不会被读、也不会在下次保存时写回去。
+        const settings = normalizeSettings({ statusBarFullWidth: false });
+
+        expect("statusBarFullWidth" in settings).toBe(false);
+    });
+
+    it("旧的 data.json 里没有「状态栏同步条目贴靠最左侧」时补成默认值（**保持既有观感**）", () => {
+        // 这个开关是后加的：老用户的库里没有这个字段，而他们看到的一直是贴最左。
         // 补成 false 会**悄悄改掉所有人的界面** —— 那不是加开关该有的行为。
         const settings = normalizeSettings({ language: "zh-cn" });
 
-        expect(settings.statusBarFullWidth).toBe(true);
-        expect(DEFAULT_SETTINGS.statusBarFullWidth).toBe(true);
+        expect(settings.statusBarLeftAlign).toBe(true);
+        expect(DEFAULT_SETTINGS.statusBarLeftAlign).toBe(true);
     });
 
     it("用户关掉它之后会被保留（不会被当成非法值丢掉）", () => {
-        expect(normalizeSettings({ statusBarFullWidth: false }).statusBarFullWidth).toBe(
+        expect(normalizeSettings({ statusBarLeftAlign: false }).statusBarLeftAlign).toBe(
             false
         );
     });

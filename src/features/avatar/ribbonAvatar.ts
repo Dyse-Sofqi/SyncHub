@@ -8,12 +8,15 @@ import type { HostKind, TokenInfo } from "../../host/types";
  * 默认关闭，打开后在左侧功能区底部展示圆形 gitee 头像」。
  * 2026-10-06 又要求把平台拆成单独一项（默认 Gitee，关掉用 GitHub）——
  * 于是这个模块不再写死 Gitee，而是每次 `apply()` 问一次 `deps.avatarHost()`。
+ * 2026-10-09 再要求把它做成**可点的**：点开设置窗口并停靠「通用」页
+ * （见下面「点击它打开设置」）。
  *
  * ## 为什么不用 `addRibbonIcon`
  *
  * Obsidian 那个 API 建的是**动作按钮**：它要求一个 lucide 图标名与一个点击回调，
  * 而且固定插在功能区**顶部**那一组（`.side-dock-actions`）里。这里要的是一个
- * 位于**底部**、点它没有任何动作的图片 —— 两个条件它都不满足。
+ * 位于**底部**的账号头像（不是 lucide 图标）—— 两个条件它都不满足。
+ * 点击动作是自己挂的 `click` 监听（见 `render`），与那个 API 无关。
  *
  * ## 挂在哪一个节点上
  *
@@ -31,6 +34,19 @@ import type { HostKind, TokenInfo } from "../../host/types";
  * **不能**挂到 `.workspace-ribbon` 自己身上再加 `margin-top: auto`：那个容器里
  * 已经有一个 auto 边距的孩子，在 flex 列布局里两个 auto 边距会**平分**剩余空间，
  * 后果是设置齿轮被顶到中间 —— 我们装个头像把别人的布局弄乱了。
+ *
+ * ## 点击它打开设置（2026-10-09）
+ *
+ * 用户原话：「将功能区展示的用户头像做成可点击的……点击后打开设置窗口，
+ * 跳转插件通用设置页」。做法与状态栏条目同构：`deps.onClick` 由装配层注入
+ * （`main.ts` 的 `openGeneralSettings()` → 设置页的 `openGeneral()`），
+ * 这里只负责在节点创建时把监听挂上。
+ *
+ * 两条刻意的设计（都写在 `styles.css` 的 `.obsync-ribbon-avatar` 上）：
+ * - **光标保持默认**（`cursor: default`）—— 用户原话「悬停时光标保持默认」。
+ *   这张头像首先回答「这是谁」，点击只是顺手的入口，不该摆出按钮的样子；
+ * - 头像外侧那圈**环状虚影**（`box-shadow`）—— 同样只是「认得出来」，
+ *   不是「快来点我」。
  *
  * ## 什么时候画、什么时候摘
  *
@@ -77,8 +93,20 @@ export interface RibbonAvatarDeps {
     /**
      * 头像的 alt / 悬停文案。入参是平台与账号名（账号名**可能为空串** ——
      * 接口没给 `login` 时那种残句由文案自己兜，见 locale 里那条注释）。
+     *
+     * 注意这句话回答的是「这是谁」—— 头像 2026-10-09 起**可以点**（打开设置
+     * 窗口的「通用」页），但悬停文案刻意不提那个动作：光标保持默认、
+     * 不摆出按钮的样子（用户原话「悬停时光标保持默认」）。
      */
     getLabel(host: HostKind, account: string): string;
+    /**
+     * 点头像时的动作 —— 打开设置窗口并停靠「通用」页。
+     *
+     * 与 `StatusBarDeps.onClick` 同一条理由：节点由 Obsidian 创建、**不会被
+     * 重建**，所以监听在 `render()` 建节点时挂一次就够。不传则头像不可点
+     * （测试与将来的复用场景）。
+     */
+    onClick?: () => void;
     /** 挂载点。省掉时走 `findRibbonContainer()`；测试注入一个假节点。 */
     getContainer?(): HTMLElement | null;
 }
@@ -263,6 +291,9 @@ export class RibbonAvatar {
             // 不把 `app://obsidian.md` 当来源发给图床：那张图是公开的，
             // 没有任何理由向它暴露「这是谁在什么时候看的」。
             image.setAttribute("referrerpolicy", "no-referrer");
+            // 点击监听只在**建节点时**挂一次：节点不会被重建（重建等于在功能区
+            // 多挂一张图），所以没有「重复挂」的问题，也不必每次重绘都摘了再挂。
+            if (this.deps.onClick) image.addEventListener("click", this.deps.onClick);
             this.element = image;
         } else if (this.element.parentElement !== container) {
             // 功能区被 Obsidian 重建过（切换「显示功能区」、布局重排、主题切换）：

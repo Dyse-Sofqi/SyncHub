@@ -107,9 +107,9 @@ export const en = {
             showNoticesDesc: "When off, only errors are shown; success and progress notices are silenced.",
             debugLogging: "Verbose logging",
             debugLoggingDesc: "Log detailed request and sync information to the developer console.",
-            statusBarFullWidth: "Status bar spans the full width",
-            statusBarFullWidthDesc:
-                "Stretch the status bar across the screen so the sync item can sit at the far left (otherwise there is no free space there). Turning this off restores Obsidian's own layout (a cluster in the bottom-right); the sync item stays first in that cluster — nothing is lost, it just no longer fills the whole strip.",
+            statusBarLeftAlign: "Keep the sync item at the left of the status bar",
+            statusBarLeftAlignDesc:
+                "On: the sync item is ordered first in the status bar (only its own visual order changes; no other item moves). Off: no special treatment — the item falls back to the default order, after the other items. The status bar itself is untouched either way.",
             ribbonAvatar: "Show your avatar in the ribbon",
             ribbonAvatarDesc:
                 "Show a round avatar (of the account your token belongs to) at the bottom of the left ribbon. Which platform's avatar to use is decided by the next item.",

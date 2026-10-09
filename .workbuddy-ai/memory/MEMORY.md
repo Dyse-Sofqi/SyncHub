@@ -22,6 +22,19 @@
 部署目标 `F:/_Workspace/Plugin-Test/.obsidian/plugins/ob-sync`；`OBSYNC_DEPLOY_DIR`
 覆盖（`;` 分隔，空串跳过）；部署失败不中断构建。
 
+**每次改完代码都要部署，而且两个库都要**（用户 2026-10-09 的要求：改完要能立刻测）。
+跑 `pnpm build:both` —— 它一条龙跑完自查 / lint:review / typecheck / 构建，并把产物
+部署到**两个库**：`F:/_Workspace/Plugin-Test`（测试库）与 `D:/_Workspace/learning-records`
+（用户的常用库，**用户实际在这里看效果**）。只改文档时不部署。部署后核对三个产物
+（`main.js` / `styles.css` / `manifest.json`）与源码的 SHA256 一致（mtime 会骗人，
+hash 不会）。
+
+> **只用 `pnpm build` 是个坑**（2026-10-09 实测踩到）：它只部署 Plugin-Test，而用户
+> 同时在 learning-records 里看着 —— 那边停在旧版，症状是「新功能全无效、旧功能正常」，
+> **极容易被误判成代码 bug**（这次就绕了好几圈）。另外两个库的热重载状态不同：
+> Plugin-Test 有 hot-reload（部署后自动加载），learning-records **没启** hot-reload ——
+> 那边部署完要提醒用户手动重载（`Ctrl+R` 或设置里关开一次插件）。
+
 **核实部署产物**：esbuild 把中文转义成 `\uXXXX`，`grep "仓库同步"` 匹配不到（看着像没部署），
 要查 `\u4ED3\u5E93\u540C\u6B65`（grep 模式用单引号，反斜杠才不会被 shell 吃掉）。
 

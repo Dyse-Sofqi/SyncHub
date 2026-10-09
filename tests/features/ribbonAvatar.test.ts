@@ -26,6 +26,8 @@ const AVATAR_URL = "https://foruda.gitee.com/avatar/1788141849167533005/1_sofqi_
 class FakeEl {
     readonly children: FakeEl[] = [];
     readonly attrs: Record<string, string> = {};
+    /** 挂上来的 click 监听（头像 2026-10-09 起可点）。 */
+    readonly handlers: Array<() => void> = [];
     parentElement: FakeEl | null = null;
 
     constructor(
@@ -51,6 +53,15 @@ class FakeEl {
 
     setAttribute(name: string, value: string): void {
         this.attrs[name] = value;
+    }
+
+    addEventListener(type: string, handler: () => void): void {
+        if (type === "click") this.handlers.push(handler);
+    }
+
+    /** 模拟一次点击（触发所有 click 监听）。 */
+    click(): void {
+        for (const handler of this.handlers) handler();
     }
 
     remove(): void {
@@ -81,6 +92,8 @@ interface HarnessOptions {
     lookup?: (token: string) => Promise<TokenInfo>;
     /** 用哪个平台的头像（设置页那个开关）。默认 Gitee。 */
     host?: HostKind;
+    /** 点头像时的动作（2026-10-09 起装配层一定传：打开设置并停靠「通用」）。 */
+    onClick?: () => void;
 }
 
 const defaultLookup = async (_token: string): Promise<TokenInfo> => ({
@@ -115,6 +128,7 @@ function createHarness(options: HarnessOptions = {}) {
         // 而不是 `HostKind` —— 否则悬停文案里会出现小写的 `gitee`。
         getLabel: (host, account) => zhCN.plugin.ribbonAvatar(getHost(host).displayName, account),
         getContainer: () => (state.attached ? state.container.asContainer() : null),
+        onClick: options.onClick,
     });
 
     return { state, avatar };
@@ -259,7 +273,7 @@ describe("RibbonAvatar · 什么时候画", () => {
         expect(image.attrs.referrerpolicy).toBe("no-referrer");
     });
 
-    it("alt / 悬停文案带账号名 —— 这张图没有动作，它要回答的是「这是谁」", async () => {
+    it("alt / 悬停文案带账号名 —— 这句话回答「这是谁」（点击动作另见下面一组）", async () => {
         const { state, avatar } = createHarness({ token: "tok" });
 
         avatar.apply();
@@ -552,5 +566,77 @@ describe("RibbonAvatar · 重复调用与变化", () => {
         avatar.apply();
         await flush();
         expect(state.lookup).toHaveBeenCalledTimes(2);
+    });
+});
+
+/**
+ * 头像可点开设置（2026-10-09 用户要求）。
+ *
+ * 原话：「将功能区展示的用户头像做成可点击的……点击后打开设置窗口，
+ * 跳转插件通用设置页」。这里钉三件事：**监听挂上了**、**点它真的走到那个
+ * 动作**、**重复渲染不会挂出第二份监听**（节点不会被重建，但 `apply()` 会被
+ * 反复调用 —— 挂两次的话点一下会开两次设置窗）。
+ *
+ * 「打开设置窗口并停靠通用页」那半条链子（`openGeneral()` → `app.setting`）
+ * 在 `settingsTabRender.test.ts` 与 `pluginBoot.test.ts` 里验。
+ */
+describe("RibbonAvatar · 可点开设置", () => {
+    it("传了 onClick 时挂上点击监听，点它就调用", async () => {
+        const opened = vi.fn();
+        const { state, avatar } = createHarness({ token: "tok", onClick: opened });
+
+        avatar.apply();
+        await flush();
+        const image = state.container.children[0]!;
+
+        expect(image.handlers).toHaveLength(1);
+        image.click();
+        expect(opened).toHaveBeenCalledTimes(1);
+    });
+
+    it("重复 apply / 重画不会挂出第二份监听（点一下只开一次设置窗）", async () => {
+        const opened = vi.fn();
+        const { state, avatar } = createHarness({ token: "tok", onClick: opened });
+
+        avatar.apply();
+        await flush();
+        avatar.apply();
+        avatar.apply();
+        await flush();
+
+        const image = state.container.children[0]!;
+        expect(image.handlers).toHaveLength(1);
+        image.click();
+        expect(opened).toHaveBeenCalledTimes(1);
+    });
+
+    it("功能区被重建后重新挂回去，监听还在（节点是同一个）", async () => {
+        const opened = vi.fn();
+        const { state, avatar } = createHarness({ token: "tok", onClick: opened });
+
+        avatar.apply();
+        await flush();
+        const image = state.container.children[0]!;
+
+        image.parentElement = null;
+        state.container.children.length = 0;
+        state.container = new FakeEl("div", "side-dock-settings");
+        avatar.apply();
+        await flush();
+
+        expect(state.container.children[0]).toBe(image);
+        image.click();
+        expect(opened).toHaveBeenCalledTimes(1);
+    });
+
+    it("没传 onClick 时不挂监听（头像保持不可点，不抛错）", async () => {
+        const { state, avatar } = createHarness({ token: "tok" });
+
+        avatar.apply();
+        await flush();
+
+        const image = state.container.children[0]!;
+        expect(image.handlers).toHaveLength(0);
+        expect(() => image.click()).not.toThrow();
     });
 });

@@ -35,21 +35,22 @@ import { redactUrl } from "./host/redact";
 import { ObsyncSettingsTab } from "./settingsTab";
 
 /**
- * 状态栏全宽开关作用的类名（`styles.css` 里那条 `.status-bar:has(...)` 规则
- * 挂在它下面）。
+ * 「同步条目贴靠状态栏最左侧」开关作用的类名（`styles.css` 里那条
+ * `body.obsync-status-bar-left .obsync-status-bar-item` 规则挂在它下面）。
  *
  * 为什么用「给 `body` 加类」而不是「运行时改内联样式」：
- * - 那条规则用到了 `:has()`，只能写在 CSS 里；
  * - 内联样式得自己去改 Obsidian 核心元素的 `style`，那会与主题/其他插件互相覆盖，
- *   而且插件卸载后留下的内联样式更难清干净。
+ *   而且插件卸载后留下的内联样式更难清干净；
+ * - 位置规则**只能**写在 CSS 里（`order` 作用于 flex 布局），加个类就能整条收放，
+ *   没有第二条规则要同步维护。
  *
- * 开关关掉时**移除**这个类，CSS 自然不生效 —— 没有第二条规则要同步维护。
+ * 开关关掉时**移除**这个类，CSS 自然不生效。
  */
-const STATUS_BAR_FULL_WIDTH_CLASS = "obsync-status-bar-full-width";
+const STATUS_BAR_LEFT_CLASS = "obsync-status-bar-left";
 
-/** 按设置给 `body` 加上/摘掉状态栏全宽那个类。 */
-function applyStatusBarWidth(fullWidth: boolean): void {
-    document.body.toggleClass(STATUS_BAR_FULL_WIDTH_CLASS, fullWidth);
+/** 按设置给 `body` 加上/摘掉「条目贴靠最左侧」那个类。 */
+function applyStatusBarLeftAlign(leftAlign: boolean): void {
+    document.body.toggleClass(STATUS_BAR_LEFT_CLASS, leftAlign);
 }
 
 /**
@@ -123,6 +124,15 @@ export default class ObsyncPlugin extends Plugin {
     ribbonAvatar?: RibbonAvatar;
 
     /**
+     * 插件的设置页（`onload` 里注册的那一个）。
+     *
+     * 记一份引用是为了「点头像 → 打开设置并停靠通用页」：那条路要能调到
+     * `ObsyncSettingsTab.openGeneral()`（命令面板那条路只 `openSettings()`，
+     * 停在用户上次看的页）。
+     */
+    settingsTab?: ObsyncSettingsTab;
+
+    /**
      * 当前语言的翻译表。
      *
      * 界面语言**跟随 Obsidian**（没有设置项，见 `core/i18n/index.ts`）：字段
@@ -166,6 +176,9 @@ export default class ObsyncPlugin extends Plugin {
             // 的时候变（与设置页/视图的 `getT` 同一条理由）。
             // 平台名走 `displayName`（「Gitee」/「GitHub」）—— 与设置页令牌那一行同源。
             getLabel: (host, account) => this.t.plugin.ribbonAvatar(getHost(host).displayName, account),
+            // 点头像 → 打开设置窗口，停靠「通用」页（2026-10-09 用户要求）。
+            // 做成懒调用：`settingsTab` 在这行之后才注册，而点头像只会发生在那之后。
+            onClick: () => this.openGeneralSettings(),
         });
 
         this.applyDerivedSettings();
@@ -185,7 +198,8 @@ export default class ObsyncPlugin extends Plugin {
             });
         }
 
-        this.addSettingTab(new ObsyncSettingsTab(this));
+        this.settingsTab = new ObsyncSettingsTab(this);
+        this.addSettingTab(this.settingsTab);
 
         // 图片同步模块。**两个平台都装**（见 `images` 字段的说明），
         // 而且必须用静态 import —— 它是移动端可达的，动态 import 反而会让
@@ -367,11 +381,12 @@ export default class ObsyncPlugin extends Plugin {
     onunload(): void {
         this.sync?.stop();
         this.images?.stop();
-        // 把状态栏的类摘掉：不摘的话，插件被禁用/卸载后那条全宽规则还挂在
-        // body 上（CSS 由 Obsidian 继续加载到下次重载），状态栏会莫名其妙
-        // 保持全宽，而且谁也看不出是谁干的。
-        applyStatusBarWidth(false);
-        // 同理，头像那个节点也**必须摘掉**：它插在 Obsidian 自己的功能区里，
+        // 把状态栏的类摘掉：不摘的话，插件被禁用/卸载后那条贴最左的规则还挂在
+        // body 上（CSS 由 Obsidian 继续加载到下次重载）。条目本身随插件消失，
+        // 所以留着其实无害 —— 但不摘心里不踏实，而且谁也说不好下一条挂在同一
+        // 类下的规则会不会有副作用。
+        applyStatusBarLeftAlign(false);
+        // 头像那个节点**必须摘掉**：它插在 Obsidian 自己的功能区里，
         // 插件被禁用后 CSS 仍然在，而谁也不会想到那张图是已经关掉的插件留下的。
         this.ribbonAvatar?.destroy();
         logger.info("plugin unloaded");
@@ -411,9 +426,9 @@ export default class ObsyncPlugin extends Plugin {
         setHttpDebugLogger(
             this.settings.debugLogging ? (message) => logger.debug(message) : undefined
         );
-        applyStatusBarWidth(this.settings.statusBarFullWidth);
-        // 开关拨动后立刻重画（与状态栏那条同一个时序：`commit()` → 这里），
-        // 所以设置页上的开关是**立刻**生效的，不用重载插件。
+        applyStatusBarLeftAlign(this.settings.statusBarLeftAlign);
+        // 开关拨动后立刻重画（`commit()` → 这里），所以设置页上的开关是
+        // **立刻**生效的，不用重载插件。
         this.ribbonAvatar?.apply();
         this.sync?.reload();
         // 图片同步的开关与间隔变了要重起定时器。与 `sync.reload()` 同一个理由：
@@ -551,12 +566,33 @@ export default class ObsyncPlugin extends Plugin {
         }
     }
 
-    private openSettings(): void {
+    /**
+     * 打开 Obsidian 的设置窗口，并选中 SyncHub 自己那个页签。
+     *
+     * 两个调用方：命令面板的「SyncHub：打开设置」（停在用户上次看的页），
+     * 以及功能区头像（走 `openGeneralSettings()`，一定停靠「通用」页）。
+     *
+     * `app.setting` **不在 obsidian.d.ts 里**（官方类型没收这个 API，但它在
+     * 运行时一直都在，社区插件普遍在用），所以这里按项目一贯的做法做结构转换，
+     * 并用 `?.` 兜住「类型没说有、万一真没有」的情况。
+     */
+    openSettings(): void {
         const app = this.app as unknown as {
             setting?: { open(): void; openTabById(id: string): void };
         };
         app.setting?.open();
         app.setting?.openTabById(this.manifest.id);
+    }
+
+    /**
+     * 功能区头像的点击动作：打开设置窗口，并**停靠「通用」页**。
+     *
+     * 用户 2026-10-09 的原话：「点击后打开设置窗口，跳转插件通用设置页」——
+     * 头像回答「当前令牌是哪个账号」，点它自然是去管这个账号（换平台 /
+     * 改令牌那两行都在「通用」页）。
+     */
+    openGeneralSettings(): void {
+        this.settingsTab?.openGeneral();
     }
 
     // ── 同步命令 ──────────────────────────────────────────────────────────
