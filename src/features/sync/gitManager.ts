@@ -92,7 +92,13 @@ export interface GitManager {
     /** 创建提交。没有可提交内容时返回 false 而不是报错。 */
     commit(message: string): Promise<boolean>;
 
-    /** 拉取远端并按策略整合：详见实现处的策略说明。遇冲突抛 `ConflictError`。 */
+    /**
+     * 拉取远端并按策略整合：详见实现处的策略说明。遇冲突抛 `ConflictError`。
+     *
+     * **不要求分支已配置上游**：没有 `tracking` 时退回同名的 `origin/<branch>`；
+     * 远端连这个分支都没有时返回 `up-to-date`（由推送的 `-u` 去建上游）。
+     * 只在「压根没配远端」时抛 `NoUpstreamError`、游离 HEAD 时抛 `DetachedHeadError`。
+     */
     pull(strategy: SyncStrategy): Promise<SyncOutcome>;
 
     /** 放弃进行中的合并（冲突恢复的出路之一：回到 pull 之前的状态）。 */

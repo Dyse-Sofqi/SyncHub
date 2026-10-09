@@ -59,11 +59,15 @@ export class GitCredentialUsernameRejectedError extends ObsyncError {}
 export class PushRejectedError extends ObsyncError {}
 
 /**
- * 当前分支没有跟踪的远端分支，无法拉取。
+ * 没有可用的远端分支，无法拉取 —— 现状是**没有配置远端**。
  *
  * 单独一个类型而不是复用 `GitNotRepoError`：那是「压根不是 git 仓库」，
  * 提示语是「请先初始化仓库」—— 用在这里会让用户去初始化一个已经存在的仓库，
- * 完全指错方向。**错误类型用错比没有类型更糟**。
+ * 完全指错方向。**错误类型用错比没有类型更糟。**
+ *
+ * 2026-10-10 收窄：**「当前分支没配置上游」不再算这一类**。那时只要远端有同名分支
+ * 就照常拉取，连分支都没有就当作「没有东西可拉」（上游由推送的 `-u` 建立）——
+ * 详情见 `SimpleGitManager.pull`。所以现在它专指「连远端都没配」。
  */
 export class NoUpstreamError extends ObsyncError {}
 

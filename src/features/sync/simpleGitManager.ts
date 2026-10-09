@@ -697,19 +697,36 @@ export class SimpleGitManager implements GitManager {
      *
      * merge/rebase 失败时检查冲突文件：有冲突就抛 `ConflictError`
      * （仓库留在冲突状态，等用户处理或 abortMerge）；否则抛原始错误。
+     *
+     * ## 上游引用不必「已配置」，可以推出来（2026-10-10 修）
+     *
+     * 原来这里硬要求 `status.tracking` 存在，否则抛 `NoUpstreamError`。
+     * 但 `sync()` 的顺序是**提交 → 拉取 → 推送**，而**建立上游的恰恰是推送**
+     * （`git push -u origin <branch>`）—— 于是第一次同步必然卡在拉取这一步，
+     * 推送永远轮不到，上游永远建不起来。**这是个死锁。**
+     *
+     * 用户实测报的就是这条：仓库刚建好、分支从没推过时点「立即同步」，
+     * 报「当前分支没有跟踪的远端分支」。而那个分支其实**在远端存在**
+     * （本地 `origin/master` 也在），只是 `branch.<name>.merge` 还没写进配置。
+     *
+     * 现在：有 `tracking` 就用它；没有就退回同名的 `origin/<branch>`
+     * （fetch 之后判断它存不存在）。远端连同名分支都还没有时，**没有东西可拉** ——
+     * 返回 `up-to-date` 让链路继续走到推送，由 `-u` 把上游建起来。
      */
     async pull(strategy: SyncStrategy): Promise<SyncOutcome> {
         const git = await this.git();
 
         const status = await wrap("reading status before pull", () => git.status());
-        if (!status.current || !status.tracking) {
-            // 技术性描述；用户文案由 describeSyncError 按类型拼。
-            throw new NoUpstreamError("pull: current branch has no tracking remote branch");
+        if (!status.current) {
+            // 游离 HEAD 与「没有上游」是两件事，错误类型不能混 ——
+            // 提示语分别是「请先切换到一个分支」与「请先设置上游」。
+            throw new DetachedHeadError("pull: HEAD is detached");
         }
 
-        const localCommit = await wrap("resolving local head", () =>
-            git.revparse([status.current!])
-        );
+        // 没有配置远端时拉取无从谈起 —— 与 `testRemoteAccess` 同一判断。
+        if (!(await this.getRemoteUrl())) {
+            throw new NoUpstreamError("pull: no remote configured");
+        }
 
         // `--progress` 是必需的，不是好看：git 在 stderr **不是终端**时默认
         // **不输出传输进度**（我们正是这种情况 —— 子进程的 stderr 是管道）。
@@ -717,8 +734,25 @@ export class SimpleGitManager implements GitManager {
         // 一次慢但正常的传输会被当成卡死杀掉。带上它，传输中就有输出 → 计时重置。
         await wrap("fetching", () => git.fetch(["--progress"]));
 
+        // 上游引用：优先分支配置的 tracking，没有就退回同名的 `origin/<branch>`。
+        // fetch 之后再判断 —— 否则一个「从没 fetch 过」的仓库会看不到远端分支。
+        const branch = status.current;
+        const fallback = `origin/${branch}`;
+        const upstream =
+            status.tracking ??
+            ((await this.refExists(git, fallback)) ? fallback : undefined);
+
+        if (!upstream) {
+            // 远端还没有这个分支：没有东西可拉。真正的动作是「推送」，
+            // 它用 `-u` 建立上游；在这里报错等于把第一次同步永久卡死。
+            return { kind: "up-to-date" };
+        }
+
+        const localCommit = await wrap("resolving local head", () =>
+            git.revparse([branch])
+        );
         const upstreamCommit = await wrap("resolving remote head", () =>
-            git.revparse([status.tracking!])
+            git.revparse([upstream])
         );
 
         if (localCommit === upstreamCommit) {
@@ -727,9 +761,9 @@ export class SimpleGitManager implements GitManager {
 
         try {
             if (strategy === "merge") {
-                await git.merge([status.tracking]);
+                await git.merge([upstream]);
             } else if (strategy === "rebase") {
-                await git.rebase([status.tracking]);
+                await git.rebase([upstream]);
             } else {
                 await this.resetToRemote(git, upstreamCommit);
             }
@@ -747,7 +781,7 @@ export class SimpleGitManager implements GitManager {
         }
 
         const afterCommit = await wrap("resolving head after pull", () =>
-            git.revparse([status.current!])
+            git.revparse([branch])
         );
         const diff = await wrap("diffing pulled changes", () =>
             git.raw(["diff", "--name-only", `${localCommit}..${afterCommit}`])
@@ -755,6 +789,21 @@ export class SimpleGitManager implements GitManager {
         const files = diff.split(/\r\n|\r|\n/).filter((line) => line.length > 0);
 
         return { kind: "pulled", files: files.length };
+    }
+
+    /**
+     * 某个引用是否存在（`git rev-parse --verify --quiet`）。
+     *
+     * 不存在时返回 false 而不抛错 —— 调用方（`pull` 找上游引用）问的本来就是
+     * 「有没有」，一个「没有」是正常答案，不是失败。
+     */
+    private async refExists(git: SimpleGit, ref: string): Promise<boolean> {
+        try {
+            const sha = await git.raw(["rev-parse", "--verify", "--quiet", ref]);
+            return sha.trim().length > 0;
+        } catch {
+            return false;
+        }
     }
 
     /**

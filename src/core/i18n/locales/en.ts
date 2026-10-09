@@ -1052,9 +1052,9 @@ export const en = {
         pushRejected:
             "The push was rejected by the remote. It likely has commits you do not have locally — pull first, then push.",
         noUpstream:
-            "The current branch has no tracked remote branch, so it cannot be pulled. Set an upstream branch or push once first.",
+            "No remote repository is configured, so pulling is not possible. Set the remote URL in settings.",
         detachedHead:
-            "HEAD is detached (not pointing at any branch), so pushing is not possible. Switch to a branch first.",
+            "HEAD is detached (not pointing at any branch), so syncing is not possible. Switch to a branch first.",
         nothingToCommit: "Nothing to commit.",
         // Note: this does NOT claim "in sync with the remote" — ahead === 0 only
         // means there is nothing new locally; you may still be behind.

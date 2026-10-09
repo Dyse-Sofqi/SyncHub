@@ -631,6 +631,52 @@ describe("远端：push / pull / 冲突", () => {
         await expect(b.manager.pull("merge")).resolves.toEqual({ kind: "up-to-date" });
     });
 
+    /**
+     * 2026-10-10 用户报的那条：「立即同步」报 `NoUpstreamError`
+     * （`pull: current branch has no tracking remote branch`）。
+     *
+     * 触发形态：仓库刚建好 / 分支从没推过 —— 远端分支与本地 `origin/main` 都在，
+     * 只是 `branch.main.remote` / `branch.main.merge` 还没写进配置。
+     * 原来的实现只看 `status.tracking`，于是拉取直接抛错，而**建立上游的恰恰是
+     * 推送**（`git push -u`）—— 死锁，第一次同步永远过不去。
+     */
+    it("分支没有配置上游时，pull 退回同名的 origin/<branch>（不再报「没有跟踪的远端分支」）", async () => {
+        const { a, b } = await makeCluster();
+
+        // 抹掉 B 的上游配置，同时保留 `refs/remotes/origin/main`。
+        await simpleGit(b.dir).raw(["branch", "--unset-upstream", "main"]);
+        const before = await b.manager.status();
+        expect(before.ahead).toBeNull();
+
+        // 远端前进
+        await write(a.dir, "shared.md", "from A\n");
+        await a.manager.stage([]);
+        await a.manager.commit("a writes");
+        await a.manager.push();
+
+        const outcome = await b.manager.pull("merge");
+        expect(outcome.kind).toBe("pulled");
+        await expect(read(b.dir, "shared.md")).resolves.toBe("from A\n");
+    });
+
+    it("远端还没有这个分支时，pull 返回 up-to-date，随后的 push 把上游建起来", async () => {
+        const origin = await makeBareRepo("fresh-origin.git");
+        const { manager, dir } = await makeReadyRepo("fresh-local");
+        await simpleGit(dir).raw(["remote", "add", "origin", origin]);
+        await write(dir, "note.md", "hello\n");
+        await manager.stage([]);
+        await manager.commit("first");
+
+        // 没有上游、远端也还没有 main —— 没有东西可拉，不该报错。
+        await expect(manager.pull("merge")).resolves.toEqual({ kind: "up-to-date" });
+
+        // 推送用 -u 建立上游，之后 status 就能报 ahead/behind。
+        await manager.push();
+        const status = await manager.status();
+        expect(status.ahead).toBe(0);
+        expect(status.behind).toBe(0);
+    });
+
     it("pull reset 丢弃本地提交、以远端为准", async () => {
         const { a, b } = await makeCluster();
 
