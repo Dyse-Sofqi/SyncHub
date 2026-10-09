@@ -539,37 +539,31 @@ export class SyncService {
     // ── 仓库同步视图里的逐文件操作（2026-09-19） ──────────────────────────
 
     /**
-     * 暂存指定文件 / 取消暂存 / 切换分支。
+     * 这里原有 `stageFiles` / `unstageFiles`（逐个文件暂存、取消暂存），
+     * **2026-10-10 删掉了**，连同面板上那两个按钮。
      *
-     * 三个都**必须走这条串行队列**，而不是让视图直接调 `git`：
-     * 队列的存在意义就是「所有动仓库的操作排成一队」—— 视图里点一下「暂存」
-     * 的同时自动提交定时器到点了，两条 git 命令并发写索引是真实会发生的
-     * （原本视图里的分支切换就是直接调 `git.checkout`，绕过了队列）。
+     * ## 为什么删：它们做不到看起来在做的事
      *
-     * 只做一件事就返回，不额外发提示：逐文件操作的结果**看得见**
-     * （文件从「未暂存」挪到「已暂存」），再弹一条提示只是噪音。
+     * `doCommitAll` 无条件 `git add -A`，所以手动暂存了什么**对最终提交毫无影响**；
+     * 更要紧的是**自动同步到点会把它们一起提交掉** —— 这个按钮**连「暂时不提交」
+     * 都做不到**。用户暂存 A 想只提交 A，结果 B 一起进去了。
+     *
+     * 面板上仍然按暂存状态**分组**（冲突文件在 `git status` 里同时进 staged 与
+     * unstaged，去重后落在「已暂存」那一组），但不再提供任何**改变**暂存状态的动作 ——
+     * SyncHub 不做选择性提交。
+     *
+     * ## git 层那两个方法（`GitManager.stage` / `unstage`）**保留**
+     *
+     * 那是抽象层的词汇（`stage` 还被 `doCommitAll` 用着），而且 `unstage` 的
+     * `HEAD_UNBORN_RE` 分支守着一条真实的坑 —— HEAD 未出生时 `git restore --staged`
+     * 报的是 `fatal: could not resolve 'HEAD'`（**HEAD 带单引号**），那条守卫有集成测试钉着。
      */
-    async stageFiles(paths: string[]): Promise<void> {
-        if (paths.length === 0) return;
-        await this.enqueue(async () => {
-            await this.git.stage(paths);
-            await this.refreshStatus();
-        });
-    }
-
-    async unstageFiles(paths: string[]): Promise<void> {
-        if (paths.length === 0) return;
-        await this.enqueue(async () => {
-            await this.git.unstage(paths);
-            await this.refreshStatus();
-        });
-    }
 
     /**
      * 让 git **不再跟踪**这些路径（工作区文件保留）。
      *
-     * 与 `stageFiles` / `unstageFiles` 一样走串行队列：它写的是 git 索引，
-     * 而索引是全局状态 —— 和自动提交定时器并发写索引是真实会发生的。
+     * 走串行队列：它写的是 git 索引，而索引是全局状态 ——
+     * 和自动提交定时器并发写索引是真实会发生的。
      *
      * 调用方（设置页那个「让 git 不再跟踪图片」）负责先把同样的规则写进
      * `.gitignore`：**只做这一步文件会被下一次 `git add -A` 加回来**，

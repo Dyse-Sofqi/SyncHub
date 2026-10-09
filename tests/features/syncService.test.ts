@@ -920,52 +920,18 @@ describe("提交信息的文件数按路径去重", () => {
 /**
  * 仓库同步视图里的逐文件操作。
  *
- * 这些动作**必须走串行队列**：视图里点一下「暂存」的同时，自动提交定时器
- * 到点了 —— 两条 git 命令并发写索引是真实会发生的。视图原来切分支就是直接
+ * 这些动作**必须走串行队列**：视图里点一下的同时，自动提交定时器到点了 ——
+ * 两条 git 命令并发写索引是真实会发生的。视图原来切分支就是直接
  * 调 `git.checkout`，绕过了队列。
  *
  * 队列是「排成一条链」，所以「有没有走队列」不能只看结果 —— 得让队列
  * **忙着**（一个慢动作还没结束），再看第二个动作有没有等它。
+ *
+ * （逐文件「暂存 / 取消暂存」2026-10-10 已从面板与这一层一起去掉：
+ *   `doCommitAll` 无条件 `git add -A`，它们**影响不了提交内容**，
+ *   自动同步还会把那份选择抹掉。见 `syncService` 里那段说明。）
  */
 describe("视图的逐文件操作", () => {
-    it("暂存指定文件 → 只 stage 这些路径，并刷新状态", async () => {
-        const git = new FakeGit();
-        const fake = createFakeApp();
-        const { service } = makeService(git, fake);
-        git.unstaged = ["a.md", "b.md"];
-
-        await service.stageFiles(["a.md"]);
-
-        expect(git.calls).toContain("stage:a.md");
-        expect(git.staged).toEqual(["a.md"]);
-        // 刷了状态：视图重绘、状态栏更新都靠它
-        expect(git.calls.filter((call) => call === "status").length).toBeGreaterThan(0);
-    });
-
-    it("路径为空时是空操作（不碰 git，也不报错）", async () => {
-        // 判空在入队**之前**：整组都已暂存时不该白跑一次 git。
-        const git = new FakeGit();
-        const fake = createFakeApp();
-        const { service } = makeService(git, fake);
-
-        await service.stageFiles([]);
-        await service.unstageFiles([]);
-
-        expect(git.calls).toEqual([]);
-    });
-
-    it("取消暂存只动指定的文件", async () => {
-        const git = new FakeGit();
-        const fake = createFakeApp();
-        const { service } = makeService(git, fake);
-        git.staged = ["a.md", "b.md"];
-
-        await service.unstageFiles(["b.md"]);
-
-        expect(git.calls).toContain("unstage:b.md");
-        expect(git.staged).toEqual(["a.md"]);
-    });
-
     it("切分支走队列（不再绕过同步动作直接调 git）", async () => {
         const git = new FakeGit();
         const fake = createFakeApp();
@@ -976,11 +942,12 @@ describe("视图的逐文件操作", () => {
         expect(git.calls).toContain("checkout:dev");
     });
 
-    it("**与正在跑的动作排成一条链**：慢提交没结束时暂存不会插队", async () => {
+    it("**与正在跑的动作排成一条链**：慢提交没结束时，摘索引不会插队", async () => {
         const git = new FakeGit();
         const fake = createFakeApp();
         const { service } = makeService(git, fake);
         git.unstaged = ["a.md"];
+        git.tracked = ["attachments/a.png"];
 
         // 让一次提交卡在半路（模拟网络慢的拉取 / 大仓库的提交）
         let release: (() => void) | undefined;
@@ -989,25 +956,25 @@ describe("视图的逐文件操作", () => {
         });
 
         const slow = service.commitAll();
-        const staged = service.stageFiles(["a.md"]);
+        const untracking = service.untrackPaths(["attachments/a.png"]);
         await Promise.resolve();
 
-        // 提交还卡着 → 暂存必须还没发生
-        expect(git.calls).not.toContain("stage:a.md");
+        // 提交还卡着 → 摘索引必须还没发生
+        expect(git.calls).not.toContain("untrack:attachments/a.png");
 
         git.waitBeforeStatus = undefined;
         release?.();
         await slow;
-        await staged;
+        await untracking;
 
-        expect(git.calls).toContain("stage:a.md");
+        expect(git.calls).toContain("untrack:attachments/a.png");
     });
 
     /**
      * 「让 git 不再跟踪图片」的那一步（`git rm -r --cached`）。
      *
      * 为什么它也必须走队列：它写的是 **git 索引**，而索引是全局状态 —— 和自动提交
-     * 定时器并发写索引是真实会发生的（与 `stageFiles` 同一个理由）。
+     * 定时器并发写索引是真实会发生的。
      */
     it("停止跟踪走队列，并刷新状态", async () => {
         const git = new FakeGit();
@@ -1557,10 +1524,10 @@ describe("状态读取的去重", () => {
         expect(await first).toBe(await second);
     });
 
-    it("动过仓库之后立刻重读：暂存完不会还显示「未暂存」", async () => {
+    it("动过仓库之后立刻重读：动作跑完不会还显示旧状态", async () => {
         const git = new FakeGit();
         const { service } = makeService(git, createFakeApp());
-        git.unstaged = ["a.md"];
+        git.tracked = ["attachments/a.png"];
         const seen: Array<RepoStatus | undefined> = [];
         service.onStatusChange((status) => seen.push(status));
 
@@ -1568,12 +1535,12 @@ describe("状态读取的去重", () => {
         expect(statusCalls(git)).toBe(1);
 
         // 动作 → `enqueue` 让缓存作废 → 收尾那次刷新必须是真读
-        await service.stageFiles(["a.md"]);
+        await service.untrackPaths(["attachments/a.png"]);
 
         expect(statusCalls(git)).toBe(2);
-        const latest = seen.at(-1);
-        expect(latest?.staged.map((change) => change.path)).toEqual(["a.md"]);
-        expect(latest?.unstaged).toHaveLength(0);
+        expect(seen.at(-1)).toBeDefined();
+        // 索引真的被改过 —— 这才让「重读」有意义
+        expect(git.calls).toContain("untrack:attachments/a.png");
     });
 
     it("不是仓库这个结论也会被复用（不会因为结果是 undefined 就反复重读）", async () => {

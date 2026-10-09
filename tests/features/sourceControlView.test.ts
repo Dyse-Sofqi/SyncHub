@@ -249,14 +249,6 @@ function harness(options: {
             calls.push("abortMerge");
             finishAction();
         },
-        stageFiles: async (paths: string[]) => {
-            calls.push(`stage:${paths.join(",")}`);
-            finishAction();
-        },
-        unstageFiles: async (paths: string[]) => {
-            calls.push(`unstage:${paths.join(",")}`);
-            finishAction();
-        },
         /** 「不再跟踪嵌套仓库」：摘索引 + 写 .gitignore（合成一步）。 */
         untrackAndIgnore: async (paths: string[]) => {
             calls.push(`untrackAndIgnore:${paths.join(",")}`);
@@ -783,7 +775,7 @@ describe("SourceControlView 渲染", () => {
         }
     });
 
-    it("按暂存状态分组，每一行点「暂存 / 取消暂存」作用于**那一行**的路径", async () => {
+    it("按暂存状态分组，但**每行不再有暂存开关**（2026-10-10 去掉）", async () => {
         const h = harness({
             status: status({
                 staged: [change("已暂存.md", "added")],
@@ -794,7 +786,8 @@ describe("SourceControlView 渲染", () => {
 
         await h.open();
 
-        // 两组的标题带各自的条数
+        // 两组的标题带各自的条数 —— **分组保留**：冲突文件在 git status 里
+        // 同时进 staged 与 unstaged，去重后落在「已暂存」那一组，所以这一组不是空的。
         expect(settingsNamed(zhCN.sync.sectionStaged(1))).toHaveLength(1);
         expect(settingsNamed(zhCN.sync.sectionChanges(2))).toHaveLength(1);
 
@@ -803,27 +796,15 @@ describe("SourceControlView 渲染", () => {
         );
         expect(rows.map(rowPath)).toEqual(["已暂存.md", "未暂存.md", "新文件.md"]);
 
-        // 每行三个按钮，顺序是 差异 / 在远端打开 / 暂存开关 ——
-        // 「查看差异」排在最前：这一行上只有它能回答「变了什么」。
-        expect(rows[0]!.buttons.map((button) => button.icon)).toEqual([
-            "file-diff",
-            "external-link",
-            "minus",
-        ]);
-
-        // 已暂存的那行给的是「取消暂存」
-        const stagedRow = rows[0]!;
-        expect(stagedRow.buttons[2]!.icon).toBe("minus");
-        expect(stagedRow.buttons[2]!.tooltip).toBe(zhCN.sync.actUnstage);
-        stagedRow.buttons[2]!.click();
-        expect(h.calls).toContain("unstage:已暂存.md");
-
-        // 未暂存的那行给的是「暂存」
-        const unstagedRow = rows[1]!;
-        expect(unstagedRow.buttons[2]!.icon).toBe("plus");
-        expect(unstagedRow.buttons[2]!.tooltip).toBe(zhCN.sync.actStage);
-        unstagedRow.buttons[2]!.click();
-        expect(h.calls).toContain("stage:未暂存.md");
+        // 每行只剩两个按钮：差异 / 在远端打开。
+        // 「暂存开关」被去掉了 —— 它做不到看起来在做的事（`doCommitAll` 无条件
+        // `git add -A`，手动暂存影响不了提交内容，自动同步还会把这份选择抹掉）。
+        for (const row of rows) {
+            expect(row.buttons.map((button) => button.icon)).toEqual([
+                "file-diff",
+                "external-link",
+            ]);
+        }
     });
 
     /**
@@ -888,7 +869,8 @@ describe("SourceControlView 渲染", () => {
         expect(h.calls).toContain(`success:${zhCN.sync.nestedRepoUntracked}`);
     });
 
-    it("普通文件行不受影响：没有徽标，还是那三个按钮", async () => {        const h = harness({
+    it("普通文件行不受影响：没有徽标，还是那两个按钮", async () => {
+        const h = harness({
             status: status({
                 unstaged: [change("notes/a.md", "modified")],
                 nestedRepos: ["plugins/demo"],
@@ -903,7 +885,6 @@ describe("SourceControlView 渲染", () => {
         expect(row.buttons.map((button) => button.icon)).toEqual([
             "file-diff",
             "external-link",
-            "plus",
         ]);
         expect(
             findAllIn(
@@ -1435,24 +1416,6 @@ describe("SourceControlView 渲染", () => {
         });
     });
 
-    it("「全部暂存 / 全部取消暂存」把整组的路径一次交出去", async () => {
-        const h = harness({
-            status: status({
-                staged: [change("a.md", "added")],
-                unstaged: [change("b.md", "modified")],
-                untracked: [change("c.md", "untracked")],
-            }),
-        });
-
-        await h.open();
-
-        findSetting(zhCN.sync.sectionChanges(2)).buttons[0]!.click();
-        expect(h.calls).toContain("stage:b.md,c.md");
-
-        findSetting(zhCN.sync.sectionStaged(1)).buttons[0]!.click();
-        expect(h.calls).toContain("unstage:a.md");
-    });
-
     it("每一行都能在远端打开对应文件", async () => {
         const h = harness({ status: status({ unstaged: [change("a.md", "modified")] }) });
 
@@ -1488,7 +1451,7 @@ describe("SourceControlView 渲染", () => {
         expect(openedModals).toHaveLength(0);
     });
 
-    it("冲突行**不给暂存开关**，但给「放弃本次合并」", async () => {
+    it("冲突行给「差异」与「在远端打开」，不给任何改变状态的动作", async () => {
         const h = harness({
             status: status({ conflicted: ["notes/会打架.md"] }),
         });
@@ -1504,9 +1467,10 @@ describe("SourceControlView 渲染", () => {
             setting.classes.includes("obsync-conflict")
         )!;
         expect(rowPath(conflictRow)).toBe("notes/会打架.md");
-        // 两个按钮：差异 + 在远端打开。**没有**暂存开关 —— 冲突文件的暂存要等
-        // 用户在编辑器里把 <<<<<<< 处理掉，面板看不到内容，所以不给这个入口；
-        // 但差异是只读的，而且冲突时恰恰最需要看清内容。
+        // 两个按钮：差异 + 在远端打开。**没有**暂存开关 —— 冲突文件要等用户在编辑器里
+        // 把 <<<<<<< 处理掉，面板看不到内容，所以不给这个入口；但差异是只读的，
+        // 而且冲突时恰恰最需要看清内容。
+        // （2026-10-10 起这一点对**所有**行都成立：逐文件暂存已整体去掉，见上面那条用例。）
         expect(conflictRow.buttons.map((button) => button.icon)).toEqual([
             "file-diff",
             "external-link",

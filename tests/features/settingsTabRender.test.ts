@@ -134,6 +134,14 @@ function createSyncStub(initial?: string) {
         untracked: [] as string[][],
         /** `listTrackedPaths()` 返回的已跟踪路径（「按扩展名」靠它找图片）。 */
         tracked: [] as string[],
+        /**
+         * Obsidian「文件恢复」核心插件的状态（`fileRecoveryEnabled()` 的替身）。
+         *
+         * 默认 `true`（开着）→ 页面顶部**不长**那个警告框，这一页的既有用例
+         * 看到的就是原来那张「注意事项」。设成 `false` 才多一个警告框。
+         * 设成 `undefined` 模拟「读不出来」—— 那种情况也**不长**（不猜）。
+         */
+        fileRecovery: true as boolean | undefined,
         /** 远端地址（「远端地址」那一行读它、改它）。 */
         remoteUrl: "https://github.com/owner/repo.git" as string | undefined,
         /** `setRemoteUrl` 收到的地址（就地编辑远端那一条用例看它）。 */
@@ -195,6 +203,9 @@ function createSyncStub(initial?: string) {
             },
             async listTrackedPaths(): Promise<string[]> {
                 return [...stub.tracked];
+            },
+            async fileRecoveryEnabled(): Promise<boolean | undefined> {
+                return stub.fileRecovery;
             },
             async diagnose() {
                 return { ok: true, checks: [] };
@@ -918,7 +929,7 @@ describe("设置页 · 仓库同步页", () => {
         );
     }
 
-    it("渲染不抛错，且注意事项是这一页的第一条内容", () => {
+    it("渲染不抛错，且注意事项紧跟在页首（前面只有那个零占位的警告槽）", () => {
         const fake = createFakeApp();
         const tab = createTab(fake);
 
@@ -926,7 +937,58 @@ describe("设置页 · 仓库同步页", () => {
 
         // 2026-10-06 起这一页**没有页首标题**（页签「仓库同步」已经是页名），
         // 注意事项因此直接成为第一条内容。被挪到页面别处这条就红。
-        expect(childrenOf(tab)[0]?.cls).toBe("obsync-sync-notes");
+        //
+        // 2026-10-10 起它前面多了一个**零占位**的警告槽（`display: contents`，
+        // 「文件恢复关着」时往里长一个警告框）—— 所以比的是「它前面只有那个槽」。
+        const children = childrenOf(tab);
+        const notesIndex = children.findIndex((child) => child.cls === "obsync-sync-notes");
+        expect(notesIndex).toBeGreaterThanOrEqual(0);
+        expect(children.slice(0, notesIndex).map((child) => child.cls)).toEqual([
+            "obsync-sync-alert-slot",
+        ]);
+    });
+
+    /**
+     * 「文件恢复关着」的警告框（2026-10-10）。
+     *
+     * 三种状态都要对，因为它的存在**只由那一个判据决定**：
+     * 关着 → 长出来且排在注意事项之前；开着 / 读不出来 → **什么都不长**。
+     * 「读不出来不长」那条最要紧 —— 提示的前提是「我们知道它关着」，
+     * 猜成 false 会让每个没关它的用户都看到一条凭空捏造的警告。
+     */
+    it("「文件恢复」关着 → 页首长出一个警告框，排在注意事项之前", async () => {
+        const fake = createFakeApp();
+        const stub = createSyncStub();
+        stub.fileRecovery = false;
+        const tab = createTab(fake, {}, stub);
+
+        renderSyncPage(tab);
+        // 渲染是同步的，而「读 core-plugins.json」那一步是 await 的 —— 让它跑完。
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const slot = childrenOf(tab).find((child) => child.cls === "obsync-sync-alert-slot");
+        const alert = slot?.children?.find((child) => child.cls === "obsync-sync-alert");
+        expect(alert).toBeDefined();
+        expect(alert!.children![0]!.text).toBe(zhCN.settings.sync.fileRecoveryHeading);
+
+        // **排在注意事项之前** —— 它讲的是数据安全，不是补充说明。
+        const notes = childrenOf(tab).find((child) => child.cls === "obsync-sync-notes");
+        expect(childrenOf(tab).indexOf(slot!)).toBeLessThan(childrenOf(tab).indexOf(notes!));
+    });
+
+    it("「文件恢复」开着或**读不出来** → 页首什么都不长（不猜）", async () => {
+        for (const value of [true, undefined]) {
+            const fake = createFakeApp();
+            const stub = createSyncStub();
+            stub.fileRecovery = value;
+            const tab = createTab(fake, {}, stub);
+
+            renderSyncPage(tab);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            const slot = childrenOf(tab).find((child) => child.cls === "obsync-sync-alert-slot");
+            expect(slot?.children ?? []).toEqual([]);
+        }
     });
 
     it("注意事项里是 locale 里的那两条，标题也在", () => {

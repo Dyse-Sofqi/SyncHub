@@ -1186,6 +1186,44 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             return;
         }
 
+        /**
+         * 「文件恢复关着」的警告框（2026-10-10）—— **排在整页最前面**，而且刻意
+         * 长得跟下面那个中性的「注意事项」不一样。
+         *
+         * ## 为什么单独一个框、而不是注意事项里的一条
+         *
+         * 它第一次是以 `<li>` 加进注意事项的，用户看了一眼说「希望亮眼一些，
+         * 能提示到用户」—— 那条提示讲的是**数据安全**（高频保护没兜住），
+         * 混在一堆同等权重的注意事项里，读起来像一句补充说明。
+         *
+         * 所以：**warning 配色 + 自己的标题 + 排在注意事项之上**。它要拦的是
+         * 「把同步间隔调到 2 分钟来防丢数据」这个念头 —— 那件事该由文件恢复做，
+         * 用 git 做只会让提交数等于编辑次数。
+         *
+         * 容器**先建**、内容后填：读 `core-plugins.json` 要 await，而渲染是同步的。
+         * 容器是 `.obsync-sync-alert-slot` —— CSS 里 `display: contents`，**不生成盒子**，
+         * 所以空着时零占位、长出来的警告框则按页面的块级流排布（等于它就是页面的直接子元素）。
+         * 不用 `show()` / `hide()` 是因为那对方法是 Obsidian 给 `HTMLElement` 打的扩展，
+         * 测试替身里没有 —— 而这一页被渲染测试覆盖，一个 `TypeError` 会把整页打挂。
+         * **读不出来就什么都不长** —— 提示的前提是「我们知道它关着」，猜错了就是在编。
+         */
+        const alertSlot = this.containerEl.createDiv({ cls: "obsync-sync-alert-slot" });
+        void (async () => {
+            const sync = this.obsync.sync;
+            if (!sync) return;
+            try {
+                if ((await sync.service.fileRecoveryEnabled()) !== false) return;
+                const alert = alertSlot.createDiv({ cls: "obsync-sync-alert" });
+                alert.createDiv({
+                    cls: "obsync-sync-alert-heading",
+                    text: t.settings.sync.fileRecoveryHeading,
+                });
+                alert.createEl("p", { text: t.settings.sync.fileRecoveryBody });
+            } catch (err) {
+                logger.debug("could not read core plugin state", err);
+            }
+        })();
+
         // 注意事项：放在**页面最上方**，而不是塞进各设置项的描述里。
         // 两条都是**组合条件**才踩得到的坑（策略选「重置」+ 开着自动同步；
         // 多设备同时编辑同一个文件），写进单项描述没人读得到 ——
@@ -1196,31 +1234,6 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         for (const note of t.settings.sync.notes) {
             noteList.createEl("li", { text: note });
         }
-
-        /**
-         * 第三条**只在需要时才出现**：Obsidian 的「文件恢复」核心插件关着的时候
-         * （2026-10-10 加）。
-         *
-         * 它讲的是「高频保护该由谁承担」。git 的恢复粒度是**全库提交**，而高频恢复要的是
-         * **单文件回滚** —— 用提交去满足它，提交数就等于编辑次数，那正是「历史变脏、
-         * 清理变难」的来源。所以用户想把下面的间隔调得很短时，正确的回答不是「调吧」，
-         * 而是「那件事该由文件恢复做」。而它**默认是开的，关掉之后两边就都没兜住**。
-         *
-         * 读盘要 await 而渲染是同步的 —— 先画静态那两条，读到了再补一条
-         * （与 `.gitignore` 那一节的读法一致）。**读不出来时什么都不加**：
-         * 提示的前提是「我们知道它关着」，猜错了就是在编。
-         */
-        void (async () => {
-            const sync = this.obsync.sync;
-            if (!sync) return;
-            try {
-                if ((await sync.service.fileRecoveryEnabled()) === false) {
-                    noteList.createEl("li", { text: t.settings.sync.noteFileRecoveryOff });
-                }
-            } catch (err) {
-                logger.debug("could not read core plugin state", err);
-            }
-        })();
 
         /**
          * **连接测试的三个前提**：库本身是 git 仓库、远端地址、git 可执行文件路径。

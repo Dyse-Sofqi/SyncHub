@@ -229,7 +229,8 @@ Chinese-first UI with an equal English one.
   冲突区在标签之外（它是「现在就得处理」的状态）。「更改」那一页顶部是**状态摘要**
   （`与远端一致` / 领先落后）与**仓库大小 / 待提交改动**两栏，还有**格式筛选**，
   再往下才是**按「已暂存 / 更改」分组的文件列表**
-  （逐个文件暂存 / 取消暂存、点文件名打开笔记、**查看差异**、在远端打开此文件）、最近 10 条提交
+  （点文件名打开笔记、**查看差异**、在远端打开此文件；**没有**暂存开关 ——
+  见下面「为什么不给逐文件暂存」）、最近 10 条提交
   （点 hash 在远端查看这条提交，或点旁边的差异图标看它改了什么）。不是 git 仓库时这里直接给
   「初始化仓库」按钮。面板是**活的**：定时同步、库外改动、命令面板里的动作都会让它自己刷新。
   **开了定时同步时，工具栏右侧还会显示距离下一次同步的倒计时**（与设置页那一行同一份数据，
@@ -249,6 +250,13 @@ Chinese-first UI with an equal English one.
   一键「摘索引 + 写进 `.gitignore`」（本地文件与那个目录里的 `.git` 一个都不动，它自己的
   git 照常可用）。不加忽略规则的话，下一轮 `git add -A` 会把指针再加回来 —— 这正是当初
   它进索引的方式。
+- **为什么不给逐文件暂存**（2026-10-10 去掉）—— 面板曾经有「暂存此文件 / 取消暂存」与
+  「全部暂存 / 全部取消暂存」，但**它们做不到看起来在做的事**：SyncHub 的「提交」是
+  `git add -A`，**手动暂存了什么对最终提交毫无影响**；更要紧的是**定时同步到点会把它们
+  一起提交掉** —— 也就是说这个按钮**连「暂时不提交」都做不到**。用户暂存 A 想只提交 A，
+  结果 B 一起进去了。**SyncHub 不做选择性提交**：它的定位是「把整个库同步上去」。
+  （按暂存状态的**分组**保留 —— 冲突文件在 `git status` 里同时进 staged 与 unstaged，
+  去重后落在「已暂存」那一组。）
 - **差异视图** —— 面板上每个文件（含冲突行）与每条提交都能点开看改了什么；
   命令面板里也有 **SyncHub：查看当前文件的差异**（看正在编辑的这一个）。
   **在主工作区以标签页打开**（不再是弹窗 —— 弹窗太小，长行读不了；标签页可以拉宽、
@@ -826,8 +834,8 @@ per-platform instructions).
   this now" state). The Changes tab leads with the **status summary** (`in sync with remote` /
   ahead-behind), the **repository size / pending changes** columns and the **format filter**, and only
   then the changed files **grouped into staged / changes**
-  (per-file stage / unstage, click a file name to open the note, **view diff**, open the file on the
-  remote) and the last 10 commits (click a hash to view that commit on the remote, or the diff icon
+  (click a file name to open the note, **view diff**, open the file on the
+  remote — there is **no** stage toggle, see below) and the last 10 commits (click a hash to view that commit on the remote, or the diff icon
   next to it to see what it changed). When the vault is not a git repository it offers an
   "Initialise repository" button. The panel is **live**: scheduled syncs, outside edits and
   command-palette actions refresh it. **While scheduled sync is on, the Changes tab shows a countdown
@@ -1089,8 +1097,16 @@ Then you can sync:
 - "Commit" and "Push" are **two separate actions**: commit writes to the local repository only,
   push sends **committed** content only. Use "Sync now" to do both
 - No commit message to type: it comes from the template in the settings
-- You can also work per file in the repository sync view (stage / unstage, open a file, **view
+- You can also work per file in the repository sync view (open a file, **view
   diff**, view history), or click the status-bar item to open it
+- **Why there is no per-file staging** (removed 2026-10-10) — the panel used to offer
+  "Stage this file / Unstage" and "Stage all / Unstage all", but they **could not do what they
+  looked like they did**: SyncHub's commit is `git add -A`, so **what you staged manually has no
+  effect on what gets committed**; and worse, **a scheduled sync will commit them anyway** — the
+  button **could not even postpone a commit**. You stage A hoping to commit only A, and B goes in
+  with it. **SyncHub does not do selective commits**: its job is to get the whole vault up.
+  (The staged / changes **grouping** stays — a conflicted file shows up in both in `git status`
+  and lands in the staged group after de-duplication.)
 - To see what changed: click the **diff icon** on a row in the panel, or use the command
   **SyncHub: View diff of the current file** for the one you are editing
 - To view a file in the browser: command **SyncHub: Open current file in browser**, or right-click

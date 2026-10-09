@@ -258,6 +258,52 @@
     margin-bottom: 0.35em;
 }
 
+/* ── 设置页：数据安全的警告框（`.obsync-sync-alert`，2026-10-10） ─────────────
+ *
+ * **故意长得跟上面那个中性的「注意事项」不一样。** 它讲的是数据安全
+ * （Obsidian 的「文件恢复」关着 = 高频保护没人兜住），而第一版只是注意事项里的
+ * 一条 `li` —— 用户的反馈是「希望亮眼一些，能提示到用户」。混在一堆同等权重的
+ * 注意事项里，读起来像补充说明。
+ *
+ * 三条让它「亮眼」的做法，都只用主题变量：
+ *
+ * 1. 边框与标题用 `--text-warning`（不是中性、也不是 accent），并把左边框加粗；
+ * 2. 底色用 `color-mix` 把警告色调成一层薄底 —— 深浅色主题下都成立，不用各写一份。
+ *    万一 `color-mix` 不被支持，背景退化成透明，**靠边框仍然看得出来**；
+ * 3. 排在整页最前面（顺序在 `settingsTab.renderSync` 里控制，不在这里）。
+ *
+ * 正文用 `--text-normal` 而不是 `--text-muted`：这是要读的话，不是补充说明。 */
+
+/* 警告框的**槽**：`display: contents` 让它自己不生成盒子 —— 于是空着时零占位
+   （「文件恢复开着」时就是这种），有内容时那个警告框按页面的块级流排布，
+   等于它就是页面的直接子元素（外边距、与前后的间距都和预期一致）。
+   存在的理由：警告框要**先占好位置再异步填**（读 `core-plugins.json` 是 await 的，
+   而渲染是同步的），而一个带 `.obsync-sync-alert` 类名的空 div 会被样式撑成一个空框。 */
+.obsync-settings .obsync-sync-alert-slot {
+    display: contents;
+}
+
+.obsync-settings .obsync-sync-alert {
+    margin: 0.5em 0 1.25em;
+    padding: 0.8em 1em;
+    border-radius: var(--setting-items-radius, var(--radius-m, 8px));
+    border: 1px solid var(--text-warning, #b98a00);
+    border-left-width: 4px;
+    background-color: color-mix(in srgb, var(--text-warning, #b98a00) 12%, transparent);
+}
+
+.obsync-settings .obsync-sync-alert-heading {
+    font-size: var(--font-ui-small, 0.9em);
+    font-weight: 700;
+    color: var(--text-warning, #b98a00);
+    margin-bottom: 0.35em;
+}
+
+.obsync-settings .obsync-sync-alert p {
+    margin: 0;
+    color: var(--text-normal);
+}
+
 .obsync-settings .obsync-sync-notes ul,
 .obsync-settings .obsync-image-notes ul {
     margin: 0;

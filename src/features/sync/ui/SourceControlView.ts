@@ -887,13 +887,8 @@ export class SourceControlView extends ItemView {
         const unstaged = visible.filter((row) => !row.staged);
 
         // 「已暂存」在前 —— 马上要被提交的是它们，用户最先想知道的是这个。
-        this.renderChangeGroup(contentEl, t.sync.sectionStaged(staged.length), staged, true);
-        this.renderChangeGroup(
-            contentEl,
-            t.sync.sectionChanges(unstaged.length),
-            unstaged,
-            false
-        );
+        this.renderChangeGroup(contentEl, t.sync.sectionStaged(staged.length), staged);
+        this.renderChangeGroup(contentEl, t.sync.sectionChanges(unstaged.length), unstaged);
     }
 
     /**
@@ -935,30 +930,28 @@ export class SourceControlView extends ItemView {
         return this.changeFilter;
     }
 
-    private renderChangeGroup(
-        contentEl: HTMLElement,
-        title: string,
-        rows: ChangeRow[],
-        staged: boolean
-    ): void {
+    /**
+     * 画一组更改（「已暂存」或「更改」）。
+     *
+     * ## 2026-10-10：这一组上原来有「全部暂存 / 全部取消暂存」，已去掉
+     *
+     * 那两个按钮（以及每一行上的「暂存 / 取消暂存」）**做不到它们看起来在做的事**：
+     * `doCommitAll` 无条件 `git add -A`，所以手动暂存了什么对最终提交毫无影响；
+     * 更要紧的是**自动同步到点会把它们一起提交掉** —— 也就是说这个按钮
+     * **连「暂时不提交」都做不到**。用户暂存 A 想只提交 A，结果 B 一起进去了。
+     *
+     * 去掉而不是留着，依据是本仓库已有的同类判断：嵌套仓库行里那个 `minus`
+     * （暂存不下）被去掉了，理由是「**点了没反应的按钮，留着只会让人以为插件坏了**」。
+     * 暂存按钮比那个更糟 —— 它**有反应**（分组变了），但**没有效果**。
+     *
+     * **分组本身保留**：冲突文件在 `git status` 里同时进 staged 与 unstaged，
+     * 去重后落在「已暂存」这一组（见 `changeRows`）。所以这一组不是空的。
+     */
+    private renderChangeGroup(contentEl: HTMLElement, title: string, rows: ChangeRow[]): void {
         if (rows.length === 0) return;
         const t = this.deps.getT();
-        const paths = rows.map((row) => row.path);
 
-        new Setting(contentEl)
-            .setName(title)
-            .setHeading()
-            .addButton((button) =>
-                button
-                    .setButtonText(staged ? t.sync.actUnstageAll : t.sync.actStageAll)
-                    .onClick(() =>
-                        void this.run(() =>
-                            staged
-                                ? this.deps.service.unstageFiles(paths)
-                                : this.deps.service.stageFiles(paths)
-                        )
-                    )
-            );
+        new Setting(contentEl).setName(title).setHeading();
 
         const list = contentEl.createDiv({ cls: "obsync-change-list" });
 
@@ -1043,22 +1036,6 @@ export class SourceControlView extends ItemView {
                 .setIcon("external-link")
                 .setTooltip(t.sync.actOpenFileOnRemote)
                 .onClick(() => this.deps.onOpenFileOnRemote(spec.path))
-        );
-
-        if (spec.staged === undefined) return;
-
-        const staged = spec.staged;
-        row.addExtraButton((button) =>
-            button
-                .setIcon(staged ? "minus" : "plus")
-                .setTooltip(staged ? t.sync.actUnstage : t.sync.actStage)
-                .onClick(() =>
-                    void this.run(() =>
-                        staged
-                            ? this.deps.service.unstageFiles([spec.path])
-                            : this.deps.service.stageFiles([spec.path])
-                    )
-                )
         );
     }
 
