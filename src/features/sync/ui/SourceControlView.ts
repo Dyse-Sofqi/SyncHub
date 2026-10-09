@@ -1,4 +1,5 @@
 import { ItemView, setIcon, Setting, WorkspaceLeaf, type ButtonComponent } from "obsidian";
+import { ConfirmDiscardChangesModal } from "./ConfirmDiscardChangesModal";
 import type { LocaleStrings } from "../../../core/i18n";
 import {
     changeFilterOptions,
@@ -969,7 +970,7 @@ export class SourceControlView extends ItemView {
             this.renderFileRow(list, {
                 path: row.path,
                 mark: markOf(row.status),
-                staged: row.staged,
+                untracked: row.status === "untracked",
                 nestedRepo: row.nestedRepo,
             });
         }
@@ -1037,6 +1038,49 @@ export class SourceControlView extends ItemView {
                 .setTooltip(t.sync.actOpenFileOnRemote)
                 .onClick(() => this.deps.onOpenFileOnRemote(spec.path))
         );
+
+        /**
+         * 「放弃更改」（2026-10-10，用户要求：面板里的更改要有一个「恢复」按钮）。
+         *
+         * **排在最后**：它是这一行上唯一会丢东西的动作，与「查看差异 / 在远端打开」
+         * 那两个只读入口拉开距离。
+         *
+         * 两类行**不给**：
+         *
+         * - **未跟踪的（新文件）**：它们没有「上次提交」可退，`git restore` 会以
+         *   「pathspec did not match」失败；而「放弃」对它们实际等于**删掉一个新文件** ——
+         *   那是另一件事，而且丢的东西一点退路都没有，不该混进这个入口。
+         * - **冲突行**：冲突区已经有「放弃本次合并」；而且面板看不到文件内容，
+         *   在这里替用户决定「用哪一边」正是不该做的事。
+         */
+        if (spec.untracked || spec.conflicted) return;
+
+        row.addExtraButton((button) =>
+            button
+                .setIcon("rotate-ccw")
+                .setTooltip(t.sync.actDiscard)
+                .onClick(() => this.confirmDiscard(spec.path))
+        );
+    }
+
+    /**
+     * 「放弃更改」：**先确认，再执行**。
+     *
+     * 确认这一步不能省 —— 它是本插件唯一会丢用户编辑的动作，而且不可逆
+     * （放弃的编辑从来没被提交过，不在 git 里）。见 `ConfirmDiscardChangesModal`。
+     */
+    private confirmDiscard(path: string): void {
+        new ConfirmDiscardChangesModal(this.app, this.deps.getT(), [path], () =>
+            this.discardChanges([path])
+        ).open();
+    }
+
+    private async discardChanges(paths: string[]): Promise<void> {
+        const t = this.deps.getT();
+        await this.run(async () => {
+            await this.deps.service.discardChanges(paths);
+            this.deps.service.deps.notifier.success(t.sync.discard.done(paths.length));
+        });
     }
 
     // ── 最近提交 ──────────────────────────────────────────────────────────
@@ -1212,7 +1256,8 @@ export class SourceControlView extends ItemView {
 interface FileRowSpec {
     path: string;
     mark: string;
-    staged?: boolean;
+    /** 未跟踪（新文件）—— **不给「放弃更改」**：它没有「上次提交」可退，见 `renderFileRow`。 */
+    untracked?: boolean;
     conflicted?: boolean;
     /** 索引里记的是嵌套仓库（gitlink）—— 换一套按钮，见 `renderFileRow`。 */
     nestedRepo?: boolean;

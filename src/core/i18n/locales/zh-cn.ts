@@ -1427,6 +1427,29 @@ export const zhCN = {
                 done: "完成",
             },
         },
+        /**
+         * 「放弃更改」（2026-10-10，用户要求：面板里的更改要有一个「恢复」按钮）。
+         *
+         * 它是本插件**唯一会丢用户编辑**的动作，而且不可逆 —— 所以文案的重点全在
+         * 「把代价说清」：具体哪几个文件、会变成什么样、为什么取不回来。
+         */
+        discard: {
+            modal: {
+                title: "放弃这些更改？",
+                intro:
+                    "这些文件会回到上次提交的样子：你的改动被丢弃，被删掉的文件会重新出现。",
+                filesHeading: "将放弃这些文件的改动：",
+                warningHeading: "请注意：",
+                warningRestore:
+                    "本地文件不会消失（被删的那些反而会回来），但你在这些文件里写的内容会回到上次提交时的版本。",
+                warningIrreversible:
+                    "这一步不可逆 —— 放弃的编辑从来没被提交过，不在 git 里，取不回来。" +
+                    "（Obsidian 的「文件恢复」若开着，那里可能还留着一份快照，但别指望它。）",
+                cancel: "取消",
+                confirm: "放弃更改",
+            },
+            done: (count: number) => `已放弃 ${count} 个文件的更改。`,
+        },
         noRemote: "还没有配置远端仓库，请在设置中填写远端地址。",
         conflictDetected: (count: number) =>
             `检测到 ${count} 个冲突文件，已生成冲突清单，请手动处理后提交。`,
@@ -1502,6 +1525,7 @@ export const zhCN = {
         actOpenFile: "打开此文件",
         actOpenFileOnRemote: "在远端打开此文件",
         actDiff: "查看差异",
+        actDiscard: "放弃此文件的更改（回到上次提交的样子）",
         actAbortMerge: "放弃本次合并",
         sectionStaged: (count: number) => `已暂存的更改（${count}）`,
         sectionChanges: (count: number) => `更改（${count}）`,

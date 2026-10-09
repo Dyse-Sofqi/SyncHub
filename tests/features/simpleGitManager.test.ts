@@ -222,6 +222,77 @@ describe("状态与提交", () => {
      * - 非仓库时返回**空数组**而不是抛错（界面已经在别处确认过仓库存在，
      *   这里再抛一次只会把「什么都没有」变成一句技术性报错）。
      */
+    /**
+     * 「放弃更改」（`git restore --source=HEAD --staged --worktree`，2026-10-10）。
+     *
+     * 两件事都要真跑一遍 —— 它们是同一个动作的两个用途，而**第二件最值钱**：
+     * 用户在文件管理器里误删了一篇笔记，工作区里那份没了，但上次提交里有。
+     * 这条测试就是「能不能把它找回来」。
+     */
+    it("restore 把改动退回上次提交，并把误删的文件找回来", async () => {
+        const { manager, dir } = await makeReadyRepo("restore");
+        await write(dir, "note.md", "第一版");
+        await write(dir, "keep.md", "别动我");
+        await manager.stage([]);
+        await manager.commit("first");
+
+        // 改坏一个 + 删掉一个
+        await write(dir, "note.md", "被改坏了");
+        await fs.rm(path.join(dir, "keep.md"));
+        let status = await manager.status();
+        expect(status.unstaged.map((change) => change.path).sort()).toEqual([
+            "keep.md",
+            "note.md",
+        ]);
+
+        await manager.restore(["note.md", "keep.md"]);
+
+        // 1) 改坏的退回上一版
+        expect(await read(dir, "note.md")).toBe("第一版");
+        // 2) 误删的**回来了**
+        expect(await read(dir, "keep.md")).toBe("别动我");
+        // 3) 工作区干净了 —— 否则用户会看到「放弃了但还挂在更改里」
+        status = await manager.status();
+        expect(status.unstaged).toHaveLength(0);
+        expect(status.staged).toHaveLength(0);
+    });
+
+    it("restore 也清掉索引里那一份（只清工作区会留下一条「已暂存的改动」）", async () => {
+        const { manager, dir } = await makeReadyRepo("restore-staged");
+        await write(dir, "note.md", "第一版");
+        await manager.stage([]);
+        await manager.commit("first");
+
+        await write(dir, "note.md", "改过而且暂存了");
+        await manager.stage(["note.md"]);
+        expect((await manager.status()).staged.map((change) => change.path)).toEqual(["note.md"]);
+
+        await manager.restore(["note.md"]);
+
+        expect(await read(dir, "note.md")).toBe("第一版");
+        const status = await manager.status();
+        expect(status.staged).toHaveLength(0);
+        expect(status.unstaged).toHaveLength(0);
+    });
+
+    it("restore 只动传进去的路径，别的文件一个字都不碰", async () => {
+        const { manager, dir } = await makeReadyRepo("restore-scope");
+        await write(dir, "a.md", "A1");
+        await write(dir, "b.md", "B1");
+        await manager.stage([]);
+        await manager.commit("first");
+
+        await write(dir, "a.md", "A2");
+        await write(dir, "b.md", "B2");
+
+        await manager.restore(["a.md"]);
+
+        expect(await read(dir, "a.md")).toBe("A1");
+        // b.md 的改动必须还在 —— 一次「放弃」误伤别的文件就是丢用户的内容
+        expect(await read(dir, "b.md")).toBe("B2");
+        expect((await manager.status()).unstaged.map((change) => change.path)).toEqual(["b.md"]);
+    });
+
     it("listTracked 列出全部已跟踪路径（含中文与空格），非仓库时返回空数组", async () => {
         const plain = path.join(root, "plain-list");
         await fs.mkdir(plain);

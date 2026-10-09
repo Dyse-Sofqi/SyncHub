@@ -560,6 +560,25 @@ export class SyncService {
      */
 
     /**
+     * **放弃这些文件的未提交改动**（面板上「放弃更改」那一步）。
+     *
+     * 把索引与工作区都退回上次提交的样子 —— 改坏的退回、**误删的找回**，
+     * 在 git 眼里是同一个动作（见 `GitManager.restore`）。
+     *
+     * 走串行队列：它写索引与工作区，和自动提交定时器并发是真实会发生的。
+     *
+     * **不可逆** —— 丢掉的编辑从来没被提交过，不在 git 里。确认由调用方负责
+     * （面板先弹 `ConfirmDiscardChangesModal`）。
+     */
+    async discardChanges(paths: string[]): Promise<void> {
+        if (paths.length === 0) return;
+        await this.enqueue(async () => {
+            await this.git.restore(paths);
+            await this.refreshStatus();
+        });
+    }
+
+    /**
      * 让 git **不再跟踪**这些路径（工作区文件保留）。
      *
      * 走串行队列：它写的是 git 索引，而索引是全局状态 ——

@@ -83,6 +83,18 @@ class FakeGit implements GitManager {
         this.staged = this.staged.filter((path) => !paths.includes(path));
     }
     /**
+     * 「放弃更改」（`git restore --source=HEAD --staged --worktree`）。
+     *
+     * 替身按**真实语义**记账：这些路径从**索引与工作区一起**退回 HEAD ——
+     * 所以 `staged` 与 `unstaged` 里都不该再有它们（这正是「改动被丢掉了」）。
+     * 只清一处的话，「放弃了但还挂在更改里」这种 bug 就测不出来。
+     */
+    async restore(paths: string[]): Promise<void> {
+        this.calls.push(`restore:${paths.join(",")}`);
+        this.staged = this.staged.filter((path) => !paths.includes(path));
+        this.unstaged = this.unstaged.filter((path) => !paths.includes(path));
+    }
+    /**
      * 「停止跟踪」（`git rm -r --cached`）。
      *
      * 替身按真实语义记账：这些路径从**已跟踪**里消失，但**本地文件还在**
@@ -942,8 +954,38 @@ describe("视图的逐文件操作", () => {
         expect(git.calls).toContain("checkout:dev");
     });
 
-    it("**与正在跑的动作排成一条链**：慢提交没结束时，摘索引不会插队", async () => {
+    /**
+     * 「放弃更改」（2026-10-10）—— 面板每一行的那个「恢复」按钮走的就是这里。
+     *
+     * 它是本插件唯一会丢用户编辑的动作，所以替身按**真实语义**记账：
+     * 索引与工作区**两处**都要退回。只清一处的话，用户会看到
+     * 「点了放弃，文件还挂在更改里」。
+     */
+    it("放弃更改：走队列，并把索引与工作区一起退回", async () => {
         const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+        git.staged = ["a.md"];
+        git.unstaged = ["a.md", "b.md"];
+
+        await service.discardChanges(["a.md"]);
+
+        expect(git.calls).toContain("restore:a.md");
+        expect(git.staged).toEqual([]);
+        expect(git.unstaged).toEqual(["b.md"]);
+    });
+
+    it("放弃更改为空时是空操作（不碰 git，也不报错）", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        await service.discardChanges([]);
+
+        expect(git.calls).toEqual([]);
+    });
+
+    it("**与正在跑的动作排成一条链**：慢提交没结束时，摘索引不会插队", async () => {        const git = new FakeGit();
         const fake = createFakeApp();
         const { service } = makeService(git, fake);
         git.unstaged = ["a.md"];

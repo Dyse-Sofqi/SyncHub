@@ -1188,6 +1188,22 @@ export const en = {
                 done: "Done",
             },
         },
+        discard: {
+            modal: {
+                title: "Discard these changes?",
+                intro:
+                    "These files go back to how they were at the last commit: your edits are dropped, and deleted files come back.",
+                filesHeading: "Changes will be discarded for:",
+                warningHeading: "Please note:",
+                warningRestore:
+                    "No local file disappears (deleted ones come back), but what you wrote in them reverts to the last committed version.",
+                warningIrreversible:
+                    "This cannot be undone — the discarded edits were never committed, so they are not in git and cannot be recovered. (If Obsidian's File recovery is on, it may still hold a snapshot, but do not count on it.)",
+                cancel: "Cancel",
+                confirm: "Discard changes",
+            },
+            done: (count: number) => `Discarded changes in ${count} file(s).`,
+        },
         noRemote: "No remote repository configured. Set the remote URL in settings.",
         conflictDetected: (count: number) =>
             `${count} conflicted file(s) detected. A conflict list has been written; resolve them and commit manually.`,
@@ -1254,6 +1270,7 @@ export const en = {
         actOpenFile: "Open this file",
         actOpenFileOnRemote: "Open this file on the remote",
         actDiff: "View diff",
+        actDiscard: "Discard changes to this file (back to the last commit)",
         actAbortMerge: "Abort this merge",
         sectionStaged: (count: number) => `Staged changes (${count})`,
         sectionChanges: (count: number) => `Changes (${count})`,

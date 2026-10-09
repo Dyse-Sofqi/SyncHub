@@ -593,6 +593,27 @@ export class SimpleGitManager implements GitManager {
     }
 
     /**
+     * 放弃这些文件的未提交改动（`git restore --source=HEAD --staged --worktree`）。
+     *
+     * 详见接口注释。两点实现上的讲究：
+     *
+     * - **分批**：与 `untrack` 同一个理由 —— 一次几千个路径会撞上命令行长度上限，
+     *   而「放弃全部更改」在改动很多时是真实用法；
+     * - `--source=HEAD` 显式写出来：不带它时 `git restore` 默认从**索引**取内容，
+     *   那对「索引里也有改动」的文件等于什么都没做（用户会看到「点了没反应」）。
+     */
+    async restore(paths: string[]): Promise<void> {
+        if (paths.length === 0) return;
+        const git = await this.git();
+        for (let index = 0; index < paths.length; index += UNTRACK_BATCH_SIZE) {
+            const batch = paths.slice(index, index + UNTRACK_BATCH_SIZE);
+            await wrap("discarding changes", () =>
+                git.raw(["restore", "--source=HEAD", "--staged", "--worktree", "--", ...batch])
+            );
+        }
+    }
+
+    /**
      * 当前已被跟踪的所有路径（`git ls-files`）。
      *
      * 用 `-z`：路径里的空格、中文、换行都不会把它拆错（`-z` 是 NUL 分隔）。

@@ -229,8 +229,8 @@ Chinese-first UI with an equal English one.
   冲突区在标签之外（它是「现在就得处理」的状态）。「更改」那一页顶部是**状态摘要**
   （`与远端一致` / 领先落后）与**仓库大小 / 待提交改动**两栏，还有**格式筛选**，
   再往下才是**按「已暂存 / 更改」分组的文件列表**
-  （点文件名打开笔记、**查看差异**、在远端打开此文件；**没有**暂存开关 ——
-  见下面「为什么不给逐文件暂存」）、最近 10 条提交
+  （点文件名打开笔记、**查看差异**、在远端打开此文件、**放弃更改** ——
+  把那个文件退回上次提交的样子；**没有**暂存开关，见下面「为什么不给逐文件暂存」）、最近 10 条提交
   （点 hash 在远端查看这条提交，或点旁边的差异图标看它改了什么）。不是 git 仓库时这里直接给
   「初始化仓库」按钮。面板是**活的**：定时同步、库外改动、命令面板里的动作都会让它自己刷新。
   **开了定时同步时，工具栏右侧还会显示距离下一次同步的倒计时**（与设置页那一行同一份数据，
@@ -250,6 +250,14 @@ Chinese-first UI with an equal English one.
   一键「摘索引 + 写进 `.gitignore`」（本地文件与那个目录里的 `.git` 一个都不动，它自己的
   git 照常可用）。不加忽略规则的话，下一轮 `git add -A` 会把指针再加回来 —— 这正是当初
   它进索引的方式。
+- **「放弃更改」** —— 每一行上那个回退箭头：把这个文件退回**上次提交**的样子。
+  两种场景共用一个动作，因为它们在 git 眼里是同一件事：**改坏了想退回**，
+  以及**误删了想找回**（被删的文件会从上次提交里重新写出来）。
+  它是本插件**唯一会丢用户编辑**的动作，而且**不可逆** —— 放弃的编辑从来没被提交过，
+  不在 git 里，`git fsck` 也找不回来。所以确认弹窗会**列出具体哪几个文件**、把这一点写在正文里，
+  确认按钮用警示色。两类行**没有**这个按钮：**未跟踪的新文件**（没有「上次提交」可退，
+  而「放弃」对它们等于删掉一个新文件 —— 丢的东西一点退路都没有）、
+  **冲突行**（冲突区已经有「放弃本次合并」）。
 - **为什么不给逐文件暂存**（2026-10-10 去掉）—— 面板曾经有「暂存此文件 / 取消暂存」与
   「全部暂存 / 全部取消暂存」，但**它们做不到看起来在做的事**：SyncHub 的「提交」是
   `git add -A`，**手动暂存了什么对最终提交毫无影响**；更要紧的是**定时同步到点会把它们
@@ -835,7 +843,8 @@ per-platform instructions).
   ahead-behind), the **repository size / pending changes** columns and the **format filter**, and only
   then the changed files **grouped into staged / changes**
   (click a file name to open the note, **view diff**, open the file on the
-  remote — there is **no** stage toggle, see below) and the last 10 commits (click a hash to view that commit on the remote, or the diff icon
+  remote, **discard changes** — put that file back to the last commit; there is **no**
+  stage toggle, see below) and the last 10 commits (click a hash to view that commit on the remote, or the diff icon
   next to it to see what it changed). When the vault is not a git repository it offers an
   "Initialise repository" button. The panel is **live**: scheduled syncs, outside edits and
   command-palette actions refresh it. **While scheduled sync is on, the Changes tab shows a countdown
@@ -1099,6 +1108,16 @@ Then you can sync:
 - No commit message to type: it comes from the template in the settings
 - You can also work per file in the repository sync view (open a file, **view
   diff**, view history), or click the status-bar item to open it
+- **"Discard changes"** — the undo arrow on each row: puts that file back to how it was at the
+  **last commit**. Two situations share one action, because git sees them as the same thing:
+  **you broke something and want it back**, and **you deleted a file by accident** (a deleted file
+  is written back out from the last commit). It is the only action in this plugin that **loses your
+  edits**, and it **cannot be undone** — the discarded edits were never committed, are not in git,
+  and `git fsck` will not find them. So the confirmation modal lists the exact files, says so in the
+  body, and the confirm button is styled as a warning. Two kinds of row **do not** get the button:
+  **untracked new files** (there is no previous commit to go back to, and "discard" for them would
+  mean deleting a brand-new file — nothing to fall back on) and **conflicted rows** (the conflict
+  area already has "Abort this merge").
 - **Why there is no per-file staging** (removed 2026-10-10) — the panel used to offer
   "Stage this file / Unstage" and "Stage all / Unstage all", but they **could not do what they
   looked like they did**: SyncHub's commit is `git add -A`, so **what you staged manually has no

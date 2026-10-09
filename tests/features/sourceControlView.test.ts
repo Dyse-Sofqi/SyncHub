@@ -249,6 +249,11 @@ function harness(options: {
             calls.push("abortMerge");
             finishAction();
         },
+        /** 「放弃更改」：面板每一行的恢复按钮走它。 */
+        discardChanges: async (paths: string[]) => {
+            calls.push(`discard:${paths.join(",")}`);
+            finishAction();
+        },
         /** 「不再跟踪嵌套仓库」：摘索引 + 写 .gitignore（合成一步）。 */
         untrackAndIgnore: async (paths: string[]) => {
             calls.push(`untrackAndIgnore:${paths.join(",")}`);
@@ -775,7 +780,7 @@ describe("SourceControlView 渲染", () => {
         }
     });
 
-    it("按暂存状态分组，但**每行不再有暂存开关**（2026-10-10 去掉）", async () => {
+    it("按暂存状态分组，**已跟踪的行**有「放弃更改」，未跟踪的没有", async () => {
         const h = harness({
             status: status({
                 staged: [change("已暂存.md", "added")],
@@ -796,15 +801,68 @@ describe("SourceControlView 渲染", () => {
         );
         expect(rows.map(rowPath)).toEqual(["已暂存.md", "未暂存.md", "新文件.md"]);
 
-        // 每行只剩两个按钮：差异 / 在远端打开。
-        // 「暂存开关」被去掉了 —— 它做不到看起来在做的事（`doCommitAll` 无条件
-        // `git add -A`，手动暂存影响不了提交内容，自动同步还会把这份选择抹掉）。
-        for (const row of rows) {
-            expect(row.buttons.map((button) => button.icon)).toEqual([
-                "file-diff",
-                "external-link",
-            ]);
-        }
+        // 每行：差异 / 在远端打开，**已跟踪的再加一个「放弃更改」**。
+        // 顺序上放弃排在最后 —— 它是这一行上唯一会丢东西的动作。
+        expect(rows[0]!.buttons.map((button) => button.icon)).toEqual([
+            "file-diff",
+            "external-link",
+            "rotate-ccw",
+        ]);
+        expect(rows[1]!.buttons.map((button) => button.icon)).toEqual([
+            "file-diff",
+            "external-link",
+            "rotate-ccw",
+        ]);
+        // **未跟踪的新文件没有这个按钮**：它没有「上次提交」可退，而「放弃」对
+        // 它等于删掉一个新文件 —— 丢的东西一点退路都没有，不该混进这个入口。
+        expect(rows[2]!.buttons.map((button) => button.icon)).toEqual([
+            "file-diff",
+            "external-link",
+        ]);
+        expect(rows[2]!.buttons.map((button) => button.tooltip)).not.toContain(
+            zhCN.sync.actDiscard
+        );
+    });
+
+    /**
+     * 「放弃更改」的完整链路：点按钮 → 弹确认 → 确认后调服务。
+     *
+     * 只断言「按钮在」是不够的 —— 中间那一步确认**不能省**：它是本插件唯一会丢
+     * 用户编辑的动作，而且不可逆（放弃的编辑从来没被提交过）。
+     */
+    it("点「放弃更改」→ 先弹确认，确认才调服务；弹窗列出具体文件名", async () => {
+        const h = harness({
+            status: status({ unstaged: [change("notes/会丢的.md", "modified")] }),
+        });
+
+        await h.open();
+
+        const row = createdSettings.find((setting) =>
+            setting.classes.includes("obsync-change-row")
+        )!;
+        const discard = row.buttons.find((button) => button.icon === "rotate-ccw")!;
+        expect(discard.tooltip).toBe(zhCN.sync.actDiscard);
+
+        discard.click();
+        expect(openedModals).toHaveLength(1);
+        // 弹出来之前**什么都没发生**
+        expect(h.calls.filter((call) => call.startsWith("discard:"))).toEqual([]);
+
+        // 弹窗把**具体哪几个文件**列出来，而不是一句「确定吗」
+        const modal = openedModals[0]! as unknown as { contentEl: ShimNode };
+        const shown = findAllIn([modal.contentEl], () => true)
+            .map((node) => node.text ?? "")
+            .join(" | ");
+        expect(shown).toContain("notes/会丢的.md");
+
+        // 弹窗里的按钮也是一个 `Setting`（进 `createdSettings`），按文案找它。
+        const confirm = createdSettings
+            .flatMap((setting) => setting.buttons)
+            .find((button) => button.text === zhCN.sync.discard.modal.confirm)!;
+        expect(confirm).toBeDefined();
+        confirm.click();
+
+        expect(h.calls).toContain("discard:notes/会丢的.md");
     });
 
     /**
@@ -869,7 +927,7 @@ describe("SourceControlView 渲染", () => {
         expect(h.calls).toContain(`success:${zhCN.sync.nestedRepoUntracked}`);
     });
 
-    it("普通文件行不受影响：没有徽标，还是那两个按钮", async () => {
+    it("普通文件行不受影响：没有徽标，还是那三个按钮", async () => {
         const h = harness({
             status: status({
                 unstaged: [change("notes/a.md", "modified")],
@@ -885,6 +943,7 @@ describe("SourceControlView 渲染", () => {
         expect(row.buttons.map((button) => button.icon)).toEqual([
             "file-diff",
             "external-link",
+            "rotate-ccw",
         ]);
         expect(
             findAllIn(
