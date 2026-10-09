@@ -1584,7 +1584,7 @@ export const zhCN = {
             [
                 "# 由 SyncHub 创建。",
                 "",
-                "# Obsidian 的工作区布局（面板、标签、光标位置）。每台设备各自维护，",
+                "# Obsidian 的工作区布局（面板、标签、当前打开的文件）。每台设备各自维护，",
                 "# 同步它只会制造冲突 —— 这是 Obsidian 多设备同步最常见的坑。",
                 `${configDir}/workspace.json`,
                 `${configDir}/workspace-mobile.json`,

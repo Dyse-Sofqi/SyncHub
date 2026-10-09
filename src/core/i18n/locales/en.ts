@@ -1335,7 +1335,7 @@ export const en = {
             [
                 "# Created by SyncHub.",
                 "",
-                "# Obsidian's workspace layout (panels, tabs, cursor positions). It is",
+                "# Obsidian's workspace layout (panels, tabs, the files you have open). It is",
                 "# per-device; syncing it only creates conflicts — the single most common",
                 "# pitfall when syncing a vault across devices.",
                 `${configDir}/workspace.json`,
