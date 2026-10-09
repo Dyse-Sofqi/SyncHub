@@ -17,6 +17,8 @@
  * 5. **移动端安全** —— 静态导入图里不能出现依赖 Node 的模块。
  * 6. **设置项无人读取** —— 能改、能存，但功能代码从不读的字段。
  * 7. **locale 里的 Markdown 加粗** —— 界面不渲染 Markdown，`**` 会原样显示成星号。
+ * 8. **CSS 注释完整性** —— 注释里的「星号紧跟斜杠」会提前结束注释，把后面那条规则整条吃掉
+ *    （第 4 项拦不住：被丢弃的规则在文本上仍然「有定义」）。
  */
 
 import fs from "node:fs";
@@ -752,6 +754,85 @@ function checkLocaleBold() {
     };
 }
 
+// ── 8. CSS 注释完整性 ───────────────────────────────────────────────────────
+
+
+/**
+ * CSS 注释里出现「星号紧跟斜杠」会**提前结束注释**，而注释后面的文字会被当成
+ * **下一条规则的选择器** —— 于是那条规则被解析器**整条静默丢弃**：
+ * 不报错、不警告，样式就是不生效。
+ *
+ * ## 为什么必须单独查（2026-10-10 实测踩到）
+ *
+ * `styles.css` 里那句注释原本要举「递归通配」的例子，而我把它写成了
+ * 两个星号紧接一个斜杠 —— 那个斜杠紧跟在星号后面，注释于是在那里就结束了。被吃掉的是紧接着的
+ * `.obsync-settings .obsync-gitignore { width: 100%; … }`，症状是
+ * **`.gitignore` 代码框全宽失效**（用户报的「输入框全宽失效了」）。
+ *
+ * ## 为什么现有 7 项都拦不住
+ *
+ * 第 4 项（CSS 类覆盖）用正则扫 `obsync-*` 字符串，而**被丢弃的规则在文本上
+ * 仍然「有定义」** —— 类名照样出现在文件里，检查照样通过。这正是它最坏的地方：
+ * 判据与「CSS 到底解析出了什么」之间隔着一层，而那层是**真的解析器**。
+ * 所以这一项的判据必须模拟解析器：**注释在第一个终止符处结束**，此后遇到的终止符
+ * 就是游离的 —— 它前面那条规则已经被吃掉了。
+ *
+ * 修法：注释里别写那个两字符组合（要举递归通配的例子就绕开它，
+ * 例如写成「以两个星号开头的递归匹配」）。
+ *
+ * 注：本文件自己就踩过一次 —— 写这段注释时在里面直接写了那个组合，
+ * 于是**这个 JS 文件**也报 `SyntaxError`。同一个坑，同一天，第二次。
+ */
+function checkCssComments() {
+    const cssPath = path.join(ROOT, "styles.css");
+    if (!fs.existsSync(cssPath)) return { name: "CSS 注释完整性", skipped: true };
+
+    const source = read(cssPath);
+    const stray = [];
+    let inComment = false;
+    let line = 1;
+    let index = 0;
+
+    while (index < source.length) {
+        if (source[index] === "\n") line++;
+        if (!inComment && source.startsWith("/*", index)) {
+            inComment = true;
+            index += 2;
+            continue;
+        }
+        if (inComment && source.startsWith("*/", index)) {
+            inComment = false;
+            index += 2;
+            continue;
+        }
+        if (!inComment && source.startsWith("*/", index)) {
+            // 走到这里说明**上一条注释已经提前结束**，接下来那条规则被吃掉了。
+            stray.push(`第 ${line} 行：游离的 \`*/\`（它前面那条规则已被解析器整条丢弃）`);
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+
+    if (inComment) {
+        failures.push(
+            `styles.css 结尾有**未闭合**的注释（从某处开始一直没遇到 \`*/\`）—— ` +
+                `它后面的规则全部不会生效。`
+        );
+    }
+    if (stray.length > 0) {
+        failures.push(
+            `styles.css 有 ${stray.length} 处提前结束的注释：\n      ` +
+                stray.join("\n      ") +
+                `\n      注释里出现 \`*/\` 会提前结束它，剩下的文字被当成下一条规则的选择器，` +
+                `那条规则于是被**静默丢弃**（不报错、样式就是不生效）。` +
+                `\n      想表达 \`**/\` 就换个说法（例如「以 \`**\` 开头的递归匹配」）。`
+        );
+    }
+
+    return { name: "CSS 注释完整性", detail: `${stray.length} 处提前结束的注释` };
+}
+
 // ── 跑 ──────────────────────────────────────────────────────────────────────
 
 const results = [
@@ -762,6 +843,7 @@ const results = [
     checkMobileSafety(),
     checkUnreadSettings(),
     checkLocaleBold(),
+    checkCssComments(),
 ];
 
 console.log("SyncHub 项目自查\n");

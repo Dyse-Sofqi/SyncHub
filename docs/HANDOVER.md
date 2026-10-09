@@ -170,7 +170,7 @@ pnpm verify:head # 在 **HEAD**（而不是工作区）上跑测试 —— 提�
 
 ### `pnpm check` 查什么（`scripts/checks.mjs`）
 
-六项都是「编译器管不着、但会真出问题」的检查，每条都对应一个实际踩过的坑：
+八项都是「编译器管不着、但会真出问题」的检查，每条都对应一个实际踩过的坑：
 
 | 检查 | 防的是什么 |
 | --- | --- |
@@ -180,6 +180,8 @@ pnpm verify:head # 在 **HEAD**（而不是工作区）上跑测试 —— 提�
 | **CSS 类覆盖** | 用了但没定义的类会静默丢样式；定义了没用的类是残留 |
 | **移动端安全** | 从 `main.ts` 走一遍**静态**导入图，看有没有触及依赖 Node 的模块（`simple-git`）。移动端没有 Node，静态导入会让整个插件加载失败 —— 而这个**在桌面上测不出来** |
 | **设置项无人读取** | 声明了、持久化了、设置页也能改，而**功能代码从不读** —— 用户改了它没有任何效果。实测踩过：`sync.enabled`（当年叫「启用笔记同步」，2026-10-02 起是「定时同步」那个开关）就是死开关，关掉之后自动提交照样把笔记推上远端 |
+| **locale 加粗标记** | 界面全程不渲染 Markdown，`**` 会原样显示成星号 |
+| **CSS 注释完整性**（2026-10-10 加） | 注释里出现 `*/` 会**提前结束注释**，剩下的文字被当成下一条规则的选择器，那条规则于是被解析器**整条静默丢弃**。踩到的实例：注释里写 `` `**/` 递归 ``，把 `.obsync-settings .obsync-gitignore { width: 100% }` 吃掉了，症状是**`.gitignore` 代码框全宽失效**。**第 4 项拦不住它** —— 被丢弃的规则在文本上仍然「有定义」 |
 
 两张**带理由**的豁免表在脚本里（`KNOWN_SAFE` / `ALLOWED` / `NOT_A_CLASS` / `EXEMPT`）——
 加条目时必须写清为什么安全，否则它们会变成掩盖问题的地方。
@@ -1285,6 +1287,25 @@ HEAD、已提交文件、**未提交的 `wip.md`** 全都在），他的 `submod
 5. 自查方式：**统一走 `pnpm check`**（`scripts/checks.mjs`，见第三节）。
    早先文档里写的 `npx esbuild styles.css --outfile=/dev/null` **在 Windows 上别用** ——
    `/dev/null` 会被当成真实路径，在仓库里建出一个 `dev/null` 文件（已踩过）。
+6. **注释里绝对不能出现 `*/`**（2026-10-10 踩到，代价是一整条规则静默失效）。
+   写注释时最容易撞上的是**描述通配符**：`` `**/` `` 里就含 `*/`，它会让注释**提前结束**，
+   剩下的文字被 CSS 解析器当成**下一条规则的选择器** —— 于是那条规则连同它的声明块
+   被**整条丢弃**：不报错、不警告，样式就是不生效。
+
+   实际症状：`.obsync-settings .obsync-gitignore { width: 100%; … }` 被吃掉，
+   `.gitignore` 代码框只有 173px 宽（容器 660px），而同一段里的 `min-height`、
+   `white-space`、`padding` 也一起失效 —— 用户报的是「输入框全宽失效了」。
+
+   **为什么难查**：`el.matches('.obsync-settings .obsync-gitignore')` 返回 **true**
+   （DOM 层面选择器是对的），`pnpm check` 第 4 项也照样通过（被丢弃的规则在文本上
+   仍然「有定义」）。判据与「CSS 到底解析出了什么」之间隔着一层，而那层是**真的解析器**。
+
+   所以 `pnpm check` 加了第 8 项：**注释在第一个 `*/` 处结束，此后遇到的 `*/` 即游离**。
+   要表达递归通配就换个说法（「以 `**` 开头的递归匹配」）。
+
+   **量它的办法**：`.probe/settings-preview` 那个预览页能直接量出来（`node eval.mjs`
+   取 `getBoundingClientRect().width` 与 `getComputedStyle().minHeight`）——
+   「样式不生效」这类问题**别靠读 CSS 猜**，量一次就有答案。
 
 ## 四、代码地图
 
@@ -2665,7 +2686,7 @@ Obsidian 把这些 DOM 扩展装在 **`HTMLElement.prototype`** 上（`obsidian.
   新增 35 个用例；`automatics.test.ts` 顺带修了一处**替身不忠实**：假 service 的
   `sync()` 原本声明 `Promise<void>`，而真实实现返回 `SyncOutcome`，消费方读 `.kind`
   会 TypeError 并被当成「同步失败」走进连续失败计数（看起来像功能坏了）。
-- `pnpm check` 七项全过（CSS 类覆盖 193/193）、`pnpm typecheck`、`pnpm lint:review`、
+- `pnpm check` 八项全过（CSS 类覆盖 193/193）、`pnpm typecheck`、`pnpm lint:review`、
   `pnpm test`（90 文件 1915 用例）全绿；`pnpm build:both` 部署到 Plugin-Test 与
   learning-records，三产物 SHA256 与源码一致。
 
@@ -2788,7 +2809,7 @@ Obsidian 把这些 DOM 扩展装在 **`HTMLElement.prototype`** 上（`obsidian.
 - `tests/features/syncService.test.ts` 新增「清理」一组 8 条：回收返回释放量、
   体积读不出来返回 `undefined`（不编 0）、重写后写忽略规则、**不摘索引**、
   **排在队列里**、强制推送、只读动作不排队；
-- `pnpm check` 七项全过（`obsync-backup` 进 `NOT_A_CLASS` —— 它是引用前缀不是 CSS 类）、
+- `pnpm check` 八项全过（`obsync-backup` 进 `NOT_A_CLASS` —— 它是引用前缀不是 CSS 类）、
   `pnpm typecheck`、`pnpm lint:review`、`pnpm test`（92 文件 **1953** 用例）全绿；
 - `pnpm build:both` 部署到 Plugin-Test 与 learning-records，三产物 SHA256 与源码一致。
 
