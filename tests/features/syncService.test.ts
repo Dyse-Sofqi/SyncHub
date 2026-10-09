@@ -1915,3 +1915,55 @@ describe("本地状态文件", () => {
         expect(fake.files.get(".gitignore")).toBe(existing + "\n");
     });
 });
+
+/**
+ * 「文件恢复」核心插件的状态（2026-10-10）。
+ *
+ * 它只决定**要不要多显示一条提示**，所以三种结果都得对：
+ * 关着 → 提示；开着 → 不提示；**读不出来 → 也不提示**（不猜）。
+ */
+describe("文件恢复检测", () => {
+    it("关着时返回 false —— 界面据此提示「高频保护没兜住」", async () => {
+        const fake = createFakeApp({
+            ".obsidian/core-plugins.json": '{"workspaces":true,"file-recovery":false}',
+        });
+        const { service } = makeService(new FakeGit(), fake);
+
+        await expect(service.fileRecoveryEnabled()).resolves.toBe(false);
+    });
+
+    it("开着时返回 true", async () => {
+        const fake = createFakeApp({
+            ".obsidian/core-plugins.json": '{"file-recovery":true}',
+        });
+        const { service } = makeService(new FakeGit(), fake);
+
+        await expect(service.fileRecoveryEnabled()).resolves.toBe(true);
+    });
+
+    it("文件不在时返回 undefined，而不是猜一个 false", async () => {
+        // 猜成 false 会让设置页凭空多出一条「你的文件恢复是关的」——
+        // 而用户可能压根没关，只是这个文件还没被写出来。
+        const { service } = makeService(new FakeGit(), createFakeApp());
+
+        await expect(service.fileRecoveryEnabled()).resolves.toBeUndefined();
+    });
+
+    it("文件坏了也返回 undefined，不让设置页整页崩", async () => {
+        const fake = createFakeApp({ ".obsidian/core-plugins.json": "{ 坏掉的 json" });
+        const { service } = makeService(new FakeGit(), fake);
+
+        await expect(service.fileRecoveryEnabled()).resolves.toBeUndefined();
+    });
+
+    it("跟着 vault.configDir 走，不写死 .obsidian", async () => {
+        // 配置目录可以改名（设置页里就有这个选项），写死的话永远读不到。
+        const fake = createFakeApp({
+            ".obsidian/core-plugins.json": '{"file-recovery":true}',
+        });
+        fake.app.vault.configDir = "我的配置";
+        const { service } = makeService(new FakeGit(), fake);
+
+        await expect(service.fileRecoveryEnabled()).resolves.toBeUndefined();
+    });
+});

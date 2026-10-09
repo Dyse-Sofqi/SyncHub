@@ -399,6 +399,10 @@ describe("normalizeSettings", () => {
         // `installer.tracked.push(...)`、拨一个同步开关，都写进了模块级的
         // DEFAULT_SETTINGS。此后每次 normalizeSettings（重载、读第二遍）都从
         // 一份脏默认值开始，表现为「删掉的条目又回来了」或全新库凭空多出条目。
+        // 先把默认值记下来，再改结果对象 —— 断言比的是「有没有被污染」，
+        // 而不是「默认值恰好是几」。写死数字会让「调默认值」这件事
+        // 变成一条与本用例意图无关的红（2026-10-10 周期默认值 10 → 30 时踩到）。
+        const originalInterval = DEFAULT_SETTINGS.sync.intervalMinutes;
         const first = normalizeSettings({});
         first.installer.tracked.push({
             kind: "theme",
@@ -415,12 +419,12 @@ describe("normalizeSettings", () => {
 
         // 默认值本身没被改动
         expect(DEFAULT_SETTINGS.installer.tracked).toEqual([]);
-        expect(DEFAULT_SETTINGS.sync.intervalMinutes).toBe(10);
+        expect(DEFAULT_SETTINGS.sync.intervalMinutes).toBe(originalInterval);
 
         // 再读一次也看不到上一次的写入
         const second = normalizeSettings({});
         expect(second.installer.tracked).toEqual([]);
-        expect(second.sync.intervalMinutes).toBe(10);
+        expect(second.sync.intervalMinutes).toBe(originalInterval);
     });
 
     it("始终写入当前设置版本号", () => {

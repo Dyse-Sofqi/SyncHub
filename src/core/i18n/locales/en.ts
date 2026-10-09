@@ -231,6 +231,13 @@ export const en = {
                     "automatic pull may overwrite what you have. Consider turning scheduled sync " +
                     "off while editing the same file on multiple devices.",
             ],
+            noteFileRecoveryOff:
+                "Obsidian's File recovery core plugin is turned off. Before shortening the sync " +
+                "interval to guard against data loss, turn it on (Settings -> Core plugins -> " +
+                "File recovery): it snapshots every changed file every 5 minutes by default, " +
+                "keeps them for 7 days, and never touches git. High-frequency recovery is its " +
+                "job — doing it with git only makes your commit count equal your edit count " +
+                "and your history harder to clean up.",
             commitMessage: "Commit message template",
             commitMessageDesc: "Supports {{date}}, {{hostname}}, {{numFiles}} and {{files}}.",
             strategy: "Pull integration strategy",

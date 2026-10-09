@@ -1198,6 +1198,31 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         }
 
         /**
+         * 第三条**只在需要时才出现**：Obsidian 的「文件恢复」核心插件关着的时候
+         * （2026-10-10 加）。
+         *
+         * 它讲的是「高频保护该由谁承担」。git 的恢复粒度是**全库提交**，而高频恢复要的是
+         * **单文件回滚** —— 用提交去满足它，提交数就等于编辑次数，那正是「历史变脏、
+         * 清理变难」的来源。所以用户想把下面的间隔调得很短时，正确的回答不是「调吧」，
+         * 而是「那件事该由文件恢复做」。而它**默认是开的，关掉之后两边就都没兜住**。
+         *
+         * 读盘要 await 而渲染是同步的 —— 先画静态那两条，读到了再补一条
+         * （与 `.gitignore` 那一节的读法一致）。**读不出来时什么都不加**：
+         * 提示的前提是「我们知道它关着」，猜错了就是在编。
+         */
+        void (async () => {
+            const sync = this.obsync.sync;
+            if (!sync) return;
+            try {
+                if ((await sync.service.fileRecoveryEnabled()) === false) {
+                    noteList.createEl("li", { text: t.settings.sync.noteFileRecoveryOff });
+                }
+            } catch (err) {
+                logger.debug("could not read core plugin state", err);
+            }
+        })();
+
+        /**
          * **连接测试的三个前提**：库本身是 git 仓库、远端地址、git 可执行文件路径。
          *
          * 这一页的结构约定（2026-10-04 用户的话）：**「连接测试」之前的每一项都必须是

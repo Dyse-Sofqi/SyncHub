@@ -40,6 +40,7 @@ import type {
     SyncStrategy,
 } from "./types";
 import type { HistorySummary } from "./historyObjects";
+import { corePluginEnabled } from "./corePluginState";
 import { IDLE_ACTIVITY, StatusBar, type StatusBarActivity, type SyncActivity } from "./statusBar";
 
 /**
@@ -967,6 +968,36 @@ export class SyncService {
             files.map((file) => file.path),
             files.filter((file) => file.tracked).map((file) => file.path)
         );
+    }
+
+    /**
+     * Obsidian 的「文件恢复」核心插件现在开着吗？
+     *
+     * ## 为什么要问这个（2026-10-10）
+     *
+     * 「高频保护」和「进 git 的历史」是两条独立的轴：git 的恢复粒度是**全库提交**，
+     * 而高频恢复要的是**单文件回滚** —— 用提交去满足它，每次都得写一个全库提交，
+     * 提交数于是等于编辑次数，这正是「历史变脏、清理变难」的来源。
+     * 而 Obsidian 自带的「文件恢复」默认每 5 分钟给每个改过的文件存一份快照、保留 7 天，
+     * 存在 IndexedDB 里，**完全不碰 git**。
+     *
+     * 所以用户想把间隔调得很短时，正确的回答不是「调吧」，而是「那件事该由它来做」——
+     * 但**它默认是开的，而这个用户关掉了**，于是两边都没兜住。
+     *
+     * 只读 `core-plugins.json`（不写：改它要重启才生效，而且不该由插件动别人的配置）。
+     *
+     * @returns `undefined` 表示**读不出来** —— 界面据此**不提示**（宁可不提示也不猜）。
+     */
+    async fileRecoveryEnabled(): Promise<boolean | undefined> {
+        const adapter = this.deps.app.vault.adapter;
+        const path = normalizePath(`${this.deps.app.vault.configDir}/core-plugins.json`);
+        try {
+            if (!(await adapter.exists(path))) return undefined;
+            return corePluginEnabled(await adapter.read(path), "file-recovery");
+        } catch (err) {
+            logger.debug("could not read core-plugins.json", err);
+            return undefined;
+        }
     }
 
     /**
