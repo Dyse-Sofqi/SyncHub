@@ -11,6 +11,7 @@ import {
     GitNotRepoError,
     GitNetworkError,
     GitTimeoutError,
+    HistoryRewriteBlockedError,
     NoUpstreamError,
     DetachedHeadError,
     PushRejectedError,
@@ -20,11 +21,24 @@ import type {
     FileChange,
     RepoSize,
     RepoStatus,
+    RewriteResult,
     SyncOutcome,
     SyncStrategy,
 } from "./types";
 import { mapStatusChar } from "./gitManager";
 import { parseCountObjects } from "./repoSize";
+import {
+    parseBatchCheck,
+    parseRevListObjects,
+    summarizeHistory,
+    type HistorySummary,
+} from "./historyObjects";
+import {
+    BACKUP_REF_PREFIX,
+    backupRefName,
+    estimateRewriteSeconds,
+    shellQuote,
+} from "./cleanup";
 import type { FileStatusResult, StatusResult } from "simple-git";
 
 /**
@@ -68,6 +82,18 @@ const HEAD_UNBORN_RE =
  * GitHub 冷连接 17~25 秒（见第七节第 19 条）。真正毫无输出的两分钟不可能是正常传输。
  */
 const GIT_BLOCK_TIMEOUT_MS = 120_000;
+
+/**
+ * 长任务（回收、重写历史）的块超时上限。
+ *
+ * 重写历史不按这个值走 —— 它按**预计耗时**算（见 `rewriteHistory`）。
+ * 这个是给 `gc` 用的：大仓库重新打包可能很久，但没有可估的依据，
+ * 所以给一个足够宽的上限，而不是让它落回 2 分钟那个会误杀的默认值。
+ */
+const LONG_TASK_TIMEOUT_MS = 30 * 60_000;
+
+/** filter-branch 的临时目录名（中断后会留下它，下次运行会被它挡住）。 */
+const REWRITE_TEMP_DIR = ".git-rewrite";
 
 /**
  * 每次 `git rm --cached` 最多带多少条路径。
@@ -114,6 +140,18 @@ const GIT_NONINTERACTIVE_ENV = {
      * 不是我们的保证。这一条把它变成明确的约定：合并提交用默认信息，不等人。
      */
     GIT_MERGE_AUTOEDIT: "no",
+    /**
+     * 关掉 `filter-branch` 每次开头打的那段弃用警告（十几行，纯噪音）。
+     *
+     * 我们**知情**：它在 git 官方文档里被标为「弃用、建议换 filter-repo」，
+     * 而 filter-repo 是个需要 Python 的第三方脚本 —— 对一个 Obsidian 插件来说
+     * 不能要求用户装它。代价是慢（实测 3.5 秒/提交），所以界面上会先把预计耗时算给
+     * 用户看（见 `cleanup.ts` 的 `estimateRewriteSeconds`）。
+     *
+     * 留着这段警告的话，它会被 `wrap` 当成错误输出的一部分带进日志，
+     * 排查时反倒要多跳十几行。
+     */
+    FILTER_BRANCH_SQUELCH_WARNING: "1",
 } as const;
 
 /**
@@ -266,10 +304,18 @@ export function createGitInstance(options: {
     gitPath?: string;
     /** `-c key=value`，来自 `withAuth()` 的令牌注入。 */
     config?: string[];
+    /**
+     * 块超时（毫秒）；不给就用 `GIT_BLOCK_TIMEOUT_MS`。
+     *
+     * 只有**按分钟计的长任务**（重写历史）才传别的值 —— 见
+     * `SimpleGitManager.gitForLongTask`。默认那个 2 分钟对同步的每一步都够，
+     * 但会让一个 9 分钟的重写在第 2 分钟被杀掉，而那时它已经改了一半引用。
+     */
+    timeoutMs?: number;
 }): SimpleGit {
     const instanceOptions: Partial<SimpleGitOptions> = {
         baseDir: options.baseDir,
-        timeout: { block: GIT_BLOCK_TIMEOUT_MS },
+        timeout: { block: options.timeoutMs ?? GIT_BLOCK_TIMEOUT_MS },
     };
     if (options.gitPath) instanceOptions.binary = options.gitPath;
     if (options.config && options.config.length > 0) instanceOptions.config = options.config;
@@ -873,7 +919,318 @@ export class SimpleGitManager implements GitManager {
         await this.revalidateAuth();
     }
 
+    // ── 清理：体检 / 回收 / 深度清理 ────────────────────────────────────────
+
+    /**
+     * 体检（只读）：历史里哪些东西占了空间。
+     *
+     * 两条命令**并行**发：它们互不依赖，而 `rev-list --objects --all` 在历史长的库上
+     * 要几秒 —— 串起来等于白等一倍。
+     *
+     * 用 `--batch-all-objects` 而不是「把 sha 喂给 `--batch-check` 的标准输入」：
+     * 后者要求往子进程写 stdin，而本项目的 git 调用统一走 simple-git 的 `raw()`，
+     * 它没有 stdin 通道。代价是这份输出包含不可达对象 —— 由 `summarizeHistory`
+     * 按可达集合取用（见 `historyObjects.ts`）。
+     *
+     * `-c core.quotePath=false` 不能省：不加它中文路径会被转义成八进制串，
+     * 报告里会出现一屏看不懂的东西（同 `diffFile`）。
+     */
+    async historyObjects(): Promise<HistorySummary> {
+        const git = await this.git();
+        const [listing, objects] = await Promise.all([
+            wrap("listing history objects", () =>
+                git.raw(["-c", "core.quotePath=false", "rev-list", "--objects", "--all"])
+            ),
+            wrap("reading object sizes", () =>
+                git.raw(["cat-file", "--batch-all-objects", "--batch-check"])
+            ),
+        ]);
+        return summarizeHistory(parseRevListObjects(listing), parseBatchCheck(objects));
+    }
+
+    /**
+     * 当前分支的提交数（用来估算重写耗时）。
+     *
+     * HEAD 还没出生（全新仓库、一次都没提交过）时 `rev-list` 会失败 ——
+     * 那是**0 个提交**，不是错误：调用方据此给出「没东西可清」而不是一句技术性报错。
+     * 但 git 跑不起来、目录不是仓库这类错误照常往上抛，否则用户拿到的是
+     * 「0 个提交」这种看起来正常、实际完全不对的结论。
+     */
+    async countCommits(): Promise<number> {
+        const git = await this.git();
+        try {
+            const output = await wrap("counting commits", () =>
+                git.raw(["rev-list", "--count", "HEAD"])
+            );
+            const count = Number.parseInt(output.trim(), 10);
+            return Number.isFinite(count) ? count : 0;
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (/unknown revision|bad revision|does not have any commits/i.test(message)) return 0;
+            throw err;
+        }
+    }
+
+    /** 回收：`git gc --prune=now`。只清不可达对象，不碰任何引用（见接口注释）。 */
+    async gc(): Promise<void> {
+        const git = await this.gitForLongTask(LONG_TASK_TIMEOUT_MS);
+        await wrap("garbage collecting", () => git.raw(["gc", "--prune=now"]));
+    }
+
+    /**
+     * 深度清理：把指定路径从全部历史里剔除。**本插件唯一不可逆的动作**，
+     * 完整的设计理由见 `GitManager.rewriteHistory` 的接口注释。
+     *
+     * 执行顺序上有三处是刻意的：
+     *
+     * 1. **备份引用在动手之前建**。万一重写中途被强杀（用户关掉 Obsidian、
+     *    系统休眠），退路已经在 refs 里 —— 事后补建是补不出来的，
+     *    那时 `previousHead` 已经从所有引用上消失了。
+     * 2. **超时按预计耗时放宽**。默认的 2 分钟块超时会让一个 9 分钟的重写
+     *    在第 2 分钟被杀掉，而那时它已经改了一半引用 —— 这种「报错与后果对不上」
+     *    的失败最难收拾。宁可等。
+     * 3. **重写的引用集合是 `--branches --tags --remotes` 而不是 `--all`**。
+     *    `--all` 会把 `refs/obsync-backup/*` 也一起改写 —— 备份于是**安静地**
+     *    指向新历史，等于没有备份。2026-10-09 在合成仓上实测确认过这个差别。
+     */
+    async rewriteHistory(paths: string[]): Promise<RewriteResult> {
+        if (paths.length === 0) {
+            throw new HistoryRewriteBlockedError("rewrite history: no paths given", "no-paths");
+        }
+
+        const git = await this.git();
+
+        // filter-branch 自己会拒绝脏工作区（`Cannot rewrite branches: Your index
+        // contains uncommitted changes.`），但它的原话是一句英文技术描述 ——
+        // 用户不知道要先去提交。所以这里先拦，抛一个带类型码的错误。
+        //
+        // 只看 staged / unstaged：**未跟踪文件不拦** —— 库里有未跟踪文件是常态
+        // （笔记草稿、临时文件），filter-branch 也不在乎它们。
+        const status = await this.status();
+        if (status.staged.length > 0 || status.unstaged.length > 0) {
+            throw new HistoryRewriteBlockedError(
+                "rewrite history: uncommitted changes in the index or working tree",
+                "dirty-tree"
+            );
+        }
+
+        const commitsBefore = await this.countCommits();
+        if (commitsBefore === 0) {
+            throw new HistoryRewriteBlockedError("rewrite history: no commits yet", "no-commits");
+        }
+
+        // 上一次被中断留下的临时目录会让 filter-branch 直接退出
+        // （`fatal: .git-rewrite already exists, please remove it`），
+        // 而用户看到的是「点了没反应」。它只可能是我们自己留下的，清掉。
+        await this.removeStaleRewriteDir();
+
+        const previousHead = await this.headHash();
+        const backupRef = backupRefName(new Date());
+        await wrap("creating backup ref", () =>
+            git.raw(["update-ref", backupRef, previousHead])
+        );
+
+        const timeoutMs = Math.max(
+            GIT_BLOCK_TIMEOUT_MS,
+            estimateRewriteSeconds(commitsBefore) * 1000 * 3
+        );
+        const longGit = await this.gitForLongTask(timeoutMs);
+
+        // 路径来自用户勾选，**不是可信输入**：`--index-filter` 的值是一段交给 `sh`
+        // 跑的脚本，空格、`$`、反引号都会被解释。`shellQuote` 负责这件事。
+        const filter = `git rm -r --cached --ignore-unmatch -- ${paths
+            .map(shellQuote)
+            .join(" ")}`;
+
+        try {
+            await wrap("rewriting history", () =>
+                longGit.raw([
+                    "filter-branch",
+                    "--index-filter",
+                    filter,
+                    "--prune-empty",
+                    "--",
+                    "--branches",
+                    "--tags",
+                    "--remotes",
+                ])
+            );
+        } catch (err) {
+            // 失败也要让日志里留下备份引用的名字 —— 用户此刻最需要知道的是「退路在哪」。
+            logger.error("history rewrite failed", { backupRef, paths, err });
+            throw err;
+        }
+
+        return {
+            previousHead,
+            head: await this.headHash(),
+            backupRef,
+            commitsBefore,
+            commitsAfter: await this.countCommits(),
+        };
+    }
+
+    /** 本插件建的历史备份引用（新的在前）。见 `cleanup.ts` 的 `backupRefName`。 */
+    async listBackups(): Promise<string[]> {
+        const refs = await this.listRefs(BACKUP_REF_PREFIX);
+        // 名字里的时间戳可排序（`20261009-231500`），倒过来就是新的在前。
+        return refs.sort((a, b) => b.localeCompare(a));
+    }
+
+    /**
+     * 丢弃备份并回收空间 —— 重写的第二步，也是真正释放空间的那一步。
+     *
+     * 为什么必须分两步（而不是重写完顺手 gc 掉）：重写之后旧对象仍然被
+     * 备份引用与 `refs/original/*` 拉着，**体积一点都不会降**。这是刻意的 ——
+     * 先让用户确认库还能正常用，再丢退路。把两步合成一步的话，用户在
+     * 「库看起来坏了」的同时也失去了唯一的回退点。
+     */
+    async discardBackups(): Promise<void> {
+        const git = await this.git();
+
+        for (const ref of await this.listBackups()) {
+            await wrap("deleting backup ref", () => git.raw(["update-ref", "-d", ref]));
+        }
+
+        // filter-branch 自己留下的 `refs/original/*` 同样拉着全部旧对象 ——
+        // 不删它空间永远释放不出来。这正是「跑完重写、体积一点没变」的原因。
+        for (const ref of await this.listRefs("refs/original/")) {
+            await wrap("deleting original ref", () => git.raw(["update-ref", "-d", ref]));
+        }
+
+        // 过期 reflog：旧提交在被「最近引用过」期间不算不可达，不清它 gc 也收不走。
+        // **这一步会清掉用户的 reflog**（那是他撤销误操作的凭据）—— 所以它属于
+        // 「丢弃备份」这个明确的动作，不能藏在「回收」里。
+        await wrap("expiring reflog", () =>
+            git.raw(["reflog", "expire", "--expire=now", "--all"])
+        );
+
+        const longGit = await this.gitForLongTask(LONG_TASK_TIMEOUT_MS);
+        await wrap("garbage collecting", () => longGit.raw(["gc", "--prune=now"]));
+    }
+
+    /**
+     * 强制推送 —— 重写历史之后本地与远端必然分叉，普通 `push` 会被拒绝。
+     *
+     * 为什么是 `--force` 而不是更安全的 `--force-with-lease`：lease 比对的是
+     * 本地记录的远端值，而重写时 `refs/remotes/*` 也被一起改写了 ——
+     * 于是那个值已经是新的，lease 永远不会拒绝，**看起来安全实际没有保护**。
+     * 与其留一个假的保护，不如用 `--force` 并在界面上把话说清楚。
+     */
+    async forcePush(): Promise<SyncOutcome> {
+        const git = await this.git();
+        const status = await wrap("reading status before push", () => git.status());
+        if (!status.current) {
+            throw new DetachedHeadError("force push: HEAD is detached");
+        }
+        // `--progress` 同 `push()`：子进程的 stderr 是管道，不加它 git 不输出传输进度，
+        // 而无输出超时全靠「有没有输出」判断死活。
+        await wrap("force pushing", () =>
+            git.push(["--progress", "--force", "-u", "origin", status.current!])
+        );
+        return { kind: "pushed" };
+    }
+
     // ── 内部 ──────────────────────────────────────────────────────────────
+
+    /**
+     * 为「按分钟计的长任务」造一个实例：与 `git()` 同源（同样的鉴权与非交互环境），
+     * 但**块超时由调用方给**。
+     *
+     * 不缓存实例：这些动作一次跑一个，缓存只会带来「拿到一个超时不对的实例」的风险。
+     */
+    private async gitForLongTask(timeoutMs: number): Promise<SimpleGit> {
+        let remoteUrl: string | undefined;
+        try {
+            remoteUrl = await this.probeRemoteUrl(REMOTE_PROBE_TTL_MS);
+        } catch {
+            remoteUrl = undefined;
+        }
+        const credential = remoteUrl
+            ? credentialForRemote(remoteUrl, this.secretStore!)
+            : undefined;
+        return createGitInstance({
+            baseDir: this.baseDir,
+            gitPath: this.gitPath,
+            config: withAuth({}, credential).config,
+            timeoutMs,
+        });
+    }
+
+    /** 当前 HEAD 的完整哈希。 */
+    private async headHash(): Promise<string> {
+        const git = await this.git();
+        return (await wrap("reading HEAD", () => git.raw(["rev-parse", "HEAD"]))).trim();
+    }
+
+    /** 某个前缀下的全部引用名（`for-each-ref`）。不是仓库时返回空数组。 */
+    private async listRefs(prefix: string): Promise<string[]> {
+        const git = await this.git();
+        try {
+            const output = await wrap("listing refs", () =>
+                git.raw(["for-each-ref", "--format=%(refname)", prefix])
+            );
+            return output
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0);
+        } catch (err) {
+            if (err instanceof GitNotRepoError) return [];
+            throw mapError(err, "listing refs");
+        }
+    }
+
+    /**
+     * 清掉上一次中断留下的 `.git-rewrite`。
+     *
+     * 两个候选位置都看：标准位置是 `$GIT_DIR/.git-rewrite`，但如果上一次运行时
+     * `GIT_DIR` 被显式设成了仓库根（终端里带变量启动 Obsidian 就会这样），
+     * 临时目录会落在**库根**。实测两种都遇到过，所以两个都清 —— 代价是两次 stat。
+     *
+     * 拿不到文件系统（非桌面端）时安静跳过：那种环境里同步模块本来就不加载，
+     * 真走到了也让 filter-branch 自己报错，比在这里抛一个看不懂的异常好。
+     */
+    private async removeStaleRewriteDir(): Promise<void> {
+        // 用 `require` 而不是静态 import：审核规则 `obsidianmd/no-nodejs-modules` 禁止
+        // 静态导入 Node 内置模块（移动端没有 Node，静态导入会让整个插件在移动端加载失败）。
+        // 同步模块只在桌面端动态加载，所以这里是安全的 —— 与 `commitMessage.ts` 同一写法。
+        let fs: typeof import("node:fs");
+        let path: typeof import("node:path");
+        try {
+            fs = require("node:fs") as typeof import("node:fs");
+            path = require("node:path") as typeof import("node:path");
+        } catch (err) {
+            logger.debug("no filesystem access, skipping rewrite temp cleanup", err);
+            return;
+        }
+
+        const git = await this.git();
+        let gitDir: string;
+        try {
+            gitDir = (
+                await wrap("locating git directory", () => git.raw(["rev-parse", "--git-dir"]))
+            ).trim();
+        } catch (err) {
+            logger.debug("could not locate git dir for rewrite cleanup", err);
+            return;
+        }
+
+        const absoluteGitDir = path.isAbsolute(gitDir) ? gitDir : path.join(this.baseDir, gitDir);
+        const candidates = [
+            path.join(absoluteGitDir, REWRITE_TEMP_DIR),
+            path.join(this.baseDir, REWRITE_TEMP_DIR),
+        ];
+
+        for (const candidate of candidates) {
+            if (!fs.existsSync(candidate)) continue;
+            try {
+                fs.rmSync(candidate, { recursive: true, force: true });
+                logger.debug("removed stale filter-branch temp dir", candidate);
+            } catch (err) {
+                logger.warn("could not remove stale filter-branch temp dir", candidate, err);
+            }
+        }
+    }
 
     private async conflictedFiles(git: SimpleGit): Promise<string[]> {
         try {

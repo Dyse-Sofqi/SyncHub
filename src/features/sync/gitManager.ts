@@ -1,4 +1,5 @@
-import type { CommitInfo, FileChange, FileChangeStatus, RepoSize, RepoStatus, SyncOutcome, SyncStrategy } from "./types";
+import type { CommitInfo, FileChange, FileChangeStatus, RepoSize, RepoStatus, RewriteResult, SyncOutcome, SyncStrategy } from "./types";
+import type { HistorySummary } from "./historyObjects";
 
 /**
  * Git 操作的抽象接口。
@@ -144,6 +145,84 @@ export interface GitManager {
      * @throws 没有配置远端时抛 `NoUpstreamError`。
      */
     testRemoteAccess(): Promise<number>;
+
+    // ── 清理：体检 / 回收 / 深度清理 ────────────────────────────────────────
+    //
+    // 三层的能力与风险递增：体检只是看，回收只动不可达对象，深度清理**改写全部提交**。
+    // 三者分开成三个方法而不是合成一个「清理」，就是为了让「风险」这件事在
+    // 类型层面也看得出来 —— 调用方不可能不小心把重写当成体检跑掉。
+
+    /**
+     * **体检**：历史里哪些东西占了空间（只读）。
+     *
+     * 不写引用、不动索引、不产生任何文件。它是三层里唯一可以随手点的一个 ——
+     * 也正是这个原因，它必须足够快且绝不失败：用户点它是为了**做决定**，
+     * 一个会报错的体检等于没有体检。
+     */
+    historyObjects(): Promise<HistorySummary>;
+
+    /** 当前分支的提交数（`git rev-list --count HEAD`）。用来估算重写要多久。 */
+    countCommits(): Promise<number>;
+
+    /**
+     * **回收**：`git gc --prune=now`。
+     *
+     * 只清**不可达**对象（悬空的、被删分支留下的），不碰任何引用、不改任何提交 ——
+     * 所以它是安全的。代价是**常常一点也回收不到**：大文件基本都躺在可达历史里，
+     * 实测一个 452 MB 的库跑完 gc 还是 452 MB。这不是 bug，是 git 的语义，
+     * 界面上要说清这一点，否则用户会以为功能坏了。
+     */
+    gc(): Promise<void>;
+
+    /**
+     * **深度清理**：把指定路径从**全部历史**里剔除 —— 重写每一个提交。
+     *
+     * ## 这是本插件里唯一不可逆的动作
+     *
+     * 它改变所有提交的哈希，因此：
+     * - 远端会与本地分叉，**必须强制推送**，其他设备要重新 clone；
+     * - 已经推出去的旧历史在别人的克隆里仍然存在，**这里清不掉**。
+     *
+     * ## 实现必须做到的四件事
+     *
+     * 1. **先建备份引用**（`refs/obsync-backup/<时间戳>` → 重写前的 HEAD），
+     *    返回结果里带上它。没有退路的重写不该存在。
+     * 2. **重写的引用集合是 `--branches --tags --remotes`，不是 `--all`** ——
+     *    `--all` 会把备份引用也一起改写，于是备份**安静地**指向新历史（等于没有）。
+     * 3. **清掉上次中断留下的 `.git-rewrite`**：filter-branch 见到它会直接
+     *    `fatal: .git-rewrite already exists` 退出，症状是「点了没反应」。
+     * 4. **工作区不干净时抛 `HistoryRewriteBlockedError("dirty-tree")`** ——
+     *    filter-branch 自己会拒绝，但那时错误消息是一句英文技术描述，
+     *    用户不知道要先去提交。
+     *
+     * 跑完之后旧对象仍然活着（备份引用与 `refs/original` 拉着它们），
+     * 所以**空间不会立刻释放** —— 那要等用户确认库没问题之后调用 `discardBackups`。
+     * 这是刻意的：先确认能用，再丢退路。
+     */
+    rewriteHistory(paths: string[]): Promise<RewriteResult>;
+
+    /** 列出本插件建的历史备份引用（`refs/obsync-backup/*`），新的在前。 */
+    listBackups(): Promise<string[]>;
+
+    /**
+     * **丢弃备份并回收空间**：删掉备份引用与 filter-branch 留下的 `refs/original/*`，
+     * 过期全部 reflog，再 `gc --prune=now`。
+     *
+     * 这是重写的**第二步**，也是真正释放空间的那一步（第一步跑完空间不会变小，
+     * 因为备份还拉着旧对象）。**不可逆**：调用之后没有任何办法回到重写前的历史。
+     */
+    discardBackups(): Promise<void>;
+
+    /**
+     * 强制推送。
+     *
+     * 重写历史之后本地与远端**必然分叉**，普通的 `push` 会被拒绝
+     * （`PushRejectedError`）。这里用 `--force`：用 `--force-with-lease` 是没用的 ——
+     * 重写时 `refs/remotes/*` 也被一起改写了，lease 比对的是那个新值，永远不会拒绝。
+     *
+     * 调用方必须先让用户明确知道「这会覆盖远端的全部历史」。
+     */
+    forcePush(): Promise<SyncOutcome>;
 }
 
 /** simple-git 的状态字符 → 我们的领域类型。 */

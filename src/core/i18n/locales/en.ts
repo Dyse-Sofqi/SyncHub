@@ -324,6 +324,23 @@ export const en = {
                 name: "Ignore plugin folder",
                 desc: "Also add the whole plugin folder to the recommended rules. Plugins are the single largest source of repository bloat, but ignoring them means a fresh clone on another device will not have them installed.",
             },
+            cleanupHeading: "Cleanup",
+            cleanup: {
+                checkName: "Inspect repository history",
+                checkDesc:
+                    "See what actually takes up the space in history, grouped by directory. Read-only. Look here first — in a 460 MB repository the notes themselves are often only a few dozen MB.",
+                checkAction: "Inspect",
+                gcName: "Reclaim space",
+                gcDesc:
+                    "Drops unreachable objects (dangling ones, leftovers from deleted branches). Safe, but it often reclaims nothing — large files usually sit in reachable history, and only a rewrite can remove those.",
+                gcAction: "Reclaim",
+                discardName: "Discard backups and reclaim",
+                discardDesc:
+                    "A rewrite leaves a backup behind — that is your only way back to the old history. Discarding it and reclaiming is what actually deletes the old objects and frees the space. This step cannot be undone.",
+                discardDescNone:
+                    "No backups right now — they only exist after you have run a deep clean.",
+                discardAction: "Discard",
+            },
             gitignoreOpen: "Open in editor",
             gitignoreSavedNotice: "Saved .gitignore.",
             gitignoreSaveFailed:
@@ -404,7 +421,7 @@ export const en = {
                     warningHistory:
                         "Images already written into history do not disappear: git simply stops " +
                         "tracking them, the old objects stay in .git, and the repository does not get " +
-                        "smaller (that would need rewriting history, which this plugin does not do).",
+                        "smaller (that needs a deep clean under Cleanup in the settings).",
                     cancel: "Cancel",
                     confirm: "Continue",
                 },
@@ -1055,7 +1072,7 @@ export const en = {
                 warningUntrack:
                     "Untrack and ignore: it loses version history (the local file stays), and it will not travel to your other devices.",
                 warningHistory:
-                    "Note: copies already in history do not disappear, so the repository size will not shrink — that needs a history rewrite, which this plugin does not do.",
+                    "Note: copies already in history do not disappear, so the repository size will not shrink — that needs a deep clean under Cleanup in the settings.",
                 cancel: "Cancel",
                 untrack: "Untrack and ignore",
                 commitAnyway: "Commit anyway",
@@ -1070,6 +1087,71 @@ export const en = {
              */
             untracked: (files: number, rules: number) =>
                 `Untracked ${files} file(s) (${rules} ignore rule(s) added). Local files are kept; copies already in history remain.`,
+        },
+        cleanup: {
+            /** Shown when a precondition blocks the rewrite (see `RewriteBlockedReason`). */
+            blocked: {
+                "dirty-tree":
+                    "There are uncommitted changes. Commit or discard them first — git refuses to rewrite history on a dirty working tree.",
+                "no-commits": "This repository has no commits yet, so there is no history to clean.",
+                "no-paths": "No paths were selected.",
+            },
+            gcFreed: (size: string) => `Reclaimed ${size}.`,
+            gcNothing:
+                "Nothing to reclaim — the large files sit in reachable history, and only a deep clean can remove those.",
+            gcUnknown: "Reclaim finished, but the size could not be read, so the freed amount is unknown.",
+            discardFreed: (size: string) =>
+                `Backups discarded, ${size} freed. The previous history is gone for good.`,
+            discardUnknown:
+                "Backups discarded, but the size could not be read, so the freed amount is unknown.",
+            pushDone: "Force-pushed to the remote.",
+            report: {
+                title: "Repository size inspection",
+                loading: "Analysing history…",
+                summary: (size: string, objects: number, commits: number) =>
+                    `${size} of history objects (${objects} objects, ${commits} commits).`,
+                note: "These are raw, uncompressed object sizes, so they are larger than what .git actually takes on disk.",
+                dirsHeading: "Biggest directories",
+                dirMeta: (size: string, objects: number) => `${size} · ${objects} objects`,
+                rootLabel: "(files at the vault root)",
+                rootNote: "Files at the vault root cannot be selected — removing them would wipe the whole vault.",
+                largestHeading: "Largest single objects",
+                empty: "No history objects to analyse.",
+                toConfirm: "Rewrite history",
+                cancel: "Cancel",
+            },
+            confirm: {
+                title: "Confirm the history rewrite",
+                pathsHeading: "These paths will be removed from all of history:",
+                estimate: (commits: number, minutes: number) =>
+                    `This repository has ${commits} commits; the rewrite should take about ${minutes} minute(s) — please do not close Obsidian while it runs.`,
+                warningHeading: "What this changes:",
+                warningHashes:
+                    "Every commit hash changes. The remote will diverge from your local history, so a force push is required, and other devices must clone again.",
+                warningRemote:
+                    "Old history already pushed to the remote still exists in other people's clones — this cannot remove that.",
+                warningBackup:
+                    "A backup ref is created first, so you can still go back; but once that backup is discarded, there is no way back.",
+                back: "Back",
+                go: "Rewrite",
+            },
+            running: {
+                title: "Rewriting history",
+                text: "Every commit is processed one at a time, so this is slow by nature. Please do not close Obsidian.",
+            },
+            result: {
+                title: "History rewritten",
+                summary: (before: number, after: number) => `Commits ${before} → ${after}.`,
+                backup: (ref: string) =>
+                    `A backup is kept at ${ref}. Do not discard it until you have confirmed the vault is fine.`,
+                noShrink:
+                    "The size will not shrink yet — the backup still holds the old objects. Once you are happy, use \u201cDiscard backups and reclaim\u201d in the Cleanup section.",
+                ignored: (count: number) =>
+                    `${count} ignore rule(s) were added to .gitignore — without them those files would come straight back on the next commit.`,
+                pushHint: "The remote has now diverged from your local history, so a force push is needed.",
+                push: "Force push",
+                done: "Done",
+            },
         },
         noRemote: "No remote repository configured. Set the remote URL in settings.",
         conflictDetected: (count: number) =>

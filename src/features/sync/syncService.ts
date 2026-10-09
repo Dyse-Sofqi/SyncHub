@@ -33,9 +33,11 @@ import type {
     DiagnosticCheck,
     DiagnosticsReport,
     RepoStatus,
+    RewriteResult,
     SyncOutcome,
     SyncStrategy,
 } from "./types";
+import type { HistorySummary } from "./historyObjects";
 import { IDLE_ACTIVITY, StatusBar, type StatusBarActivity, type SyncActivity } from "./statusBar";
 
 /**
@@ -702,10 +704,20 @@ export class SyncService {
      * 依据，改完之后面板上的列表**应该**跟着变（否则用户会以为没生效）。
      */
     async writeGitignore(content: string): Promise<void> {
-        await this.enqueue(async () => {
-            await this.deps.app.vault.adapter.write(normalizePath(".gitignore"), content);
-            await this.refresh();
-        });
+        await this.enqueue(() => this.writeGitignoreNow(content));
+    }
+
+    /**
+     * `writeGitignore` 的**无锁**版本。
+     *
+     * 拆出来是因为「深度清理」要在**自己的锁里**写忽略规则（重写完立刻写，
+     * 否则那几百毫秒里排队的 `commitAll` 会把刚清掉的文件又加回来）。
+     * 在锁里调 `writeGitignore` 就是**自己等自己** —— 队列永远不往前走，
+     * 而症状是「点了深度清理之后界面卡住不动」（2026-10-09 实测踩到）。
+     */
+    private async writeGitignoreNow(content: string): Promise<void> {
+        await this.deps.app.vault.adapter.write(normalizePath(".gitignore"), content);
+        await this.refresh();
     }
 
     // ── 差异（仓库同步面板 / 命令面板） ──────────────────────────────────
@@ -904,14 +916,27 @@ export class SyncService {
      */
     async ignorePaths(paths: string[], trackedPaths: string[]): Promise<number> {
         if (paths.length === 0) return 0;
+        const added = await this.writeIgnoreRules(paths);
+        if (trackedPaths.length > 0) await this.untrackPaths(trackedPaths);
+        return added;
+    }
+
+    /**
+     * 把若干路径写进 `.gitignore`，返回新增的规则数（幂等：已有的不重复加）。
+     *
+     * `locked` 为假时走无锁写入 —— 只给「已经在队列里」的调用方用（见
+     * `rewriteHistory`）。默认走 `writeGitignore`（自己进队列），
+     * 因为 `ignorePaths` 的常规调用方（面板、大文件守卫）不在锁里。
+     */
+    private async writeIgnoreRules(paths: string[], locked = true): Promise<number> {
         const current = (await this.readGitignore()) ?? "";
         const merged = mergeRuleLines(
             current,
             paths.map((path) => ignoreRuleFor(path))
         );
-        if (merged.added.length > 0) await this.writeGitignore(merged.content);
-
-        if (trackedPaths.length > 0) await this.untrackPaths(trackedPaths);
+        if (merged.added.length === 0) return 0;
+        if (locked) await this.writeGitignore(merged.content);
+        else await this.writeGitignoreNow(merged.content);
         return merged.added.length;
     }
 
@@ -956,6 +981,103 @@ export class SyncService {
         const merged = mergeRecommendedRules(current, rules);
         if (merged.added.length > 0) await this.writeGitignore(merged.content);
         return merged.added;
+    }
+
+    // ── 清理：体检 / 回收 / 深度清理 ────────────────────────────────────────
+
+    /**
+     * 体检（只读）。
+     *
+     * **不进 `enqueue`**：它不写任何东西，排队只会让用户点一下之后干等前面的同步跑完。
+     * 三个清理动作里只有它是可以随手点的，这一点必须在实现里也成立。
+     */
+    async historySummary(): Promise<HistorySummary> {
+        return this.git.historyObjects();
+    }
+
+    /** 当前分支的提交数（估算重写耗时用）。只读，同样不排队。 */
+    async commitCount(): Promise<number> {
+        return this.git.countCommits();
+    }
+
+    /** 本插件建的历史备份引用（新的在前）。只读。 */
+    async listBackups(): Promise<string[]> {
+        return this.git.listBackups();
+    }
+
+    /**
+     * 回收空间（`git gc --prune=now`），返回释放的字节数。
+     *
+     * 返回 `undefined` 表示**体积读不出来**（`count-objects` 的输出认不出）——
+     * 那种情况下宁可说「读不到」也不编一个 0，因为 0 在这里是有含义的结论
+     * （「没有可回收的对象」），两者完全不同。
+     */
+    async collectGarbage(): Promise<number | undefined> {
+        return this.enqueue(async () => {
+            const before = await this.repoBytes();
+            await this.git.gc();
+            const after = await this.repoBytes();
+            if (before === undefined || after === undefined) return undefined;
+            return Math.max(0, before - after);
+        });
+    }
+
+    /**
+     * 丢弃备份并回收，返回释放的字节数（含义同上）。
+     *
+     * **不可逆**：调用之后没有任何办法回到重写前的历史。界面必须把这句话说出来，
+     * 而不是只给一个按钮。
+     */
+    async discardBackups(): Promise<number | undefined> {
+        return this.enqueue(async () => {
+            const before = await this.repoBytes();
+            await this.git.discardBackups();
+            const after = await this.repoBytes();
+            if (before === undefined || after === undefined) return undefined;
+            return Math.max(0, before - after);
+        });
+    }
+
+    /**
+     * 深度清理：把路径从全部历史里剔除。
+     *
+     * ## 为什么重写之后必须顺手写忽略规则
+     *
+     * 重写只把那些路径从**历史**里拿掉，工作区里的文件一个都没动 —— 于是它们变成
+     * 未跟踪文件，下一次 `git add -A` 会原样加回来。用户看到的是「清理完又自己长回来了」，
+     * 而根因是「历史清了、忽略没加」。这两件事本来就是一件：清历史的目的是让它
+     * **以后也别进来**。
+     *
+     * 走 `ignorePaths(paths, [])` 而不是 `untrackAndIgnore`：这些路径此刻已经不在索引里了
+     * （刚被重写掉），而 `git rm --cached` 对不存在的索引项会直接报错 —— 见 `ignorePaths`。
+     *
+     * 整个过程进 `enqueue`：重写要跑几分钟，这期间任何同步动作都必须排队等着，
+     * 否则会有另一个 git 进程在历史被改写的中途去读写引用。
+     */
+    async rewriteHistory(
+        paths: string[]
+    ): Promise<{ result: RewriteResult; ignoredRules: number }> {
+        return this.enqueue(async () => {
+            const result = await this.git.rewriteHistory(paths);
+            // 走无锁写入：我们此刻**就在队列里**，再进一次队列就是自己等自己。
+            const ignoredRules = await this.writeIgnoreRules(paths, false);
+            return { result, ignoredRules };
+        });
+    }
+
+    /** 强制推送（重写之后本地与远端必然分叉，普通 push 会被拒绝）。 */
+    async forcePush(): Promise<SyncOutcome> {
+        return this.enqueue(() => this.withActivity("pushing", () => this.git.forcePush()));
+    }
+
+    /** 仓库体积（字节）；读不出来时返回 undefined（见 `collectGarbage`）。 */
+    private async repoBytes(): Promise<number | undefined> {
+        try {
+            return (await this.git.repoSize()).bytes;
+        } catch (err) {
+            logger.debug("repository size unavailable", err);
+            return undefined;
+        }
     }
 
     /**

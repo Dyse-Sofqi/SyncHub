@@ -109,6 +109,37 @@ export class GitTimeoutError extends ObsyncError {}
 export class GitNetworkError extends ObsyncError {}
 
 /**
+ * 重写历史被**前置条件**拦下 —— 不是「失败了」，是「还没到能动手的时候」。
+ *
+ * ## 为什么单独一个类型（而不是复用普通失败）
+ *
+ * 这三类的**应对方式**与「git 跑挂了」完全不同：
+ *
+ * - `dirty-tree` —— 工作区有未提交改动，filter-branch 会直接拒绝
+ *   （`Cannot rewrite branches: Your index contains uncommitted changes.`）。
+ *   用户该做的是**先提交或撤销**，而不是「重试一次」。
+ * - `no-commits` —— 这个仓库还没有任何提交，本来就没东西可清。
+ * - `no-paths` —— 一个路径都没选中。
+ *
+ * 混进通用提示的话，用户拿到的是一句「重写历史失败」：它不含任何可行动信息，
+ * 而下一步该做什么恰恰是他唯一需要知道的。**错误类型用错比没有类型更糟。**
+ *
+ * `reason` 是**类型码**而不是文案（与 `DiagnosticCheck.id` 同一套约定）：
+ * 逻辑层产出码，展示层按码取 locale 文案。
+ */
+export type RewriteBlockedReason = "dirty-tree" | "no-commits" | "no-paths";
+
+export class HistoryRewriteBlockedError extends ObsyncError {
+    constructor(
+        message: string,
+        readonly reason: RewriteBlockedReason,
+        options?: { cause?: unknown }
+    ) {
+        super(message, options);
+    }
+}
+
+/**
  * 把 git 层的错误翻译成用户可读文案。
  *
  * 在 `createSyncModule` 里注册进 `Notifier`，这样任何调用点
@@ -129,5 +160,8 @@ export function describeSyncError(err: unknown, t: LocaleStrings): string | unde
     if (err instanceof GitTimeoutError) return t.sync.gitTimeout;
     if (err instanceof GitNetworkError) return t.sync.gitNetworkFailed;
     if (err instanceof ConflictError) return t.sync.conflictDetected(err.files.length);
+    if (err instanceof HistoryRewriteBlockedError) {
+        return t.sync.cleanup.blocked[err.reason];
+    }
     return undefined;
 }

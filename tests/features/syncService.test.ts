@@ -8,7 +8,8 @@ import { StatusBar } from "../../src/features/sync/statusBar";
 import { SecretStore } from "../../src/core/secretStore";
 import type { GitManager } from "../../src/features/sync/gitManager";
 import { ConflictError, GitAuthError, PushRejectedError } from "../../src/features/sync/errors";
-import type { CommitInfo, FileChange, RepoSize, RepoStatus, SyncOutcome, SyncStrategy } from "../../src/features/sync/types";
+import type { CommitInfo, FileChange, RepoSize, RepoStatus, RewriteResult, SyncOutcome, SyncStrategy } from "../../src/features/sync/types";
+import type { HistorySummary } from "../../src/features/sync/historyObjects";
 import { createFakeApp, type FakeApp } from "../helpers/fakeApp";
 
 /**
@@ -210,6 +211,81 @@ class FakeGit implements GitManager {
             throw new Error("Could not resolve host: gitee.com");
         }
         return this.remoteRefCount;
+    }
+
+    // ── 清理（体检 / 回收 / 深度清理） ──────────────────────────────────────
+    //
+    // 替身按**真实形状**返回：`rewriteHistory` 返回带 previousHead/backupRef 的结果
+    // 而不是 void —— 消费方要读 `result.backupRef` 才能告诉用户「退路在哪」，
+    // 形状不对的话 TypeError 会被当成「清理失败」（这正是 `automatics.test.ts`
+    // 那个假 service 踩过的坑）。
+
+    /** 体检结果（默认空，用例按需设）。 */
+    historySummary: HistorySummary = {
+        totalBytes: 0,
+        objectCount: 0,
+        directories: [],
+        largest: [],
+    };
+    historyError: Error | undefined;
+    /** 提交数（估算重写耗时用）。 */
+    commits = 10;
+    /** 历史备份引用（新的在前）。 */
+    backups: string[] = [];
+    /** `gc()` 每次跑会把这几个数字按顺序往下减 —— 用来验「释放了多少」。 */
+    gcBytesDrop = 0;
+    /** 重写记录：收到的路径。 */
+    rewritten: string[] = [];
+    /** 重写时的备份引用名（结果里要带出去）。 */
+    rewriteBackupRef = "refs/obsync-backup/20261009-231500";
+    rewriteError: Error | undefined;
+
+    async historyObjects(): Promise<HistorySummary> {
+        this.calls.push("historyObjects");
+        if (this.historyError) throw this.historyError;
+        return this.historySummary;
+    }
+
+    async countCommits(): Promise<number> {
+        this.calls.push("countCommits");
+        return this.commits;
+    }
+
+    async gc(): Promise<void> {
+        this.calls.push("gc");
+        // 真实 gc 会**减小**仓库体积；不模拟这一点的话「释放了多少」永远是 0，
+        // 而那正好是这条链路唯一要验的数字。
+        this.sizeBytes = Math.max(0, this.sizeBytes - this.gcBytesDrop);
+    }
+
+    async rewriteHistory(paths: string[]): Promise<RewriteResult> {
+        this.calls.push(`rewriteHistory:${paths.join(",")}`);
+        if (this.rewriteError) throw this.rewriteError;
+        this.rewritten = [...paths];
+        return {
+            previousHead: "aaaa1111",
+            head: "bbbb2222",
+            backupRef: this.rewriteBackupRef,
+            commitsBefore: this.commits,
+            commitsAfter: this.commits,
+        };
+    }
+
+    async listBackups(): Promise<string[]> {
+        this.calls.push("listBackups");
+        return [...this.backups];
+    }
+
+    async discardBackups(): Promise<void> {
+        this.calls.push("discardBackups");
+        this.backups = [];
+        this.sizeBytes = Math.max(0, this.sizeBytes - this.gcBytesDrop);
+    }
+
+    async forcePush(): Promise<SyncOutcome> {
+        this.calls.push("forcePush");
+        if (this.pushError) throw this.pushError;
+        return { kind: "pushed" };
     }
 }
 
@@ -1640,5 +1716,112 @@ describe(".gitignore 读写", () => {
         // `.gitignore` 决定「哪些文件该出现在改动列表里」——
         // 改完不刷新的话，用户会以为没生效。
         expect(seen.length).toBe(1);
+    });
+});
+
+/**
+ * 清理：回收 / 丢弃备份 / 深度清理（2026-10-09）。
+ *
+ * 编排层要钉住的是**顺序与副作用**：重写之后必须顺手写忽略规则（不然清完又长回来）、
+ * 重写期间别的同步动作必须排队、体积读不出来时不能编一个 0。
+ */
+describe("清理", () => {
+    it("回收返回释放的字节数", async () => {
+        const git = new FakeGit();
+        git.sizeBytes = 1000;
+        git.gcBytesDrop = 300;
+        const { service } = makeService(git, createFakeApp());
+
+        await expect(service.collectGarbage()).resolves.toBe(300);
+        expect(git.calls).toContain("gc");
+    });
+
+    it("体积读不出来时返回 undefined —— 不编一个 0（0 是「没得回收」这个结论）", async () => {
+        const git = new FakeGit();
+        git.sizeError = new Error("unrecognised count-objects output");
+        const { service } = makeService(git, createFakeApp());
+
+        await expect(service.collectGarbage()).resolves.toBeUndefined();
+    });
+
+    it("丢弃备份返回释放的字节数", async () => {
+        const git = new FakeGit();
+        git.sizeBytes = 1000;
+        git.gcBytesDrop = 200;
+        git.backups = ["refs/obsync-backup/20261009-231500"];
+        const { service } = makeService(git, createFakeApp());
+
+        await expect(service.discardBackups()).resolves.toBe(200);
+        expect(git.calls).toContain("discardBackups");
+    });
+
+    it("重写之后把路径写进 .gitignore —— 否则那些文件下次提交就回来了", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp({ ".gitignore": "# 我自己的规则\n" });
+        const { service } = makeService(git, fake);
+
+        const outcome = await service.rewriteHistory(["字体", ".obsidian/plugins"]);
+
+        expect(git.rewritten).toEqual(["字体", ".obsidian/plugins"]);
+        // 备份引用必须一路带到界面 —— 那是用户唯一的退路，丢在路上等于没有。
+        expect(outcome.result.backupRef).toBe(git.rewriteBackupRef);
+
+        const gitignore = fake.files.get(".gitignore") ?? "";
+        expect(gitignore).toContain("# 我自己的规则");
+        expect(gitignore).toContain("字体/");
+        expect(gitignore).toContain(".obsidian/plugins/");
+    });
+
+    it("重写不摘索引 —— 那些路径刚被重写掉，对不存在的索引项 rm --cached 会直接报错", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+
+        await service.rewriteHistory(["字体"]);
+
+        expect(git.calls.some((call) => call.startsWith("untrack:"))).toBe(false);
+    });
+
+    it("重写排在队列里 —— 它跑几分钟，期间别的清理动作必须等它", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+
+        // 让 `status()` 卡住：重写收尾时的刷新会挂在这里，队列也就停在这一步。
+        let release: () => void = () => {};
+        git.waitBeforeStatus = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+
+        const rewrite = service.rewriteHistory(["字体"]);
+        const collect = service.collectGarbage();
+        // 一个宏任务足够让「没排队」的实现把 gc 跑掉了。
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        // 重写**已经开始**（git 侧被调用过），而回收一次都没开始 ——
+        // 两个 git 进程同时读写引用是灾难。
+        expect(git.calls).toContain("rewriteHistory:字体");
+        expect(git.calls).not.toContain("gc");
+
+        release();
+        await rewrite;
+        await collect;
+        expect(git.calls).toContain("gc");
+    });
+
+    it("强制推送", async () => {
+        const git = new FakeGit();
+        const { service } = makeService(git, createFakeApp());
+
+        await expect(service.forcePush()).resolves.toEqual({ kind: "pushed" });
+        expect(git.calls).toContain("forcePush");
+    });
+
+    it("体检与提交数不进队列（只读，排队只会让用户干等）", async () => {
+        const git = new FakeGit();
+        git.commits = 42;
+        const { service } = makeService(git, createFakeApp());
+
+        await expect(service.commitCount()).resolves.toBe(42);
+        await expect(service.historySummary()).resolves.toEqual(git.historySummary);
+        await expect(service.listBackups()).resolves.toEqual([]);
     });
 });

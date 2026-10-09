@@ -11,6 +11,8 @@ import { logger } from "./core/logger";
 import { DEFAULT_SETTINGS } from "./core/settings";
 import { pickFile } from "./core/desktopFileDialog";
 import { formatCountdown } from "./features/sync/countdown";
+import { formatBytes } from "./features/sync/repoSize";
+import { CleanupReportModal } from "./features/sync/ui/CleanupReportModal";
 import { bindRemoteInput } from "./features/sync/remoteEditor";
 import { SYNC_EXTENSIONS } from "./features/images/imageScan";
 import {
@@ -1605,6 +1607,108 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             }
             refreshStatus();
         })();
+
+        // 「清理」一节（2026-10-09）排在这一页的最后：它是**事后**的动作
+        // （仓库已经大了才来），而上面那些是日常配置。放在最前面会天天占着视线。
+        this.renderCleanupSection();
+    }
+
+    /**
+     * 「清理」一节：体检 / 回收 / 丢弃备份。
+     *
+     * 三行按**风险递增**排，而且每一行的描述里都写着代价：
+     *
+     * - 体检只是看（零风险），所以它是入口 —— 用户先看到「空间被什么占了」才有依据决定下一步；
+     * - 回收只清不可达对象（安全，但**常常回收不到**，那句反直觉的话必须写在描述里，
+     *   否则用户会以为功能坏了）；
+     * - 丢弃备份是唯一不可逆的一行，它删掉的是重写之后的唯一退路。
+     */
+    private renderCleanupSection(): void {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        const { rows } = this.openSection(t.settings.sync.cleanupHeading);
+
+        new Setting(rows)
+            .setName(t.settings.sync.cleanup.checkName)
+            .setDesc(t.settings.sync.cleanup.checkDesc)
+            .addButton((button) =>
+                button.setButtonText(t.settings.sync.cleanup.checkAction).onClick(() => {
+                    new CleanupReportModal(this.app, t, {
+                        service: sync.service,
+                        notifier: this.obsync.notifier,
+                    }).open();
+                })
+            );
+
+        new Setting(rows)
+            .setName(t.settings.sync.cleanup.gcName)
+            .setDesc(t.settings.sync.cleanup.gcDesc)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.cleanup.gcAction)
+                    .onClick(() => void this.runGarbageCollection())
+            );
+
+        const discard = new Setting(rows)
+            .setName(t.settings.sync.cleanup.discardName)
+            .setDesc(t.settings.sync.cleanup.discardDesc)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.cleanup.discardAction)
+                    .onClick(() => void this.runDiscardBackups())
+            );
+
+        // 没有备份时把这一行灰掉并说明原因 —— 而不是让用户点了才知道「没有备份可丢」。
+        // 用 `setDisabled` 而不是改写它的值：这个动作没有「值」，只有「能不能点」。
+        void (async () => {
+            try {
+                const backups = await sync.service.listBackups();
+                if (backups.length === 0) {
+                    discard.setDesc(t.settings.sync.cleanup.discardDescNone);
+                    discard.setDisabled(true);
+                }
+            } catch (err) {
+                // 列不出来不是错误（多半还不是仓库）—— 留着按钮让用户自己试。
+                logger.debug("could not list history backups", err);
+            }
+        })();
+    }
+
+    /**
+     * 回收空间。三种结果说三句不同的话，**不合并**：
+     * 「释放了 12 MB」「没有可回收的对象」「读不到体积」是三件不同的事，
+     * 合并成一句「回收完成」会让第一种看起来像没生效。
+     */
+    private async runGarbageCollection(): Promise<void> {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        try {
+            const freed = await sync.service.collectGarbage();
+            if (freed === undefined) this.obsync.notifier.info(t.sync.cleanup.gcUnknown);
+            else if (freed > 0) this.obsync.notifier.success(t.sync.cleanup.gcFreed(formatBytes(freed)));
+            else this.obsync.notifier.info(t.sync.cleanup.gcNothing);
+        } catch (err) {
+            this.obsync.notifier.reportError(err);
+        }
+    }
+
+    /** 丢弃备份并回收。**不可逆** —— 描述里已经写明，这里只负责执行与反馈。 */
+    private async runDiscardBackups(): Promise<void> {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        try {
+            const freed = await sync.service.discardBackups();
+            if (freed === undefined) this.obsync.notifier.info(t.sync.cleanup.discardUnknown);
+            else this.obsync.notifier.success(t.sync.cleanup.discardFreed(formatBytes(freed)));
+        } catch (err) {
+            this.obsync.notifier.reportError(err);
+        }
     }
 
     /**

@@ -410,6 +410,29 @@ export const zhCN = {
                 name: "忽略插件目录",
                 desc: "把整个插件目录也加进推荐规则。插件是仓库体积最大的单一来源，但忽略之后换设备 clone 时插件不会自动就位，需要重新安装。",
             },
+            /**
+             * 「清理」一节（2026-10-09）。
+             *
+             * 三行按**风险递增**排：体检只是看、回收只清不可达对象、丢弃备份不可逆。
+             * desc 里必须把代价写出来 —— 尤其最后一条，它删掉的是重写后的唯一退路。
+             */
+            cleanupHeading: "清理",
+            cleanup: {
+                checkName: "体检仓库历史",
+                checkDesc:
+                    "看看历史里到底被什么占了空间（按目录汇总）。只读，不动任何东西。清历史之前先看这一步 —— 460 MB 的仓库里，笔记本身常常只占几十 MB。",
+                checkAction: "开始体检",
+                gcName: "回收空间",
+                gcDesc:
+                    "清掉不可达的对象（悬空的、被删分支留下的）。安全，但常常回收不到东西 —— 大文件基本都在可达历史里，那种情况只有重写才能清掉。",
+                gcAction: "回收",
+                discardName: "丢弃备份并回收",
+                discardDesc:
+                    "重写历史后会留下备份（那是你唯一能回到旧历史的退路）。丢弃备份并回收，才能把旧对象真正删掉、把空间放出来。这一步不可逆。",
+                discardDescNone:
+                    "目前没有备份 —— 只有做过「深度清理」之后才会有。",
+                discardAction: "丢弃",
+            },
             gitignoreOpen: "在编辑器中打开",
             gitignoreSavedNotice: "已保存 .gitignore。",
             /**
@@ -484,7 +507,7 @@ export const zhCN = {
                         "要确认这些图片都已经在 R2 上（这一步会替你检查）。",
                     warningHistory:
                         "已经写进历史的图片不会消失：git 只是不再跟踪它们，.git 里的旧对象还在，" +
-                        "仓库体积不会因此变小（那需要重写历史，本插件不做）。",
+                        "仓库体积不会因此变小（那要在设置页「清理」里做一次深度清理）。",
                     cancel: "取消",
                     confirm: "继续",
                 },
@@ -1267,7 +1290,7 @@ export const zhCN = {
                 warningUntrack:
                     "退出跟踪并忽略：它不再有版本历史（本地文件保留），换设备时也不会自动带过去。",
                 warningHistory:
-                    "注意：历史里已经存在的副本不会消失，仓库大小不会因此变小 —— 那需要重写历史，本插件不做。",
+                    "注意：历史里已经存在的副本不会消失，仓库大小不会因此变小 —— 那要在设置页「清理」里做一次深度清理。",
                 cancel: "取消",
                 untrack: "退出跟踪并忽略",
                 commitAnyway: "仍然提交",
@@ -1281,6 +1304,78 @@ export const zhCN = {
              */
             untracked: (files: number, rules: number) =>
                 `已让 ${files} 个文件退出跟踪（新增 ${rules} 条忽略规则）。本地文件都在，历史里的副本仍在。`,
+        },
+        /**
+         * 清理能力（体检 / 回收 / 深度清理，2026-10-09）。
+         *
+         * 这一块的文案有一条贯穿的要求：**把代价说在动手之前**。
+         * 重写历史是本插件唯一不可逆的动作，而用户对这个动作的直觉是错的
+         * （「清一下而已」）—— 所以「哈希全变、远端要强制推、别的设备要重新 clone」
+         * 这三件事必须在确认页上，而不是事后在通知里。
+         */
+        cleanup: {
+            /** 前置条件拦下时的话，按类型码取（见 `errors.ts` 的 `RewriteBlockedReason`）。 */
+            blocked: {
+                "dirty-tree":
+                    "工作区还有未提交的改动，重写历史前要先提交或撤销它们（git 会拒绝在脏工作区上重写）。",
+                "no-commits": "这个仓库还没有任何提交，没有历史可以清理。",
+                "no-paths": "没有选中任何要清理的路径。",
+            },
+            gcFreed: (size: string) => `回收完成，释放了 ${size}。`,
+            gcNothing:
+                "回收完成，但没有可回收的对象 —— 大文件都在可达的历史里，那种情况只有「深度清理」才能清掉。",
+            gcUnknown: "回收完成，但读不到体积，无法告诉你释放了多少。",
+            discardFreed: (size: string) => `备份已丢弃，释放了 ${size}。此前的历史再也回不去了。`,
+            discardUnknown: "备份已丢弃，但读不到体积，无法告诉你释放了多少。",
+            pushDone: "已强制推送到远端。",
+            report: {
+                title: "仓库体积体检",
+                loading: "正在分析历史…",
+                summary: (size: string, objects: number, commits: number) =>
+                    `历史对象合计 ${size}（${objects} 个对象，${commits} 个提交）。`,
+                note: "这是对象内容的原始大小、未压缩，所以会比 .git 的实际占用大。",
+                dirsHeading: "占空间最多的目录",
+                dirMeta: (size: string, objects: number) => `${size} · ${objects} 个对象`,
+                rootLabel: "（库根目录的文件）",
+                rootNote: "库根目录的文件不提供勾选 —— 剔掉它们等于清空整个库。",
+                largestHeading: "最大的单个对象",
+                empty: "没有可分析的历史对象。",
+                toConfirm: "开始重写",
+                cancel: "取消",
+            },
+            confirm: {
+                title: "确认重写历史",
+                pathsHeading: "将要从全部历史里剔除：",
+                estimate: (commits: number, minutes: number) =>
+                    `这个库有 ${commits} 个提交，重写预计需要 ${minutes} 分钟左右 —— 期间请不要关闭 Obsidian。`,
+                warningHeading: "这会改变什么：",
+                warningHashes:
+                    "所有提交的哈希都会变。远端会与本地分叉，必须强制推送；其他设备要重新 clone 才能对上。",
+                warningRemote:
+                    "已经推到远端的旧历史在别人的克隆里仍然存在 —— 这里清不掉它。",
+                warningBackup:
+                    "本插件会先建一个备份引用，让你还能退回去；但备份一旦丢弃，就再也回不去了。",
+                back: "返回",
+                go: "确认重写",
+            },
+            running: {
+                title: "正在重写历史",
+                text: "每个提交都要单独处理一次，慢是正常的。请不要关闭 Obsidian。",
+            },
+            result: {
+                title: "历史已重写",
+                summary: (before: number, after: number) =>
+                    `提交数 ${before} → ${after}。`,
+                backup: (ref: string) =>
+                    `备份保留在 ${ref}。确认库一切正常之前，请不要丢弃它。`,
+                noShrink:
+                    "空间暂时不会变小 —— 备份还拉着那些旧对象。确认无误后，用设置页「清理」里的「丢弃备份并回收」释放。",
+                ignored: (count: number) =>
+                    `已把 ${count} 条忽略规则写进 .gitignore，否则那些文件会在下次提交时原样回来。`,
+                pushHint: "远端现在与本地分叉，需要强制推送才能同步过去。",
+                push: "强制推送",
+                done: "完成",
+            },
         },
         noRemote: "还没有配置远端仓库，请在设置中填写远端地址。",
         conflictDetected: (count: number) =>

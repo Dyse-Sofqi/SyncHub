@@ -395,6 +395,10 @@ function checkCssClasses() {
             match: (name) => name.startsWith("obsync-image-state"),
             why: "图片同步状态清单的 localStorage 键（syncState.ts）",
         },
+        {
+            match: (name) => name === "obsync-backup",
+            why: "历史备份的引用前缀（cleanup.ts 的 refs/obsync-backup/…），不是 CSS 类",
+        },
     ];
 
     /**

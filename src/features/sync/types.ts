@@ -107,6 +107,28 @@ export interface SyncOutcome {
     largeFiles?: LargePendingFile[];
 }
 
+// ── 清理 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 一次历史重写（深度清理）的结果。
+ *
+ * `previousHead` 与 `backupRef` 是**成对**的：备份引用就是指向重写前那个提交的。
+ * 把它们一起返回而不是让调用方自己记，是因为「备份指向哪」这件事一旦算错，
+ * 用户以为有退路而其实没有 —— 那比没有备份更糟。
+ */
+export interface RewriteResult {
+    /** 重写前的 HEAD（备份引用指向它）。 */
+    previousHead: string;
+    /** 重写后的 HEAD。 */
+    head: string;
+    /** 备份引用名（`refs/obsync-backup/<时间戳>`）。 */
+    backupRef: string;
+    /** 重写前的提交数。 */
+    commitsBefore: number;
+    /** 重写后的提交数 —— 变小说明有提交被 `--prune-empty` 摘掉了。 */
+    commitsAfter: number;
+}
+
 // ── 诊断 ────────────────────────────────────────────────────────────────────
 
 /**
