@@ -51,7 +51,8 @@ Chinese-first UI with an equal English one.
   仓库同步视图（侧边栏，可点状态栏打开）· **同步特效横幅**（转圈 + 三个阶段 + 不确定进度条，
   动作中禁用动作按钮）· 状态栏条目（**忙碌时转圈圆环 + 「正在同步：提交中…」**）·
   初始化仓库时建 `.gitignore`（设置页里可直接编辑）· **大文件预防**（补齐推荐忽略规则 /
-  提交前按阈值拦截，默认 5 MB）· **差异视图**（逐文件 / 逐提交 / 当前文件）·
+  提交前按阈值拦截，默认 5 MB）· **清理**（体检 / 回收 / 深度清理，含备份与回退）·
+  **差异视图**（逐文件 / 逐提交 / 当前文件）·
   在远端打开文件/历史/提交 · 编辑远端 · 连接测试 · 设置页里初始化仓库（状态徽标只问一次）
 - **图片同步** — Cloudflare R2 双副本（只复制不删除）· 删本地时问一句（三档）· 需要图片同步的文件夹 ·
   **变动后自动同步**（受管文件夹里改动后停手 30 秒跑一轮；周期同步只管其他设备的变化）·
@@ -76,6 +77,7 @@ Chinese-first UI with an equal English one.
   `.gitignore` created on init (editable in the settings page) ·
   **large-file prevention** (add missing recommended ignore rules / block over a threshold before
   commit, 5 MB default) ·
+  **cleanup** (inspect / reclaim / deep clean, with backup and rollback) ·
   **diff view** (per file / per commit / current file) ·
   open file/history/commit on the remote · edit remote · connection test ·
   initialise the repository from the settings page (status badge asked only once)
@@ -166,7 +168,7 @@ Chinese-first UI with an equal English one.
   范围对得上、图片同步已配好、**每一张都已经在 R2 上**。最后一条最要紧：别的设备拉取这次
   改动时，工作区里那些图片会被 git 删掉、再由图片同步从 R2 补回来 —— 没上传的那些就真没了。
   另外：**已经写进历史的图片不会消失**，`.git` 里的旧对象还在，仓库体积不会因此变小
-  （那需要重写历史，本插件不做）。
+  （那要在设置页「清理」里做一次**深度清理** —— 重写全部提交）
 - **别让大文件进 git** —— 仓库体积失控几乎从来不是笔记造成的：一次实测里，一个 159 次提交的
   笔记库有 460 MB 的 `.git`，其中插件构建产物 319 MB、字体 186 MB、向量库缓存 84 MB，而真正的
   markdown 只有 63 MB。而 **git 的历史不可逆**（事后清理要重写全部提交，本插件不做），
@@ -185,6 +187,21 @@ Chinese-first UI with an equal English one.
      **代价**都写清楚了：**仍然提交**（它以后每次改动都会在历史里再存一份完整副本）或
      **退出跟踪并忽略**（不再有版本历史、本地文件保留；**历史里已有的副本不会消失**，
      仓库体积不会因此变小）。关掉弹窗 = 取消。**自动同步不弹窗**，改为发一条通知
+- **清理**（设置页「仓库同步」的**清理**一节）—— 仓库已经大了怎么办。三层风险递增，
+  每一层都把代价写在动手之前：
+  1. **体检**（只读）—— 按**目录**汇总历史里占空间最多的部分，外加最大的单个对象。
+     按目录而不是按文件，是因为**剔除的单位就是目录**：报告里的每一行正好是一个能拿去
+     执行的动作。库根目录的文件只报账、不提供勾选（剔掉它们等于清空整个库）
+  2. **回收空间** —— `git gc --prune=now`。安全，但**常常一点也回收不到**：大文件基本都在
+     可达的历史里，只有重写才能清掉
+  3. **深度清理**（**不可逆**）—— 把选中的路径从**全部历史**里剔除（重写每一个提交）。
+     动手前把三件事摆出来：**所有提交的哈希都会变**（远端要强制推送、其他设备要重新 clone）、
+     **已经推到远端的旧历史清不掉**、以及**预计耗时**（按提交数算，实测约 3.5 秒/提交，
+     一个 159 提交的库约 10 分钟，期间别关 Obsidian）。执行前**先建一个备份引用**，
+     失败或后悔都能退回去；执行后**自动把那几条路径写进 `.gitignore`**，否则它们会在
+     下次提交时原样回来
+  4. **丢弃备份并回收** —— 重写之后空间**不会立刻变小**（备份还拉着旧对象，这是刻意的：
+     先让你确认库还能用，再丢退路）。确认无误后点它，才真正释放空间。**不可逆**
 - **冲突处理** —— 检测到冲突时在库根目录写一份《SyncHub 冲突指南.md》列出冲突文件，
   然后**立即停止同步链**；手动解决后重新同步，或用「放弃当前合并」回到拉取之前
 - **定时同步**（默认关闭）—— 设置页那一行就是**一个周期 + 一个开关**：开了之后每 N 分钟
@@ -462,7 +479,7 @@ Chinese-first UI with an equal English one.
 | --- | --- |
 | 插件与主题 | 已安装/添加的插件与主题列表。顶部是一排**没有卡片**的按钮：**添加插件仓库**、**添加主题仓库**、**绑定已有插件或主题**（带 `link` 图标）、**检查更新**（带 `refresh-cw` 图标）；每行有更新徽标、检查、更新、版本管理（回退，仅插件）、冻结、打开仓库、取消绑定（不删文件） |
 | 插件安装器 | **SyncHub 自身**（版本状态小字 + 检查更新 / 更新按钮 + **启用 Gitee 镜像源**开关）、**进入设置页时自动检查**（开着时同时查跟踪列表与 SyncHub 自身）、**启动时检查更新** + 启动检查延迟、**自动发现 Gitee 镜像**。标签上有**数字徽标**：SyncHub 自身有可用更新时显示 |
-| 仓库同步 | **初始化 git 仓库**（一行：状态徽标「已是 / 还不是 git 仓库」+ 按钮，已是时置灰）、**远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**三项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**、**补齐推荐的忽略规则** + **忽略插件目录**开关）、**大文件阈值**（默认 5 MB，填 0 关闭提交前的检查） |
+| 仓库同步 | **初始化 git 仓库**（一行：状态徽标「已是 / 还不是 git 仓库」+ 按钮，已是时置灰）、**远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**三项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**、**补齐推荐的忽略规则** + **忽略插件目录**开关）、**大文件阈值**（默认 5 MB，填 0 关闭提交前的检查）、**清理**（体检 / 回收空间 / 丢弃备份并回收） |
 | 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步，排在最前面）、**自动同步图片**（开关）、**变动后自动同步**（延时 + 开关，默认开 / 30 秒）、**按周期同步**（周期 + 开关，只管其他设备上的变化）、需要图片同步的文件夹（整行的路径框，含「浏览…」/「恢复默认」）、R2 连接与密钥、冲突与删除策略、压缩默认值 |
 | 通用 | 提示开关、调试日志、**状态栏同步条目贴靠最左侧**（默认开；关掉后条目按默认顺序排，不作特殊处理）、**功能区展示用户头像** + **使用 Gitee 头像**（用哪个平台的头像；那一行的描述里带「去换头像」的链接，跟着平台走）、**访问令牌**（GitHub / Gitee） |
 
@@ -725,7 +742,7 @@ per-platform instructions).
   one matters most: when other devices pull this change git deletes those images from their working
   tree and image sync restores them from R2 — anything not uploaded is simply gone. Also: **images
   already written into history stay there** (the old objects remain in `.git`, so the repository does
-  not shrink; that would need rewriting history, which this plugin does not do).
+  not shrink; that needs a **deep clean** under Cleanup in the settings — a full history rewrite).
 - **Keep large files out of git** — a runaway repository is almost never caused by notes: in one real
   vault, 159 commits produced a 460 MB `.git` — 319 MB of plugin build output, 186 MB of fonts,
   84 MB of vector-store caches, and only 63 MB of actual markdown. And **git history is irreversible**
@@ -748,6 +765,26 @@ per-platform instructions).
      **untrack and ignore** (no version history, local files kept; **copies already in history stay**,
      so the repository does not shrink). Dismissing the modal cancels. **Scheduled sync never opens
      the modal** — it sends a notice instead
+- **Cleanup** (the **Cleanup** section of the Vault sync settings tab) — what to do once the
+  repository is already big. Three layers of increasing risk, each stating its cost up front:
+  1. **Inspect** (read-only) — history grouped **by directory**, plus the largest single objects.
+     By directory rather than by file, because **a directory is the unit you can act on**: every
+     row in the report is exactly one thing you can remove. Files at the vault root are listed for
+     accounting only and cannot be selected (removing them would wipe the whole vault)
+  2. **Reclaim space** — `git gc --prune=now`. Safe, but it **often reclaims nothing**: large files
+     usually sit in reachable history, and only a rewrite can remove those
+  3. **Deep clean** (**irreversible**) — removes the selected paths from **all of history**
+     (rewriting every commit). Three consequences are spelled out before you start: **every commit
+     hash changes** (the remote needs a force push, other devices must clone again), **old history
+     already pushed to the remote cannot be removed here**, and the **estimated duration** (based on
+     commit count; measured at ~3.5 s per commit, so a 159-commit vault takes ~10 minutes — do not
+     close Obsidian while it runs). A **backup ref is created first**, so a failure or a change of
+     mind is recoverable; afterwards the paths are **written into `.gitignore` automatically**,
+     otherwise they would come straight back on the next commit
+  4. **Discard backups and reclaim** — right after a rewrite the space does **not** shrink yet
+     (the backup still holds the old objects — deliberately, so you can confirm the vault works
+     before giving up your way back). Run this once you are happy and the space is actually freed.
+     **Irreversible**
 - **Conflicts** — on conflict SyncHub writes a resolution guide listing the conflicted files and
   **stops the chain** (continuing would commit conflict markers or push them upstream).
   Resolve by hand and sync again, or use "Abort current merge"
@@ -1084,7 +1121,7 @@ own switches and timers.
 | --- | --- |
 | Plugins & themes | The installed/added list. On top, a row of **card-less** buttons: **Add plugin repository**, **Add theme repository**, **Bind existing plugins or themes** (with a `link` icon), **Check for updates** (with a `refresh-cw` icon); each row has an update badge, check, update, version manager (rollback, plugins only), freeze, open repo, unbind (keeps files) |
 | Plugin installer | **SyncHub itself** (a version status line + check / update buttons + an **Enable Gitee mirror source** toggle), **check when opening settings** (checks both the tracked list and SyncHub itself), **check on startup** + startup delay, **auto-discover Gitee mirrors**. The tab carries a **numeric badge** when SyncHub itself has an update |
-| Vault sync | **Initialise git repository** (one row: a "already a repo" / "not a repo yet" badge + a button, greyed out when it is), **remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these three come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**, **Add missing recommended rules** + an **Ignore plugin folder** toggle), **large-file threshold** (5 MB by default, `0` turns the pre-commit check off) |
+| Vault sync | **Initialise git repository** (one row: a "already a repo" / "not a repo yet" badge + a button, greyed out when it is), **remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these three come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**, **Add missing recommended rules** + an **Ignore plugin folder** toggle), **large-file threshold** (5 MB by default, `0` turns the pre-commit check off), **cleanup** (inspect / reclaim space / discard backups and reclaim) |
 | Image sync | **Actions first** (**Open image manager** plus test connection / preview changes / sync now), **automatic image sync** (toggle), **sync after changes** (delay + toggle, on by default / 30 s), **periodic sync** (interval + toggle, covers other devices only), folders to sync (a full-width path box with "Browse…" / "Restore default"), R2 connection and secret, conflict and deletion policy, compression defaults |
 | General | notices, debug logging, **keep the sync item at the left of the status bar** (on by default; off = default order, no special treatment), **ribbon account avatar** + **Use Gitee avatar** (which platform's avatar; the description carries a "change your avatar" link that follows the platform), **access tokens** (GitHub / Gitee) |
 
