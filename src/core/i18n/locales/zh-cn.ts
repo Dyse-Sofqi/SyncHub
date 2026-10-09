@@ -1338,6 +1338,7 @@ export const zhCN = {
                 dirMeta: (size: string, objects: number) => `${size} · ${objects} 个对象`,
                 rootLabel: "（库根目录的文件）",
                 rootNote: "库根目录的文件不提供勾选 —— 剔掉它们等于清空整个库。",
+                selectNote: "勾选只决定剔除哪些路径，不影响耗时。",
                 largestHeading: "最大的单个对象",
                 empty: "没有可分析的历史对象。",
                 toConfirm: "开始重写",
@@ -1347,7 +1348,7 @@ export const zhCN = {
                 title: "确认重写历史",
                 pathsHeading: "将要从全部历史里剔除：",
                 estimate: (commits: number, minutes: number) =>
-                    `这个库有 ${commits} 个提交，重写预计需要 ${minutes} 分钟左右 —— 期间请不要关闭 Obsidian。`,
+                    `这个库有 ${commits} 个提交。重写是逐个提交处理的，每个提交都要单独起一次 git —— 所以你勾几条路径都一样，库大库小也差不多。实测约 3.5 秒/提交，预计 ${minutes} 分钟，期间请不要关闭 Obsidian。`,
                 warningHeading: "这会改变什么：",
                 warningHashes:
                     "所有提交的哈希都会变。远端会与本地分叉，必须强制推送；其他设备要重新 clone 才能对上。",

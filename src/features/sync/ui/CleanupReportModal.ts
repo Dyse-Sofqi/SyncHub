@@ -140,6 +140,9 @@ export class CleanupReportModal extends Modal {
         this.contentEl.createEl("p", { text: t.note, cls: "setting-item-description" });
 
         this.contentEl.createEl("p", { text: t.dirsHeading, cls: "obsync-warning-heading" });
+        // 这一句回答的是「我勾多勾少，耗时会不会变」—— 不会（重写是逐提交的），
+        // 但不说的话，用户在确认页看到那个**恒定**的耗时数字会以为它是写死的。
+        this.contentEl.createEl("p", { text: t.selectNote, cls: "setting-item-description" });
 
         // 库根目录的文件只报账、不提供勾选 —— 剔掉它们等于清空整个库（见 rootNote）。
         const root = summary.directories.find((entry) => entry.path === ROOT_DIRECTORY);

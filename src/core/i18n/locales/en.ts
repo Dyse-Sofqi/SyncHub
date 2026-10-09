@@ -1115,6 +1115,7 @@ export const en = {
                 dirMeta: (size: string, objects: number) => `${size} · ${objects} objects`,
                 rootLabel: "(files at the vault root)",
                 rootNote: "Files at the vault root cannot be selected — removing them would wipe the whole vault.",
+                selectNote: "Selection only decides which paths are removed, not how long it takes.",
                 largestHeading: "Largest single objects",
                 empty: "No history objects to analyse.",
                 toConfirm: "Rewrite history",
@@ -1124,7 +1125,7 @@ export const en = {
                 title: "Confirm the history rewrite",
                 pathsHeading: "These paths will be removed from all of history:",
                 estimate: (commits: number, minutes: number) =>
-                    `This repository has ${commits} commits; the rewrite should take about ${minutes} minute(s) — please do not close Obsidian while it runs.`,
+                    `This vault has ${commits} commits. The rewrite processes every commit one at a time, each spawning its own git process — so it makes no difference how many paths you pick, or how big the vault is. Measured at about 3.5 s per commit, that is roughly ${minutes} minute(s) — please do not close Obsidian while it runs.`,
                 warningHeading: "What this changes:",
                 warningHashes:
                     "Every commit hash changes. The remote will diverge from your local history, so a force push is required, and other devices must clone again.",
