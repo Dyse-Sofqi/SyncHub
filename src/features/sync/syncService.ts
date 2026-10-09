@@ -14,6 +14,8 @@ import { formatBytes, sumFileBytes } from "./repoSize";
 import { isFullyInSync } from "./syncState";
 import { ignoreRuleFor, mergeRuleLines } from "./imagesIgnore";
 import {
+    localStateRules,
+    matchesLocalState,
     mergeRecommendedRules,
     recommendedRules,
     type RecommendedRule,
@@ -929,11 +931,24 @@ export class SyncService {
      * 因为 `ignorePaths` 的常规调用方（面板、大文件守卫）不在锁里。
      */
     private async writeIgnoreRules(paths: string[], locked = true): Promise<number> {
-        const current = (await this.readGitignore()) ?? "";
-        const merged = mergeRuleLines(
-            current,
-            paths.map((path) => ignoreRuleFor(path))
+        // 路径走 `ignoreRuleFor`（它会补上目录用的尾斜杠）—— 规则行本身别走，
+        // 所以下面另开一个 `writeIgnoreLines` 给「已经是规则」的调用方用。
+        return this.writeIgnoreLines(
+            paths.map((path) => ignoreRuleFor(path)),
+            locked
         );
+    }
+
+    /**
+     * 把**规则行**并进 `.gitignore`（不再经过 `ignoreRuleFor`）。
+     *
+     * 「本地状态文件」那一组用的是**文件**路径（`…/workspace.json`），补尾斜杠会变成
+     * `…/workspace.json/` —— 那条规则一条都匹配不上，而且**不会报错**，
+     * 用户看到的是「加了规则但文件照样被提交」。
+     */
+    private async writeIgnoreLines(lines: string[], locked = true): Promise<number> {
+        const current = (await this.readGitignore()) ?? "";
+        const merged = mergeRuleLines(current, lines);
         if (merged.added.length === 0) return 0;
         if (locked) await this.writeGitignore(merged.content);
         else await this.writeGitignoreNow(merged.content);
@@ -952,6 +967,41 @@ export class SyncService {
             files.map((file) => file.path),
             files.filter((file) => file.tracked).map((file) => file.path)
         );
+    }
+
+    /**
+     * 当前**被跟踪**的本地状态文件（`workspace.json` / `workspaces.json` / 位置缓存…）。
+     *
+     * 给界面用：先让用户看见「到底哪几个文件还在 git 里」，再决定要不要处理。
+     * 只读，不进队列。
+     */
+    async listTrackedLocalState(): Promise<string[]> {
+        const configDir = this.deps.app.vault.configDir;
+        const tracked = await this.git.listTracked();
+        return tracked.filter((path) => matchesLocalState(path, configDir));
+    }
+
+    /**
+     * 停止跟踪本地状态文件：**写忽略规则 + 把已跟踪的从索引里摘掉**。
+     *
+     * ## 为什么必须是两件事
+     *
+     * `.gitignore` 只管**未跟踪**的文件。对已经跟踪的 `workspace.json` 加一条规则，
+     * 它照样每次同步都被提交 —— 用户会得出「这功能没用」的结论，而根因是少做了半步。
+     * 这与「让图片退出 git」是同一条 git 语义（那个弹窗里把三步都列了出来）。
+     *
+     * ## 为什么不像 `rewriteHistory` 那样包在一个 enqueue 里
+     *
+     * `writeIgnoreLines`（走 `writeGitignore`）与 `untrackPaths` **各自都进队列** ——
+     * 包一层就是自己等自己（2026-10-09 在 `rewriteHistory` 上踩过一次，
+     * 症状是界面卡住不动）。两步顺序执行、各自排队即可。
+     */
+    async untrackLocalState(): Promise<{ files: string[]; rules: number }> {
+        const configDir = this.deps.app.vault.configDir;
+        const files = await this.listTrackedLocalState();
+        const rules = await this.writeIgnoreLines(localStateRules(configDir));
+        await this.untrackPaths(files);
+        return { files, rules };
     }
 
     /**

@@ -34,7 +34,7 @@
 import { extensionIgnoreRules, mergeRuleLines } from "./imagesIgnore";
 
 /** 推荐规则的分组 —— 界面按它取标题与理由。 */
-export type RecommendedGroupId = "font" | "officeTemp" | "pluginFolder";
+export type RecommendedGroupId = "font" | "officeTemp" | "localState" | "pluginFolder";
 
 export interface RecommendedRule {
     /** 规则行本身（ASCII 通配符，不含任何文案）。 */
@@ -60,6 +60,53 @@ const FONT_EXTENSIONS = ["ttf", "ttc", "otf", "woff", "woff2"];
 const OFFICE_TEMP_RULES = ["~$*", ".~lock.*#"];
 
 /**
+ * Obsidian 自己那三个「本机状态」文件（相对配置目录）。
+ *
+ * ## 为什么它们比大文件更值得忽略（2026-10-10）
+ *
+ * **重写历史的代价只吃「提交总数」，与每个提交改了多少字节无关。** 所以一个
+ * 「只改了光标位置」的提交和一个「改了一整章笔记」的提交，在深度清理那里**一样贵**。
+ * 而这三个文件是**每次开关标签、拖一下面板就变**的东西 —— 让它们进 git，
+ * 等于给每个 5 分钟同步周期都准备好了「有东西可提交」。
+ *
+ * 大文件拦截防的是**体积**，防不了这一条 —— 两件事是两条独立的轴。
+ *
+ * `workspaces.json` 与另外两个**不是一类**（它是手动保存的工作区布局，改动很少，
+ * 而且「把布局带到另一台设备」可能是想要的）—— 但它同样是**本机界面状态**，
+ * 跟着 `workspace.json` 一起忽略是 Obsidian 多设备同步的通行做法。
+ */
+const LOCAL_STATE_FILES = ["workspace.json", "workspace-mobile.json", "workspaces.json"];
+
+/** 本地状态文件的忽略规则（相对配置目录展开后）。 */
+export function localStateRules(configDir: string): string[] {
+    return [
+        ...LOCAL_STATE_FILES.map((name) => `${configDir}/${name}`),
+        // 插件的「位置缓存」惯例（MDRazor 的 `md-razor-position-cache.json` 即此类）。
+        // 用 glob 而不是写死某个插件名：这是**一类**东西，不是某一个插件的私事。
+        `${configDir}/*-position-cache.json`,
+    ];
+}
+
+/**
+ * 判断一个**已跟踪**的路径是不是本地状态文件。
+ *
+ * 只匹配配置目录**正下方**一层（`rest.includes("/")` 直接排除）—— 与规则写法一致，
+ * 而且这样不会误伤 `.obsidian/plugins/<某插件>/workspace.json` 这种同名文件
+ * （那是插件自己的数据，归「插件目录」那一组管）。
+ *
+ * 存在的理由：`.gitignore` **只管未跟踪的文件**，所以对已经跟踪的 `workspace.json`
+ * 加规则一点用都没有 —— 必须先认出它们、再 `git rm --cached`。这个函数就是那一步的判据。
+ */
+export function matchesLocalState(path: string, configDir: string): boolean {
+    const prefix = `${configDir}/`;
+    if (!path.startsWith(prefix)) return false;
+    const rest = path.slice(prefix.length);
+    if (rest.length === 0 || rest.includes("/")) return false;
+    if (LOCAL_STATE_FILES.includes(rest)) return true;
+    return rest.endsWith("-position-cache.json");
+}
+
+/**
  * 生成推荐规则清单。
  *
  * `configDir` 走 `vault.configDir` 而不是写死 `.obsidian` —— 用户可以改配置目录名，
@@ -81,6 +128,10 @@ export function recommendedRules(options: {
 
     for (const rule of OFFICE_TEMP_RULES) {
         rules.push({ rule, group: "officeTemp" });
+    }
+
+    for (const rule of localStateRules(options.configDir)) {
+        rules.push({ rule, group: "localState" });
     }
 
     if (options.ignorePluginFolder) {

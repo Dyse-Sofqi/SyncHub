@@ -307,7 +307,33 @@ export const en = {
                 groups: {
                     font: "fonts",
                     officeTemp: "Office temp files",
+                    localState: "local state files",
                     pluginFolder: "plugin folder",
+                },
+            },
+            localState: {
+                name: "Stop tracking local state files",
+                desc: "Keeps machine-local state — workspace.json, cursor-position caches — out of git. A history rewrite costs one unit per commit, and these files change every time you switch a tab, so keeping them tracked hands every sync cycle a pointless commit. Adds the ignore rules and removes the tracked ones from the index (your local files stay put).",
+                action: "Fix",
+                none: "Local state files are already sorted — no rules to add and nothing tracked.",
+                rulesOnly: (rules: number) =>
+                    `Added ${rules} ignore rule(s) (no local state files were tracked).`,
+                done: (files: number, rules: number) =>
+                    `Stopped tracking ${files} local state file(s) (added ${rules} ignore rule(s)). Your local files are untouched; the copies in history remain.`,
+                modal: {
+                    title: "Stop tracking local state files",
+                    intro:
+                        "This does two things: writes a few rules into .gitignore, and removes the files below from the git index. That removal becomes a deletion commit on the next sync, pushed to the remote.",
+                    filesHeading: "Will be removed from the index:",
+                    warningHeading: "What happens:",
+                    warningLocal:
+                        "No local file is touched — files like workspace.json are regenerated on every launch anyway.",
+                    warningOthers:
+                        "When another device pulls this, git deletes those files from its working tree and Obsidian regenerates them (the layout and cursor positions that device had are lost).",
+                    warningHistory:
+                        "Note: copies already in history do not disappear, so the repository size will not shrink — that needs a deep clean under Cleanup in the settings.",
+                    cancel: "Cancel",
+                    confirm: "Continue",
                 },
             },
             /**

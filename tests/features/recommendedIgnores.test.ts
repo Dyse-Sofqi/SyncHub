@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+    localStateRules,
+    matchesLocalState,
     mergeRecommendedRules,
     recommendedRules,
 } from "../../src/features/sync/recommendedIgnores";
@@ -111,7 +113,7 @@ describe("mergeRecommendedRules", () => {
         const { added } = mergeRecommendedRules("", all(true));
 
         const groups = new Set(added.map((entry) => entry.group));
-        expect(groups).toEqual(new Set(["font", "officeTemp", "pluginFolder"]));
+        expect(groups).toEqual(new Set(["font", "officeTemp", "localState", "pluginFolder"]));
     });
 
     it("写法不同但含义相同的规则算「已经有了」（去斜杠后比较）", () => {
@@ -120,5 +122,74 @@ describe("mergeRecommendedRules", () => {
         const { added } = mergeRecommendedRules(".obsidian/plugins\n", all(true));
 
         expect(added.some((entry) => entry.group === "pluginFolder")).toBe(false);
+    });
+});
+
+/**
+ * 本地状态文件（2026-10-10）。
+ *
+ * 这一组存在的理由与其他组不同：字体与 Office 临时文件是**体积**问题，
+ * 而这一组是**提交数**问题 —— 重写历史的开销只吃提交数，而 `workspace.json`
+ * 这类文件每开关一个标签就变，留着它等于每个同步周期都白多一个提交。
+ *
+ * 所以用例要钉住两件事：规则**别写死 `.obsidian`**，以及判据**只认配置目录正下方
+ * 那一层**（否则 `.obsidian/plugins/某插件/workspace.json` 会被误伤）。
+ */
+describe("localStateRules", () => {
+    it("三个本机状态文件 + 位置缓存 glob，都跟着 configDir 走", () => {
+        const rules = localStateRules(".obsidian");
+
+        expect(rules).toContain(".obsidian/workspace.json");
+        expect(rules).toContain(".obsidian/workspace-mobile.json");
+        expect(rules).toContain(".obsidian/workspaces.json");
+        expect(rules).toContain(".obsidian/*-position-cache.json");
+        expect(rules).toHaveLength(4);
+    });
+
+    it("不写死 .obsidian —— 改了配置目录名也得匹配得上", () => {
+        const rules = localStateRules("我的配置");
+
+        expect(rules).toContain("我的配置/workspace.json");
+        expect(rules.some((rule) => rule.startsWith(".obsidian/"))).toBe(false);
+    });
+
+    it("被 recommendedRules 收进 localState 组", () => {
+        const rules = recommendedRules({ configDir: ".obsidian", ignorePluginFolder: false });
+        const local = rules.filter((entry) => entry.group === "localState").map((entry) => entry.rule);
+
+        expect(local).toContain(".obsidian/workspace.json");
+        expect(local).toContain(".obsidian/*-position-cache.json");
+    });
+
+    it("**不**补尾斜杠 —— 补了会变成 workspace.json/ 而一条都匹配不上", () => {
+        // `ignoreRuleFor` 是给**目录**用的（会补斜杠）。这一组是文件路径，
+        // 走那条路会静默失效：规则加了，文件照样被提交。
+        expect(localStateRules(".obsidian").some((rule) => rule.endsWith(".json/"))).toBe(false);
+    });
+});
+
+describe("matchesLocalState", () => {
+    it("认得出三个状态文件与位置缓存", () => {
+        expect(matchesLocalState(".obsidian/workspace.json", ".obsidian")).toBe(true);
+        expect(matchesLocalState(".obsidian/workspace-mobile.json", ".obsidian")).toBe(true);
+        expect(matchesLocalState(".obsidian/workspaces.json", ".obsidian")).toBe(true);
+        expect(matchesLocalState(".obsidian/md-razor-position-cache.json", ".obsidian")).toBe(true);
+    });
+
+    it("只认配置目录正下方那一层 —— 插件自己的同名文件不归这一组管", () => {
+        // `.obsidian/plugins/x/workspace.json` 是插件的数据，归「插件目录」那一组。
+        // 误伤它会让「停止跟踪本地状态文件」顺手摘掉别人插件的数据文件。
+        expect(matchesLocalState(".obsidian/plugins/ziping/workspace.json", ".obsidian")).toBe(false);
+        expect(matchesLocalState(".obsidian/plugins/ziping/x-position-cache.json", ".obsidian")).toBe(false);
+    });
+
+    it("不碰笔记与别的东西", () => {
+        expect(matchesLocalState("notes/workspace.json", ".obsidian")).toBe(false);
+        expect(matchesLocalState(".obsidian/appearance.json", ".obsidian")).toBe(false);
+        expect(matchesLocalState(".obsidian/workspace.json", "我的配置")).toBe(false);
+    });
+
+    it("跟着 configDir 走", () => {
+        expect(matchesLocalState("我的配置/workspace.json", "我的配置")).toBe(true);
     });
 });

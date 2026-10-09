@@ -13,6 +13,7 @@ import { pickFile } from "./core/desktopFileDialog";
 import { formatCountdown } from "./features/sync/countdown";
 import { formatBytes } from "./features/sync/repoSize";
 import { CleanupReportModal } from "./features/sync/ui/CleanupReportModal";
+import { ConfirmUntrackLocalStateModal } from "./features/sync/ui/ConfirmUntrackLocalStateModal";
 import { bindRemoteInput } from "./features/sync/remoteEditor";
 import { SYNC_EXTENSIONS } from "./features/images/imageScan";
 import {
@@ -1559,6 +1560,21 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     .onClick(() => void this.applyRecommendedIgnores(reload))
             );
 
+        // 「停止跟踪本地状态文件」（2026-10-10）。
+        //
+        // 与上面那个按钮是**两件事**：那个只写规则，而 `.gitignore` 只管**未跟踪**的
+        // 文件 —— 对已经跟踪的 `workspace.json` 加规则一点用都没有，它照样每次同步
+        // 都被提交。这一行才把索引里的摘掉。**已经同步了一阵子的库恰恰最需要它**，
+        // 而新建的库有 `gitignoreTemplate` 兜着（模板只在初始化时写一次）。
+        new Setting(rows)
+            .setName(t.settings.sync.localState.name)
+            .setDesc(t.settings.sync.localState.desc)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.localState.action)
+                    .onClick(() => void this.untrackLocalState())
+            );
+
         // 大文件阈值 —— 提交前拦下超标的文件（0 = 关闭检查）。
         //
         // `min` / `max` 必须与 `normalizeSettings` 的钳制一致（见 `addNumberField`）：
@@ -1706,6 +1722,55 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             const freed = await sync.service.discardBackups();
             if (freed === undefined) this.obsync.notifier.info(t.sync.cleanup.discardUnknown);
             else this.obsync.notifier.success(t.sync.cleanup.discardFreed(formatBytes(freed)));
+        } catch (err) {
+            this.obsync.notifier.reportError(err);
+        }
+    }
+
+    /**
+     * 「停止跟踪本地状态文件」：**检查 → （有已跟踪的才）确认 → 执行**。
+     *
+     * 一个都没被跟踪时**不开确认框** —— 那时只剩下「补忽略规则」，而那一步没有任何
+     * 破坏性（`.gitignore` 加几行，随时能删）。为一件不可逆性为零的事弹窗，
+     * 只会训练用户闭眼点确认。
+     */
+    private async untrackLocalState(): Promise<void> {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        try {
+            const tracked = await sync.service.listTrackedLocalState();
+
+            if (tracked.length === 0) {
+                const outcome = await sync.service.untrackLocalState();
+                this.obsync.notifier.info(
+                    outcome.rules > 0
+                        ? t.settings.sync.localState.rulesOnly(outcome.rules)
+                        : t.settings.sync.localState.none
+                );
+                return;
+            }
+
+            new ConfirmUntrackLocalStateModal(this.app, t, tracked, () =>
+                this.runUntrackLocalState()
+            ).open();
+        } catch (err) {
+            this.obsync.notifier.reportError(err);
+        }
+    }
+
+    /** 确认之后真正执行。 */
+    private async runUntrackLocalState(): Promise<void> {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        try {
+            const outcome = await sync.service.untrackLocalState();
+            this.obsync.notifier.success(
+                t.settings.sync.localState.done(outcome.files.length, outcome.rules)
+            );
         } catch (err) {
             this.obsync.notifier.reportError(err);
         }

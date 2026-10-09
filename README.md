@@ -175,11 +175,19 @@ Chinese-first UI with an equal English one.
   所以预防都建在「它进历史之前」，分两层：
 
   1. **推荐忽略规则** —— 设置页「仓库同步」里的「**补齐推荐的忽略规则**」按钮，把字体
-     （`ttf/ttc/otf/woff/woff2`）、Office / LibreOffice 临时文件（`~$*`、`.~lock.*#`）
-     这几类「大且不变」的规则并进 `.gitignore`。**只追加缺的那些，你自己写的规则一行都不动**
-     （幂等，可以随手点）—— 它与那个**覆盖式**的「填入默认内容」是两回事。
+     （`ttf/ttc/otf/woff/woff2`）、Office / LibreOffice 临时文件（`~$*`、`.~lock.*#`）、
+     **本地状态文件**（`workspace.json`、`workspace-mobile.json`、`workspaces.json`、
+     `*-position-cache.json`）这几类规则并进 `.gitignore`。**只追加缺的那些，你自己写的
+     规则一行都不动**（幂等，可以随手点）—— 它与那个**覆盖式**的「填入默认内容」是两回事。
      另有一个「**忽略插件目录**」开关（默认**关**）：打开能显著缩小仓库，但代价是
-     换设备 clone 之后插件不会自动就位、得重新装 —— 这是取舍，交给你选
+     换设备 clone 之后插件不会自动就位、得重新装 —— 这是取舍，交给你选。
+     旁边还有一个「**停止跟踪本地状态文件**」按钮：光加忽略规则**对已经跟踪的文件没用**
+     （`.gitignore` 只管未跟踪的），而已经同步了一阵子的库恰恰最需要它 —— 它会把已跟踪的
+     那几个从索引里摘掉（**本地文件不动**）并补上规则
+- **为什么「本地状态文件」也算一类** —— 因为重写历史的开销**只吃提交数**，与每个提交
+  改了多少字节无关。而 `workspace.json` 这类文件**每开关一个标签就变**：让它们进 git，
+  等于给每个同步周期都准备好一个「有东西可提交」。这跟大文件是**两条独立的轴** ——
+  大文件拦截防体积，防不了这一条
   2. **提交前的大文件拦截** —— 忽略规则只能挡住「想到过的类型」，真正把仓库撑起来的多半是
      意料之外的（插件的向量库缓存、一段录屏、一个几百 MB 的 PDF）。所以提交 / 立即同步时，
      待提交文件里**超过「大文件阈值」**（默认 5 MB，填 0 关闭）的会被拦下、**弹窗问一次**，
@@ -479,7 +487,7 @@ Chinese-first UI with an equal English one.
 | --- | --- |
 | 插件与主题 | 已安装/添加的插件与主题列表。顶部是一排**没有卡片**的按钮：**添加插件仓库**、**添加主题仓库**、**绑定已有插件或主题**（带 `link` 图标）、**检查更新**（带 `refresh-cw` 图标）；每行有更新徽标、检查、更新、版本管理（回退，仅插件）、冻结、打开仓库、取消绑定（不删文件） |
 | 插件安装器 | **SyncHub 自身**（版本状态小字 + 检查更新 / 更新按钮 + **启用 Gitee 镜像源**开关）、**进入设置页时自动检查**（开着时同时查跟踪列表与 SyncHub 自身）、**启动时检查更新** + 启动检查延迟、**自动发现 Gitee 镜像**。标签上有**数字徽标**：SyncHub 自身有可用更新时显示 |
-| 仓库同步 | **初始化 git 仓库**（一行：状态徽标「已是 / 还不是 git 仓库」+ 按钮，已是时置灰）、**远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**三项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**、**补齐推荐的忽略规则** + **忽略插件目录**开关）、**大文件阈值**（默认 5 MB，填 0 关闭提交前的检查）、**清理**（体检 / 回收空间 / 丢弃备份并回收） |
+| 仓库同步 | **初始化 git 仓库**（一行：状态徽标「已是 / 还不是 git 仓库」+ 按钮，已是时置灰）、**远端地址 + 打开仓库同步面板**（同一行：就地可改的地址输入框 + 打开面板按钮）、**git 可执行文件路径**（整行 + 「浏览…」，描述里跟着「留空用系统 PATH」与「SyncHub 不捆绑 git · 去官网下载」两句 + 可点链接）—— 这**三项排在「连接测试」之前**，因为它们是「测试能通过」的充要条件；再往下是连接测试、定时同步（周期 + 开关同一行 + 距下次同步的倒计时）、提交信息模板、整合策略、**`.gitignore` 编辑框**（可直接改，也能填默认内容或转到编辑器，另有**停止跟踪图片**、**补齐推荐的忽略规则** + **忽略插件目录**开关 + **停止跟踪本地状态文件**）、**大文件阈值**（默认 5 MB，填 0 关闭提交前的检查）、**清理**（体检 / 回收空间 / 丢弃备份并回收） |
 | 图片同步 | **操作**（**打开图片管理** + 测试连接 / 预览变更 / 立即同步，排在最前面）、**自动同步图片**（开关）、**变动后自动同步**（延时 + 开关，默认开 / 30 秒）、**按周期同步**（周期 + 开关，只管其他设备上的变化）、需要图片同步的文件夹（整行的路径框，含「浏览…」/「恢复默认」）、R2 连接与密钥、冲突与删除策略、压缩默认值 |
 | 通用 | 提示开关、调试日志、**状态栏同步条目贴靠最左侧**（默认开；关掉后条目按默认顺序排，不作特殊处理）、**功能区展示用户头像** + **使用 Gitee 头像**（用哪个平台的头像；那一行的描述里带「去换头像」的链接，跟着平台走）、**访问令牌**（GitHub / Gitee） |
 
@@ -750,12 +758,20 @@ per-platform instructions).
   act *before* a file enters history:
 
   1. **Recommended ignore rules** — the "**Add missing recommended rules**" button in the settings page
-     appends fonts (`ttf/ttc/otf/woff/woff2`) and Office / LibreOffice temp files (`~$*`, `.~lock.*#`)
-     — the "big and never-changing" kinds — to `.gitignore`. **Only missing lines are added; rules you
-     wrote yourself are left untouched** (idempotent, safe to click any time) — unlike the
+     appends fonts (`ttf/ttc/otf/woff/woff2`), Office / LibreOffice temp files (`~$*`, `.~lock.*#`)
+     and **local state files** (`workspace.json`, `workspace-mobile.json`, `workspaces.json`,
+     `*-position-cache.json`) to `.gitignore`. **Only missing lines are added; rules you wrote
+     yourself are left untouched** (idempotent, safe to click any time) — unlike the
      **overwriting** "fill in the default content" button. A separate "**Ignore plugin folder**"
      toggle (default **off**) can shrink the repository a lot, at the cost of plugins not coming along
-     on a fresh clone — a trade-off left to you
+     on a fresh clone — a trade-off left to you. Next to it is "**Stop tracking local state files**":
+     ignore rules alone do **nothing for files git already tracks** (`.gitignore` only covers untracked
+     ones), and a vault that has been syncing for a while is exactly the case that needs it — it
+     removes the tracked ones from the index (**your local files stay put**) and adds the rules
+- **Why local state files count as a category** — because a history rewrite costs **one unit per
+  commit**, regardless of how many bytes each commit changed. Files like `workspace.json` change
+  **every time you switch a tab**, so keeping them tracked hands every sync cycle a commit.
+  That is a **separate axis** from large files: the large-file guard protects size, not this
   2. **Large-file guard before commit** — ignore rules only cover kinds you thought of; what actually
      bloats a repository is usually unexpected (a plugin's vector-store cache, a screen recording, a
      few-hundred-MB PDF). So on commit / sync now, pending files **over the large-file threshold**
@@ -1121,7 +1137,7 @@ own switches and timers.
 | --- | --- |
 | Plugins & themes | The installed/added list. On top, a row of **card-less** buttons: **Add plugin repository**, **Add theme repository**, **Bind existing plugins or themes** (with a `link` icon), **Check for updates** (with a `refresh-cw` icon); each row has an update badge, check, update, version manager (rollback, plugins only), freeze, open repo, unbind (keeps files) |
 | Plugin installer | **SyncHub itself** (a version status line + check / update buttons + an **Enable Gitee mirror source** toggle), **check when opening settings** (checks both the tracked list and SyncHub itself), **check on startup** + startup delay, **auto-discover Gitee mirrors**. The tab carries a **numeric badge** when SyncHub itself has an update |
-| Vault sync | **Initialise git repository** (one row: a "already a repo" / "not a repo yet" badge + a button, greyed out when it is), **remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these three come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**, **Add missing recommended rules** + an **Ignore plugin folder** toggle), **large-file threshold** (5 MB by default, `0` turns the pre-commit check off), **cleanup** (inspect / reclaim space / discard backups and reclaim) |
+| Vault sync | **Initialise git repository** (one row: a "already a repo" / "not a repo yet" badge + a button, greyed out when it is), **remote URL + Open repository sync panel** (one row: an address input you can edit in place, plus the panel button), **git executable path** (full-width + "Browse…", with "empty means the system PATH" and "SyncHub does not bundle git — download it here" in one description plus a clickable link) — **these three come before the connection test**, because they are what a successful test depends on; then the connection test, scheduled sync (interval + toggle in one row, plus a countdown to the next sync), commit message template, strategy, **`.gitignore` editor** (edit in place, fill in defaults, or open it in the editor, plus **Stop tracking images**, **Add missing recommended rules** + an **Ignore plugin folder** toggle + **Stop tracking local state files**), **large-file threshold** (5 MB by default, `0` turns the pre-commit check off), **cleanup** (inspect / reclaim space / discard backups and reclaim) |
 | Image sync | **Actions first** (**Open image manager** plus test connection / preview changes / sync now), **automatic image sync** (toggle), **sync after changes** (delay + toggle, on by default / 30 s), **periodic sync** (interval + toggle, covers other devices only), folders to sync (a full-width path box with "Browse…" / "Restore default"), R2 connection and secret, conflict and deletion policy, compression defaults |
 | General | notices, debug logging, **keep the sync item at the left of the status bar** (on by default; off = default order, no special treatment), **ribbon account avatar** + **Use Gitee avatar** (which platform's avatar; the description carries a "change your avatar" link that follows the platform), **access tokens** (GitHub / Gitee) |
 

@@ -1825,3 +1825,93 @@ describe("清理", () => {
         await expect(service.listBackups()).resolves.toEqual([]);
     });
 });
+
+/**
+ * 本地状态文件（2026-10-10）。
+ *
+ * 这一组的理由是**提交数**而不是体积：重写历史的开销只吃提交数，而 `workspace.json`
+ * 这类文件每开关一个标签就变。用例要钉住的核心是「**两件事都做了**」——
+ * 只写忽略规则对已经跟踪的文件一点用都没有（`.gitignore` 只管未跟踪的）。
+ */
+describe("本地状态文件", () => {
+    it("只挑出配置目录正下方那几个 —— 插件自己的同名文件不算", async () => {
+        const git = new FakeGit();
+        git.tracked = [
+            ".obsidian/workspace.json",
+            ".obsidian/workspaces.json",
+            ".obsidian/md-razor-position-cache.json",
+            ".obsidian/appearance.json",
+            ".obsidian/plugins/ziping/workspace.json",
+            "notes/a.md",
+        ];
+        const { service } = makeService(git, createFakeApp());
+
+        await expect(service.listTrackedLocalState()).resolves.toEqual([
+            ".obsidian/workspace.json",
+            ".obsidian/workspaces.json",
+            ".obsidian/md-razor-position-cache.json",
+        ]);
+    });
+
+    it("退出跟踪 = 写规则 + 摘索引，两件都做", async () => {
+        const git = new FakeGit();
+        git.tracked = [".obsidian/workspace.json"];
+        const fake = createFakeApp({ ".gitignore": "# 我自己的规则\n" });
+        const { service } = makeService(git, fake);
+
+        const outcome = await service.untrackLocalState();
+
+        expect(outcome.files).toEqual([".obsidian/workspace.json"]);
+        expect(outcome.rules).toBeGreaterThan(0);
+        // 摘索引这一步不能省 —— 少了它，文件照样每次同步都被提交，
+        // 而用户会得出「这功能没用」的结论。
+        expect(git.calls).toContain("untrack:.obsidian/workspace.json");
+
+        const gitignore = fake.files.get(".gitignore") ?? "";
+        expect(gitignore).toContain("# 我自己的规则");
+        expect(gitignore).toContain(".obsidian/workspace.json");
+        expect(gitignore).toContain(".obsidian/*-position-cache.json");
+    });
+
+    it("规则行**不带**尾斜杠 —— 带了会一条都匹配不上，而且不报错", async () => {
+        const git = new FakeGit();
+        git.tracked = [".obsidian/workspace.json"];
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        await service.untrackLocalState();
+
+        const gitignore = fake.files.get(".gitignore") ?? "";
+        expect(gitignore).toContain(".obsidian/workspace.json\n");
+        expect(gitignore).not.toContain(".obsidian/workspace.json/");
+    });
+
+    it("一个都没被跟踪时只补规则，不白调一次 untrack", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        const outcome = await service.untrackLocalState();
+
+        expect(outcome.files).toEqual([]);
+        expect(outcome.rules).toBeGreaterThan(0);
+        expect(git.calls.some((call) => call.startsWith("untrack:"))).toBe(false);
+    });
+
+    it("规则已经齐了就一条都不加（幂等，可以在两台设备各点一次）", async () => {
+        const git = new FakeGit();
+        const existing = [
+            ".obsidian/workspace.json",
+            ".obsidian/workspace-mobile.json",
+            ".obsidian/workspaces.json",
+            ".obsidian/*-position-cache.json",
+        ].join("\n");
+        const fake = createFakeApp({ ".gitignore": existing + "\n" });
+        const { service } = makeService(git, fake);
+
+        const outcome = await service.untrackLocalState();
+
+        expect(outcome.rules).toBe(0);
+        expect(fake.files.get(".gitignore")).toBe(existing + "\n");
+    });
+});
