@@ -110,6 +110,48 @@
     margin: 0.3em 0;
 }
 
+/* 大文件清单（`.obsync-large-file-list`，见 `LargeFilesModal`）。
+ *
+ * 与 `.obsync-steps` 同样**刻意不限定在设置页容器下**：弹窗挂在 body 上，
+ * 不在 `.obsync-settings` 里，限定作用域的话弹窗里一条样式都吃不到
+ * （`.obsync-diag-list` 那几条就是既有的小瑕疵，见上面那段说明）。 */
+.obsync-large-file-list {
+    margin: 0.5em 0 0.9em;
+    padding-left: 1.2em;
+    /* 大文件清单可能很长（一次提交几百个文件），限高滚动而不是把弹窗撑出屏幕。 */
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.obsync-large-file-list li {
+    margin: 0.25em 0;
+}
+
+/* 大小放**前面**：用户扫这个清单时第一个想知道的是「哪个最占地方」。
+ * 等宽数字让各行的小数点对齐，否则一列数字读起来是散的。 */
+.obsync-large-file-size {
+    display: inline-block;
+    min-width: 5.5em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-warning, #b98a00);
+}
+
+/* 路径可能很长（尤其带中文目录名），允许在任意位置折行而不是撑破弹窗。 */
+.obsync-large-file-path {
+    word-break: break-all;
+}
+
+/* 「新文件」标记：对未跟踪的文件，「退出跟踪」只需要一条忽略规则、不用摘索引 ——
+ * 用户能从这一眼看出两类文件的差别。 */
+.obsync-large-file-new {
+    margin-left: 0.5em;
+    padding: 0 0.35em;
+    border-radius: var(--radius-s, 4px);
+    border: 1px solid var(--background-modifier-border);
+    font-size: var(--font-ui-smaller, 0.85em);
+    color: var(--text-muted);
+}
+
 /* 「嵌套仓库」那一行（2026-10-04）：
  *
  * - `.obsync-nested-hint` 是更改列表上方那句解释（它回答的是「为什么这条消不掉」，

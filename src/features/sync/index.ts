@@ -84,6 +84,8 @@ export function createSyncModule(deps: SyncDeps): SyncModule | undefined {
         getCommitTemplate: () => deps.getSettings().sync.commitMessage,
         getStrategy: (): SyncStrategy => deps.getSettings().sync.syncStrategy,
         getConflictGuideName: () => deps.getT().sync.conflictGuideFile,
+        getLargeFileThresholdMb: () => deps.getSettings().sync.largeFileThresholdMb,
+        getIgnorePluginFolder: () => deps.getSettings().sync.ignorePluginFolder,
     }, statusBar);
 
     const automatics = new Automatics(service, () => ({

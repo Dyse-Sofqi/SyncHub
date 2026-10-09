@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Automatics, type AutomaticsSettings } from "../../src/features/sync/automatics";
 import { zhCN } from "../../src/core/i18n/locales/zh-cn";
 import type { SyncService } from "../../src/features/sync/syncService";
+import type { SyncOutcome } from "../../src/features/sync/types";
 import { createFakeApp, type FakeApp } from "../helpers/fakeApp";
 
 /**
@@ -36,6 +37,8 @@ function harness(
         onSync?: () => Promise<void>;
         /** 让 `notifier.describeError` 返回指定文案（模拟「错误被归类了」）。 */
         describeError?: (err: unknown) => string;
+        /** `sync()` 的返回值。默认「没有变化」。 */
+        syncOutcome?: SyncOutcome;
     } = {}
 ): Harness {
     const fake = createFakeApp();
@@ -61,9 +64,13 @@ function harness(
         get isBusy(): boolean {
             return busy;
         },
-        async sync(): Promise<void> {
+        async sync(): Promise<SyncOutcome> {
             calls.push("sync");
             await options.onSync?.();
+            // 必须返回**真实的形状**：消费方会读 `.kind`（大文件拦截那条链路）。
+            // 替身返回 `undefined` 的话，那里会以 TypeError 炸掉 —— 而它看起来
+            // 像「同步失败」（于是走进连续失败计数），实际是替身不忠实。
+            return options.syncOutcome ?? { kind: "up-to-date" };
         },
         async pull(): Promise<void> {
             calls.push("pull");
@@ -385,6 +392,53 @@ describe("连续失败的提示", () => {
         // 每一轮都真的跑了；提示只是附带的一句
         expect(calls).toHaveLength(4);
         expect(automatics.nextRunAt()).toBeDefined();
+    });
+});
+
+/**
+ * 大文件拦下时的提示。
+ *
+ * 自动同步是**无人值守**的：它被拦下时不弹窗（用户可能不在电脑前），
+ * 所以那条通知就是这件事唯一的痕迹。没有它的话，同步看起来一切正常，
+ * 而实际上一个字节都没提交 —— 用户下次打开远端才发现少了东西。
+ */
+describe("大文件拦下时的提示", () => {
+    /** 到点就跑一轮，跑 `rounds` 轮（与「连续失败的提示」那一组同一个写法）。 */
+    async function run(rounds: number): Promise<void> {
+        await vi.advanceTimersByTimeAsync(MINUTE_MS * rounds);
+    }
+
+    it("被拦下时发一条警告 —— 用户必须知道同步停了", async () => {
+        const { service, notices } = harness({
+            syncOutcome: {
+                kind: "large-files-pending",
+                largeFiles: [{ path: "字体.ttf", bytes: 40 * 1024 * 1024, tracked: false }],
+            },
+        });
+        const automatics = new Automatics(service, () => EVERY_MINUTE);
+
+        automatics.start();
+        await run(1);
+
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).toBe(zhCN.sync.autoSyncLargeFilesPaused(1));
+    });
+
+    it("被拦下**不算失败** —— 不该走进「连续失败」的计数", async () => {
+        // 它不是错误：下一轮照样跑，用户处理完就恢复。混进失败计数的话，
+        // 三轮之后会多出一条「连续失败 3 次」的误导提示。
+        const { service, notices } = harness({
+            syncOutcome: {
+                kind: "large-files-pending",
+                largeFiles: [{ path: "字体.ttf", bytes: 40 * 1024 * 1024, tracked: false }],
+            },
+        });
+        const automatics = new Automatics(service, () => EVERY_MINUTE);
+
+        automatics.start();
+        await run(4);
+
+        expect(notices.some((message) => message.includes("连续失败"))).toBe(false);
     });
 });
 

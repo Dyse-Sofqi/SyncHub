@@ -8,6 +8,7 @@ import {
 } from "../changeRows";
 import { formatCountdown } from "../countdown";
 import { formatBytes } from "../repoSize";
+import { runWithLargeFileGuard, type LargeFileGuardDeps } from "./largeFileGuard";
 import { IDLE_ACTIVITY, type BusyActivity, type SyncActivity } from "../statusBar";
 import { isFullyInSync } from "../syncState";
 import type { SyncService } from "../syncService";
@@ -568,7 +569,14 @@ export class SourceControlView extends ItemView {
                 .setButtonText(t.sync.actCommit)
                 .setTooltip(t.sync.actCommitHint)
                 .onClick(() =>
-                    void this.run(() => this.deps.service.commitAll({ announce: true }))
+                    void this.run(() =>
+                        runWithLargeFileGuard(this.largeFileGuardDeps(), (options) =>
+                            this.deps.service.commitAll({
+                                announce: true,
+                                allowLargeFiles: options.allowLargeFiles,
+                            })
+                        )
+                    )
                 );
             this.actionButtons.push(button);
         });
@@ -606,7 +614,14 @@ export class SourceControlView extends ItemView {
                 .setTooltip(t.sync.actSyncHint)
                 .setCta()
                 .onClick(() =>
-                    void this.run(() => this.deps.service.sync({ announceInSync: true }))
+                    void this.run(() =>
+                        runWithLargeFileGuard(this.largeFileGuardDeps(), (options) =>
+                            this.deps.service.sync({
+                                announceInSync: true,
+                                allowLargeFiles: options.allowLargeFiles,
+                            })
+                        )
+                    )
                 );
             // 侧边栏够宽时用 `margin-left: auto` 把它顶到右侧（见 styles.css）——
             // 要的是「在右侧」这个位置，而不只是「排在后面」。
@@ -1130,6 +1145,22 @@ export class SourceControlView extends ItemView {
      * 两处都渲染会白跑一遍。而这里**只安排重绘、不再自己读状态** ——
      * `withActivity` 收尾已经读过一次并把新状态推过来了（见 `currentStatus`）。
      */
+    /**
+     * `runWithLargeFileGuard` 要的那一包依赖。
+     *
+     * 单独抽出来是因为面板上有**两个**入口（提交、立即同步）要用同一份 ——
+     * 各写一遍的话，将来加了新设置项只会改到其中一处。
+     */
+    private largeFileGuardDeps(): LargeFileGuardDeps {
+        return {
+            app: this.app,
+            t: this.deps.getT(),
+            notifier: this.deps.service.deps.notifier,
+            service: this.deps.service,
+            thresholdMb: this.deps.service.deps.getLargeFileThresholdMb(),
+        };
+    }
+
     private async run(action: () => Promise<unknown>): Promise<void> {
         this.acting = true;
         try {

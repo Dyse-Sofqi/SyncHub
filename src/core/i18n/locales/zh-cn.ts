@@ -376,6 +376,40 @@ export const zhCN = {
             gitignoreSave: "保存",
             gitignoreSaving: "正在保存…",
             gitignoreRestore: "填入默认内容",
+
+            /**
+             * 「补齐推荐的忽略规则」。
+             *
+             * 与上面那个「填入默认内容」的区别必须让用户看得懂：那个是**覆盖式**的
+             * （自己写的规则会没），这个是**只补缺的**。desc 里点明这一点。
+             */
+            recommended: {
+                name: "补齐推荐的忽略规则",
+                desc: "把字体、Office 临时文件等几类「大且不变」的规则并进上面的 .gitignore。只追加缺的那些，你自己写的规则一行都不动。",
+                action: "补齐",
+                noneAdded: "推荐的规则都已经在 .gitignore 里了，没有需要补的。",
+                added: (count: number, groups: string) => `已补 ${count} 条规则（${groups}）。`,
+                /** 规则分组的显示名。键与 `RecommendedGroupId` 一一对应。 */
+                groups: {
+                    font: "字体文件",
+                    officeTemp: "Office 临时文件",
+                    pluginFolder: "插件目录",
+                },
+            },
+            /**
+             * 提交前的大文件检查。
+             *
+             * desc 必须写清「为什么这一步来得及、而事后不行」—— 用户不理解为什
+             * 么要拦，第一反应就是把它关掉。
+             */
+            largeFileThreshold: {
+                name: "大文件阈值",
+                desc: "提交时超过这个大小的文件会被拦下问一句。设为 0 可关闭。git 的历史不可逆 —— 事后清理要重写全部提交，所以这是唯一来得及的时机。",
+            },
+            ignorePluginFolder: {
+                name: "忽略插件目录",
+                desc: "把整个插件目录也加进推荐规则。插件是仓库体积最大的单一来源，但忽略之后换设备 clone 时插件不会自动就位，需要重新安装。",
+            },
             gitignoreOpen: "在编辑器中打开",
             gitignoreSavedNotice: "已保存 .gitignore。",
             /**
@@ -1204,6 +1238,50 @@ export const zhCN = {
         pendingChangesDesc: (size: string, files: number) => `${size}（${files} 个文件）`,
         /** 读不到体积时**不编数字** —— 0 B 会被当成「空仓库」。 */
         sizeUnknown: "读不到",
+        /**
+         * 自动同步被大文件拦下时的提示。
+         *
+         * 必须同时说清两件事：**为什么停**（有大文件）与**去哪处理**（面板里那两个选择）。
+         * 只说「有 N 个大文件」的话，用户不知道同步已经停了，会以为它一直在正常跑。
+         */
+        autoSyncLargeFilesPaused: (count: number) =>
+            `有 ${count} 个文件超过大文件阈值，已暂停自动同步 —— 到「仓库同步」面板处理（仍然提交，或让它们退出跟踪）后即可恢复。`,
+
+        /**
+         * 提交前的大文件检查。
+         *
+         * 文案的重点全在**代价**上：两个选项各要付出什么，必须当场说清楚。
+         * 只说「这些文件很大」的话，用户没有任何依据去选。
+         */
+        largeFiles: {
+            modal: {
+                title: (count: number, thresholdMb: number) =>
+                    `${count} 个文件超过 ${thresholdMb} MB`,
+                intro:
+                    "这些文件这次会被提交。git 的历史不可逆 —— 一旦提交，它们就会永久占着仓库体积。",
+                /** 未跟踪的文件会带上这个标记：对它们只需要一条忽略规则，不用摘索引。 */
+                newBadge: "新文件",
+                warningHeading: "两个选择的代价：",
+                warningCommitAnyway:
+                    "仍然提交：它以后每次改动都会在历史里再存一份完整副本，仓库会持续变大。",
+                warningUntrack:
+                    "退出跟踪并忽略：它不再有版本历史（本地文件保留），换设备时也不会自动带过去。",
+                warningHistory:
+                    "注意：历史里已经存在的副本不会消失，仓库大小不会因此变小 —— 那需要重写历史，本插件不做。",
+                cancel: "取消",
+                untrack: "退出跟踪并忽略",
+                commitAnyway: "仍然提交",
+            },
+            /**
+             * 「退出跟踪」执行完的反馈。
+             *
+             * 两句话都不能省：「本地文件都在」回答「我的东西还在吗」，
+             * 「历史里的副本仍在」回答「仓库怎么没变小」—— 后者不写的话，
+             * 用户会拿体积没变当成操作失败。
+             */
+            untracked: (files: number, rules: number) =>
+                `已让 ${files} 个文件退出跟踪（新增 ${rules} 条忽略规则）。本地文件都在，历史里的副本仍在。`,
+        },
         noRemote: "还没有配置远端仓库，请在设置中填写远端地址。",
         conflictDetected: (count: number) =>
             `检测到 ${count} 个冲突文件，已生成冲突清单，请手动处理后提交。`,

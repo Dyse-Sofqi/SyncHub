@@ -191,6 +191,36 @@ export interface SyncSettings {
     syncStrategy: "merge" | "rebase" | "reset";
     /** git 可执行文件路径。空表示用 PATH 里的 git。 */
     gitPath: string;
+    /**
+     * 大文件阈值（MB）。**超过这个大小的待提交文件会被拦下问一句**；0 = 关闭这项检查。
+     *
+     * ## 为什么需要它
+     *
+     * 忽略规则只能挡住想到过的类型（见 `features/sync/recommendedIgnores.ts`）。
+     * 真正把仓库撑起来的是意料之外的大文件：某个插件的向量库缓存、一段录屏、
+     * 一个几百 MB 的 PDF。它们第一次进 git 时没有任何提示，而 git 的历史不可逆 ——
+     * 事后清理要重写全部提交（本插件明确不做）。所以这是唯一来得及的一步。
+     *
+     * ## 为什么 0 = 关闭，而不是另给一个开关
+     *
+     * 与「图片管理」里「最小体积 0 = 不限」同一个约定（见 `imageLibrary.ts`）：
+     * 一个数字就说清楚了，不需要用户理解两个控件的组合。
+     *
+     * 默认 5 MB —— 笔记正文极少到这个量级，而实测中招的几类（字体、插件 `main.js`、
+     * 向量库缓存）最小的也有 4 MB。
+     */
+    largeFileThresholdMb: number;
+    /**
+     * 是否把整个插件目录（`${configDir}/plugins/`）也加进推荐忽略规则。
+     *
+     * 默认**关**。打开它会显著缩小仓库 —— 插件的 `main.js` 是体积最大的单一来源
+     * （一次实测：单个插件在 159 次提交里存了 22 个版本，每个约 8 MB）。代价是
+     * **换设备 clone 之后插件不会自动就位**，得重新装一遍。这是个取舍，所以做成
+     * 开关交给用户，而不是替他选。
+     *
+     * 由 `applyRecommendedIgnores` 读走（见 `features/sync/syncService.ts`）。
+     */
+    ignorePluginFolder: boolean;
 }
 
 /**
@@ -492,6 +522,12 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
         // rebase/reset 交给明确知道自己要什么的用户。
         syncStrategy: "merge",
         gitPath: "",
+        // 大文件阈值。默认 5 MB：笔记正文极少到这个量级，而会中招的东西
+        // （字体、插件 main.js、向量库缓存）最小的也有 4 MB。
+        largeFileThresholdMb: 5,
+        // 默认**关**：打开它会让换设备 clone 之后插件不自动就位。
+        // 这是取舍，不该由默认值替用户决定。
+        ignorePluginFolder: false,
     },
     images: {
         // 默认开着：没配好之前它什么也不做（`isConfigured()` 为假），
@@ -728,6 +764,18 @@ export function normalizeSettings(loaded: unknown): ObsyncSettings {
     if (!["merge", "rebase", "reset"].includes(merged.sync.syncStrategy)) {
         merged.sync.syncStrategy = "merge";
     }
+
+    // 大文件阈值：0 = 关闭（见 `SyncSettings.largeFileThresholdMb`）。
+    // 非数字 / 负数收敛到**默认值**而不是钳到 0 —— 0 是「明确关掉」，
+    // 不该是「填错了」的结果，否则一个手改坏的字段会静默关掉防护。
+    // 上限 1024 MB：再大就等于关了，而一个「填了没反应」的输入框没有意义。
+    if (!(merged.sync.largeFileThresholdMb >= 0)) {
+        merged.sync.largeFileThresholdMb = DEFAULT_SETTINGS.sync.largeFileThresholdMb;
+    }
+    merged.sync.largeFileThresholdMb = clamp(merged.sync.largeFileThresholdMb, 0, 1024);
+
+    // `ignorePluginFolder` 是布尔：`mergeWithDefaults` 已经把类型不对的旧值
+    // 回退到默认 `false`（与 `installer` 那一组同一个口径），这里不必再兜。
 
     // ── 图片同步 ──
     //

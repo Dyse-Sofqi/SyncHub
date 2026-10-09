@@ -1540,6 +1540,55 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     .onClick(() => void this.untrackImageFolders(reload))
             );
 
+        // 「补齐推荐的忽略规则」（2026-10-09）。
+        //
+        // 与上面那个动作的区别：那个是**针对图片**的三步流程（要先确认云端有每一张），
+        // 因为它会把图片从 git 里摘出去；这个**只加忽略规则**，不动任何已跟踪的文件，
+        // 所以点一下就走。
+        //
+        // 为什么不复用「恢复默认模板」：那个是**覆盖式**的（用户自己写的规则会没）。
+        // 这个是幂等追加 —— 见 `applyRecommendedIgnores` 的说明。
+        new Setting(rows)
+            .setName(t.settings.sync.recommended.name)
+            .setDesc(t.settings.sync.recommended.desc)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.recommended.action)
+                    .onClick(() => void this.applyRecommendedIgnores(reload))
+            );
+
+        // 大文件阈值 —— 提交前拦下超标的文件（0 = 关闭检查）。
+        //
+        // `min` / `max` 必须与 `normalizeSettings` 的钳制一致（见 `addNumberField`）：
+        // 不一致就会出现「框里能填、存下去又被改掉」那种新的谎。
+        const thresholdSetting = new Setting(rows)
+            .setName(t.settings.sync.largeFileThreshold.name)
+            .setDesc(t.settings.sync.largeFileThreshold.desc);
+        this.addNumberField(thresholdSetting, {
+            get: () => this.obsync.settings.sync.largeFileThresholdMb,
+            apply: async (value) => {
+                this.obsync.settings.sync.largeFileThresholdMb = value;
+                await this.commit();
+            },
+            min: 0,
+            max: 1024,
+            ariaLabel: t.settings.sync.largeFileThreshold.name,
+            unit: "MB",
+        });
+
+        // 插件目录开关 —— 打开它会显著缩小仓库，代价是换设备要重装插件。
+        new Setting(rows)
+            .setName(t.settings.sync.ignorePluginFolder.name)
+            .setDesc(t.settings.sync.ignorePluginFolder.desc)
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.obsync.settings.sync.ignorePluginFolder)
+                    .onChange(async (value) => {
+                        this.obsync.settings.sync.ignorePluginFolder = value;
+                        await this.commit();
+                    })
+            );
+
         // 读内容要 await，而渲染是同步的 —— 先把框画出来，读到了再填。
         void (async () => {
             try {
@@ -1556,6 +1605,43 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             }
             refreshStatus();
         })();
+    }
+
+    /**
+     * 「补齐推荐的忽略规则」：把 SyncHub 推荐的那几条并进 `.gitignore`（2026-10-09）。
+     *
+     * 与 `untrackImageFolders` 的区别：那个会**动已跟踪的文件**（把图片从索引里摘掉），
+     * 所以要三道闸确认云端有每一张；这个只加忽略规则、不碰索引，
+     * 最坏的结果是多几行规则（用户随时能删），所以点一下就走。
+     *
+     * @param onDone 执行完刷新代码框 —— 与 `untrackImageFolders` 同一个理由：
+     *               框里那份是旧的，而框是**失焦即保存**的，用户接着改一个字
+     *               就会把刚写下去的规则整份覆盖掉（看起来像「加了规则又没了」）。
+     */
+    private async applyRecommendedIgnores(onDone: () => Promise<void>): Promise<void> {
+        const t = this.obsync.t;
+        const sync = this.obsync.sync;
+        if (!sync) return;
+
+        try {
+            const added = await sync.service.applyRecommendedIgnores();
+            await onDone();
+
+            // 「点了没反应」和「本来就配好了」必须能分开 —— 否则用户会以为按钮坏了。
+            if (added.length === 0) {
+                this.obsync.notifier.info(t.settings.sync.recommended.noneAdded);
+                return;
+            }
+
+            // 说清**补的是哪几类**，而不是只报一个数字：「加了一条 *.ttf」远不如
+            // 「字体文件」有用 —— 后者才是用户能拿去判断「这条我认不认」的东西。
+            const groups = [...new Set(added.map((rule) => rule.group))]
+                .map((group) => t.settings.sync.recommended.groups[group])
+                .join("、");
+            this.obsync.notifier.success(t.settings.sync.recommended.added(added.length, groups));
+        } catch (err) {
+            this.obsync.notifier.reportError(err);
+        }
     }
 
     /**

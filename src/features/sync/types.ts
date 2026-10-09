@@ -6,6 +6,8 @@
  * 将来若换实现（比如支持其他 git 后端）不用动上层。
  */
 
+import type { LargePendingFile } from "./largeFiles";
+
 /** 同步策略三态，对应 obsidian-git 的三种 pull 行为。 */
 export type SyncStrategy = "merge" | "rebase" | "reset";
 
@@ -85,11 +87,24 @@ export interface SyncOutcome {
         | "up-to-date"
         | "fast-forwarded"
         /** 拉取产生冲突，现场已保留并写好指南 —— 链路必须在这里停住。 */
-        | "conflict";
+        | "conflict"
+        /**
+         * 有超过阈值的待提交文件，**已拦下等你决定** —— 链路必须在这里停住。
+         *
+         * 与 `conflict` 同构：都是「不能替你决定、也不能假装成功」的状态。
+         * 继续提交会把大文件写进历史（git 历史不可逆），而继续拉取/推送没有意义 ——
+         * 用户看到「同步完成」却发现那个文件没上去，比直接告诉他更糟。
+         *
+         * 调用方（面板 / 命令 / 自动同步）据此弹窗或给提示；确认后带
+         * `allowLargeFiles: true` 重跑。
+         */
+        | "large-files-pending";
     /** 拉取/推送影响的提交数。 */
     commits?: number;
     /** 拉取时更新的文件数。 */
     files?: number;
+    /** `large-files-pending` 时被拦下的文件（按大小降序）。 */
+    largeFiles?: LargePendingFile[];
 }
 
 // ── 诊断 ────────────────────────────────────────────────────────────────────

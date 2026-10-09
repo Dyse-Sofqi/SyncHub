@@ -13,6 +13,17 @@ import {
 import { formatBytes, sumFileBytes } from "./repoSize";
 import { isFullyInSync } from "./syncState";
 import { ignoreRuleFor, mergeRuleLines } from "./imagesIgnore";
+import {
+    mergeRecommendedRules,
+    recommendedRules,
+    type RecommendedRule,
+} from "./recommendedIgnores";
+import {
+    findLargeFiles,
+    pendingFilesForCommit,
+    thresholdBytesFromMb,
+    type LargePendingFile,
+} from "./largeFiles";
 import type { GitManager } from "./gitManager";
 import { ConflictError, describeSyncError } from "./errors";
 import type { SecretStore } from "../../core/secretStore";
@@ -56,6 +67,10 @@ export interface SyncHost {
     getStrategy(): SyncStrategy;
     /** 冲突指南文件名（已本地化），空串表示不写指南。 */
     getConflictGuideName(): string;
+    /** 大文件阈值（MB）；0 = 关闭提交前的大文件检查。 */
+    getLargeFileThresholdMb(): number;
+    /** 是否把插件目录也加进推荐忽略规则（设置项，默认关）。 */
+    getIgnorePluginFolder(): boolean;
 }
 
 /**
@@ -299,12 +314,19 @@ export class SyncService {
         }
     }
 
-    /** 提交全部更改（暂存所有 + 提交）。没有更改时是静默的空操作。 */
-    async commitAll(options: { announce?: boolean } = {}): Promise<SyncOutcome> {
+    /**
+     * 提交全部更改（暂存所有 + 提交）。没有更改时是静默的空操作。
+     *
+     * `allowLargeFiles` 由「用户已经看过大文件清单并选了仍然提交」的路径传 true ——
+     * 那是**一次性的放行**，只对这一次提交有效（下一次仍会重新问）。
+     */
+    async commitAll(
+        options: { announce?: boolean; allowLargeFiles?: boolean } = {}
+    ): Promise<SyncOutcome> {
         return this.enqueue(() =>
             this.withActivity(
                 "committing",
-                () => this.doCommitAll(),
+                () => this.doCommitAll({ allowLargeFiles: options.allowLargeFiles }),
                 options.announce ? (_result, status) => this.announceAfterCommit(status) : undefined
             )
         );
@@ -347,12 +369,20 @@ export class SyncService {
      * 「立即同步已经是万全之策」，而不想拉取的人用「提交」+「推送」两步即可。
      * 别再把它加回来 —— 除非有人真需要那个单步动作。
      */
-    async sync(options: { announceInSync?: boolean } = {}): Promise<SyncOutcome> {
+    async sync(
+        options: { announceInSync?: boolean; allowLargeFiles?: boolean } = {}
+    ): Promise<SyncOutcome> {
         return this.enqueue(() =>
             this.withActivity(
                 "committing",
                 async () => {
-                    await this.doCommitAll();
+                    const committed = await this.doCommitAll({
+                        allowLargeFiles: options.allowLargeFiles,
+                    });
+                    // 被大文件拦下时**链路必须停住**：继续拉取/推送没有意义，
+                    // 而且用户会看到「同步完成」而那个文件其实没提交 —— 比直接
+                    // 告诉他更糟。与 `conflict` 同一个处置。
+                    if (committed.kind === "large-files-pending") return committed;
 
                     // 每个阶段都更新活动状态 —— 只在开头设一次的话，
                     // 整条链路（含拉取、推送）都会显示「正在提交」，与实际不符。
@@ -365,7 +395,9 @@ export class SyncService {
                         // 拉下来的文件可能又和本地未提交内容合并出新东西 ——
                         // 二次提交后再推送，保证推上去的是完整状态。
                         this.setActivity("committing", true);
-                        await this.doCommitAll();
+                        // 第二次提交：内容就是刚提交的那批（拉取合并出来的），
+                        // 第一次已经问过了 —— 不再重复问，否则用户确认完还会被弹第二次。
+                        await this.doCommitAll({ allowLargeFiles: true });
                     }
 
                     this.setActivity("pushing", true);
@@ -858,6 +890,75 @@ export class SyncService {
     }
 
     /**
+     * 把若干路径加进忽略规则并退出跟踪。
+     *
+     * 与 `untrackAndIgnore` 的区别只有一处，但那一处会决定成败：**只对已跟踪的路径
+     * 摘索引**。对不存在的索引项执行 `git rm --cached` 会直接报错
+     * （`did not match any files`），而大文件清单里必然混着未跟踪的新文件 ——
+     * 用 `untrackAndIgnore` 一把梭会让整批操作失败，用户看到的是「点了没反应」。
+     *
+     * 忽略规则则对**所有**路径都要加：未跟踪的文件下次会被 `git add -A` 带上，
+     * 少了规则就等于没处理。
+     *
+     * 只动索引与 `.gitignore`：**工作区文件一个都不碰**。
+     */
+    async ignorePaths(paths: string[], trackedPaths: string[]): Promise<number> {
+        if (paths.length === 0) return 0;
+        const current = (await this.readGitignore()) ?? "";
+        const merged = mergeRuleLines(
+            current,
+            paths.map((path) => ignoreRuleFor(path))
+        );
+        if (merged.added.length > 0) await this.writeGitignore(merged.content);
+
+        if (trackedPaths.length > 0) await this.untrackPaths(trackedPaths);
+        return merged.added.length;
+    }
+
+    /**
+     * 「退出跟踪并忽略」大文件清单里的那些文件。
+     *
+     * 拆出这一层而不是让界面自己拼 `ignorePaths`：`tracked` 这一位的来源
+     * （`largeFiles.ts` 的 `pendingFilesForCommit`）与消费必须成对出现，
+     * 分开写迟早会有人漏掉它。
+     */
+    async ignoreLargeFiles(files: LargePendingFile[]): Promise<number> {
+        return this.ignorePaths(
+            files.map((file) => file.path),
+            files.filter((file) => file.tracked).map((file) => file.path)
+        );
+    }
+
+    /**
+     * 把 SyncHub 推荐的一组忽略规则**补齐**到 `.gitignore`。
+     *
+     * ## 为什么是「补齐」而不是复用「恢复默认模板」
+     *
+     * 设置页里那个按钮是**覆盖式**的：它把模板原文填进代码框，用户保存后自己写的
+     * 规则就没了。那是给「我想推倒重来」用的。这个动作不一样 —— 它走 `mergeRuleLines`，
+     * **只追加缺的那些，已有的一行都不动**，所以可以随手点（幂等），
+     * 也可以在两台设备各点一次。
+     *
+     * ## 为什么不干脆改 `gitignoreTemplate`
+     *
+     * 模板只在**初始化仓库时**写入一次（`ensureGitignore` 见文件已存在就直接返回）。
+     * 所以对已经用了一阵子的库，改模板一个字都不会生效 —— 而恰恰是这些库才需要它
+     * （体积已经涨上去了）。补齐动作对新库和老库都有效，这是它存在的理由。
+     *
+     * @returns 这次真正写进去的规则（带分组），空数组 = 本来就已经配好了。
+     */
+    async applyRecommendedIgnores(): Promise<RecommendedRule[]> {
+        const current = (await this.readGitignore()) ?? "";
+        const rules = recommendedRules({
+            configDir: this.deps.app.vault.configDir,
+            ignorePluginFolder: this.deps.getIgnorePluginFolder(),
+        });
+        const merged = mergeRecommendedRules(current, rules);
+        if (merged.added.length > 0) await this.writeGitignore(merged.content);
+        return merged.added;
+    }
+
+    /**
      * 把错误翻译成用户可读文案。
      *
      * **先用自己的翻译器**，而不是只依赖 `notifier.describeError` ——
@@ -952,7 +1053,7 @@ export class SyncService {
 
     // ── 内部（不加锁版本，供已持锁的链路复用） ────────────────────────────
 
-    private async doCommitAll(): Promise<SyncOutcome> {
+    private async doCommitAll(options: { allowLargeFiles?: boolean } = {}): Promise<SyncOutcome> {
         const status = await this.git.status();
 
         // 冲突未解决时**绝不能提交**。
@@ -978,20 +1079,44 @@ export class SyncService {
         }
 
         /**
-         * 本次提交涉及的文件（去重）。
+         * 本次提交涉及的文件（去重 + 标出是否已跟踪）。
          *
-         * **必须去重**：同一个文件可能既在 `staged` 又在 `unstaged` 里 ——
-         * `mapStatus` 是按 `git status` 的两位状态位分别归类的，
-         * 而「改了又暂存」（`AM` / `MM`）的文件两个位都非空，于是被放进两个数组。
-         * 不去重的话 `{{numFiles}}` 会多算、`{{files}}` 会把同一个文件列两遍。
+         * 去重规则搬进了 `pendingFilesForCommit` —— 大文件检查要用**同一份**规则，
+         * 两处各写一遍就是那种「改了其中一处、另一处悄悄不对」的老问题。
+         * 「是否已跟踪」那一笔是给大文件清单用的：未跟踪的文件不需要 `git rm --cached`
+         * （对不存在的索引项执行它会直接报错）。
          */
-        const files = [
-            ...new Set(
-                [...status.staged, ...status.unstaged, ...status.untracked].map(
-                    (change) => change.path
-                )
-            ),
-        ];
+        const pending = pendingFilesForCommit(status);
+
+        // 提交前的大文件检查 —— **这是唯一来得及的一步**。git 的历史不可逆：
+        // 大文件一旦进了提交，就只能重写全部历史才能清掉（本插件明确不做）。
+        //
+        // 忽略规则挡的是「想到过的类型」，而把仓库撑起来的多半是意料之外的东西
+        // （插件的向量库缓存、录屏、PDF）。所以这里按**大小**再兜一道。
+        //
+        // `allowLargeFiles` 由「用户看过清单并选了仍然提交」的路径传 true；
+        // 阈值 0 = 关闭检查（见 `SyncSettings.largeFileThresholdMb`）。
+        const thresholdMb = this.deps.getLargeFileThresholdMb();
+        if (!options.allowLargeFiles && thresholdMb > 0) {
+            const largeFiles = await findLargeFiles(
+                pending,
+                async (path) => {
+                    try {
+                        const stats = await this.deps.app.vault.adapter.stat(path);
+                        return stats?.size;
+                    } catch (err) {
+                        // 取不到大小（文件刚被删、读不了）时跳过：那部分不增加体积，
+                        // 也不该让整条提交链路失败 —— 只是少一条提示。
+                        logger.debug("could not stat pending file", path, err);
+                        return undefined;
+                    }
+                },
+                thresholdBytesFromMb(thresholdMb)
+            );
+            if (largeFiles.length > 0) return { kind: "large-files-pending", largeFiles };
+        }
+
+        const files = pending.map((file) => file.path);
 
         await this.git.stage([]);
         const message = renderCommitMessage(this.deps.getCommitTemplate(), { files });

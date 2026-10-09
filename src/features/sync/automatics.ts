@@ -207,7 +207,18 @@ export class Automatics {
             // 写的必须是「定时同步」而不是「定时提交」：只写提交会让人以为
             // 「把别的间隔设为 0」就能拦住网络动作 —— 拦不住。
             const outcome = await this.service.sync();
-            void outcome;
+            // 被大文件拦下时整条链路停住了 —— 这是**用户必须知道**的停顿：
+            // 不说的话自动同步看起来「正常」，而实际上什么都没提交，
+            // 用户下次打开远端才发现少了东西。
+            //
+            // 但不弹窗（他可能不在电脑前）：给一条通知即可。每次到点都提示是有意的 ——
+            // 只要那个文件还在，自动同步就一直停着，这条提示就是它唯一的表现。
+            if (outcome.kind === "large-files-pending") {
+                const t = this.service.deps.getT();
+                this.service.deps.notifier.warn(
+                    t.sync.autoSyncLargeFilesPaused(outcome.largeFiles?.length ?? 0)
+                );
+            }
             // 成功即清零：提示是给「**持续**失败」这个状态，不是给每一次失败。
             this.consecutiveFailures = 0;
         } catch (err) {

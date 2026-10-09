@@ -290,6 +290,40 @@ export const en = {
             gitignoreSave: "Save",
             gitignoreSaving: "Saving…",
             gitignoreRestore: "Fill in defaults",
+
+            /**
+             * "Add recommended ignore rules".
+             *
+             * The difference from "Fill in defaults" above has to be obvious:
+             * that one **overwrites** (rules you wrote are gone), this one only
+             * **fills in the gaps**. The desc says so.
+             */
+            recommended: {
+                name: "Add recommended ignore rules",
+                desc: 'Append the "large and unchanging" rules (fonts, Office temp files) to the .gitignore above. Only missing rules are added — nothing you wrote is touched.',
+                action: "Add",
+                noneAdded: "All recommended rules are already in .gitignore — nothing to add.",
+                added: (count: number, groups: string) => `Added ${count} rule(s) (${groups}).`,
+                groups: {
+                    font: "fonts",
+                    officeTemp: "Office temp files",
+                    pluginFolder: "plugin folder",
+                },
+            },
+            /**
+             * The pre-commit large-file check.
+             *
+             * The desc must explain why this step works and a later cleanup does
+             * not — a user who does not see the point will just switch it off.
+             */
+            largeFileThreshold: {
+                name: "Large-file threshold",
+                desc: "Files larger than this are held back with a prompt when committing. Set to 0 to disable. Git history is irreversible — cleaning up later means rewriting every commit, so this is the only chance you get.",
+            },
+            ignorePluginFolder: {
+                name: "Ignore plugin folder",
+                desc: "Also add the whole plugin folder to the recommended rules. Plugins are the single largest source of repository bloat, but ignoring them means a fresh clone on another device will not have them installed.",
+            },
             gitignoreOpen: "Open in editor",
             gitignoreSavedNotice: "Saved .gitignore.",
             gitignoreSaveFailed:
@@ -992,6 +1026,51 @@ export const en = {
         pendingChangesLabel: "Pending changes",
         pendingChangesDesc: (size: string, files: number) => `${size} (${files} file(s))`,
         sizeUnknown: "unavailable",
+        /**
+         * Shown when auto sync is stopped by the large-file check.
+         *
+         * Must say both **why it stopped** and **where to resolve it** — "N large
+         * files" alone leaves the user thinking sync is still running normally.
+         */
+        autoSyncLargeFilesPaused: (count: number) =>
+            `${count} file(s) exceed the large-file threshold, so auto sync is paused — resolve them in the "Vault sync" panel (commit anyway, or untrack them) to resume.`,
+
+        /**
+         * The pre-commit large-file check.
+         *
+         * The copy is all about **cost**: each option has a price, and the user
+         * cannot choose without seeing it. "These files are large" alone gives
+         * them nothing to decide with.
+         */
+        largeFiles: {
+            modal: {
+                title: (count: number, thresholdMb: number) =>
+                    `${count} file(s) exceed ${thresholdMb} MB`,
+                intro:
+                    "These files will be committed this time. Git history is irreversible — once committed, they occupy repository space forever.",
+                newBadge: "new",
+                warningHeading: "What each choice costs:",
+                warningCommitAnyway:
+                    "Commit anyway: every future change stores another full copy in history, so the repository keeps growing.",
+                warningUntrack:
+                    "Untrack and ignore: it loses version history (the local file stays), and it will not travel to your other devices.",
+                warningHistory:
+                    "Note: copies already in history do not disappear, so the repository size will not shrink — that needs a history rewrite, which this plugin does not do.",
+                cancel: "Cancel",
+                untrack: "Untrack and ignore",
+                commitAnyway: "Commit anyway",
+            },
+            /**
+             * Feedback after "untrack".
+             *
+             * Both halves matter: "local files are kept" answers "is my stuff
+             * still there", and "copies in history remain" answers "why didn't
+             * the repo shrink" — without the latter, an unchanged size reads as
+             * a failed operation.
+             */
+            untracked: (files: number, rules: number) =>
+                `Untracked ${files} file(s) (${rules} ignore rule(s) added). Local files are kept; copies already in history remain.`,
+        },
         noRemote: "No remote repository configured. Set the remote URL in settings.",
         conflictDetected: (count: number) =>
             `${count} conflicted file(s) detected. A conflict list has been written; resolve them and commit manually.`,

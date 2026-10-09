@@ -213,7 +213,12 @@ class FakeGit implements GitManager {
     }
 }
 
-function makeService(git: FakeGit, fake: FakeApp) {
+function makeService(
+    git: FakeGit,
+    fake: FakeApp,
+    /** 改设置用。目前只有「大文件检查」需要 —— 它的默认阈值是 5 MB。 */
+    mutateSettings?: (settings: ReturnType<typeof normalizeSettings>) => void
+) {
     const notices: string[] = [];
     const notifier = new Notifier({ getShowNotices: () => true, getT: () => zhCN });
     notifier.error = (message: string) => notices.push(message);
@@ -234,6 +239,7 @@ function makeService(git: FakeGit, fake: FakeApp) {
 
     const settings = normalizeSettings({});
     settings.sync.commitMessage = "backup {{numFiles}}";
+    mutateSettings?.(settings);
 
     const statusBar = new StatusBar({ item: fakeItem, getT: () => zhCN });
     // 记录活动状态变化 —— 「整条链路都显示正在提交」那个 bug 就靠这个断言。
@@ -253,10 +259,138 @@ function makeService(git: FakeGit, fake: FakeApp) {
         getCommitTemplate: () => settings.sync.commitMessage,
         getStrategy: () => "merge",
         getConflictGuideName: () => zhCN.sync.conflictGuideFile,
+        getLargeFileThresholdMb: () => settings.sync.largeFileThresholdMb,
+        getIgnorePluginFolder: () => settings.sync.ignorePluginFolder,
     }, statusBar);
 
     return { service, notices, activities, secretStore };
 }
+
+/**
+ * 提交前的大文件检查。
+ *
+ * 它守的是**唯一来得及**的那一步：git 的历史不可逆，大文件一旦进了提交，
+ * 就只能重写全部历史才能清掉（本插件明确不做）。所以这里要钉住两件事：
+ *
+ * 1. 拦下时**不留下任何痕迹** —— 没 stage、没 commit。半途而废比不拦更糟：
+ *    用户以为被拦住了，实际上文件已经在索引里，下一次提交照样带上。
+ * 2. 放行是**一次性**的 —— 只对这一次提交有效。
+ */
+describe("提交前的大文件检查", () => {
+    /**
+     * 阈值调成 1 KB。
+     *
+     * 默认是 5 MB —— 在测试里造一个 5 MB 的字符串既慢又没必要，
+     * 而这个检查关心的是「超过阈值」这件事本身，与阈值多大无关。
+     */
+    const tinyThreshold = (settings: ReturnType<typeof normalizeSettings>): void => {
+        settings.sync.largeFileThresholdMb = 0.001;
+    };
+
+    it("有大文件时拦下：不 stage、不 commit", async () => {
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({ "大文件.bin": "x".repeat(4096) });
+        const git = new FakeGit();
+        git.unstaged = ["大文件.bin"];
+        const { service } = makeService(git, fake, tinyThreshold);
+
+        const outcome = await service.commitAll();
+
+        expect(outcome.kind).toBe("large-files-pending");
+        expect(outcome.largeFiles?.map((file) => file.path)).toEqual(["大文件.bin"]);
+        // 关键：什么都没动过
+        expect(git.calls).not.toContain("stage-all");
+        expect(git.calls.some((call) => call.startsWith("commit:"))).toBe(false);
+    });
+
+    it("小文件照常提交，不受影响", async () => {
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({ "小笔记.md": "很短" });
+        const git = new FakeGit();
+        git.unstaged = ["小笔记.md"];
+        const { service } = makeService(git, fake, tinyThreshold);
+
+        const outcome = await service.commitAll();
+
+        expect(outcome.kind).toBe("committed");
+        expect(git.calls).toContain("stage-all");
+    });
+
+    it("阈值设为 0 = 关闭检查", async () => {
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({ "大文件.bin": "x".repeat(4096) });
+        const git = new FakeGit();
+        git.unstaged = ["大文件.bin"];
+        const { service } = makeService(git, fake, (settings) => {
+            settings.sync.largeFileThresholdMb = 0;
+        });
+
+        const outcome = await service.commitAll();
+
+        expect(outcome.kind).toBe("committed");
+    });
+
+    it("allowLargeFiles 放行这一次提交", async () => {
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({ "大文件.bin": "x".repeat(4096) });
+        const git = new FakeGit();
+        git.unstaged = ["大文件.bin"];
+        const { service } = makeService(git, fake, tinyThreshold);
+
+        const outcome = await service.commitAll({ allowLargeFiles: true });
+
+        expect(outcome.kind).toBe("committed");
+    });
+
+    it("标出「是否已跟踪」—— 未跟踪的不需要 rm --cached", async () => {
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({
+            "已跟踪.bin": "x".repeat(4096),
+            "新来的.bin": "y".repeat(4096),
+        });
+        const git = new FakeGit();
+        git.unstaged = ["已跟踪.bin"];
+        git.untracked = ["新来的.bin"];
+        const { service } = makeService(git, fake, tinyThreshold);
+
+        const outcome = await service.commitAll();
+
+        const byPath = new Map(outcome.largeFiles?.map((file) => [file.path, file.tracked]));
+        expect(byPath.get("已跟踪.bin")).toBe(true);
+        expect(byPath.get("新来的.bin")).toBe(false);
+    });
+
+    it("整条同步链路也停住 —— 不拉取、不推送", async () => {
+        // 只拦提交是不够的：链路继续跑下去会显示「同步完成」，
+        // 而那个文件其实没上去。用户看到的是假成功。
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({ "大文件.bin": "x".repeat(4096) });
+        const git = new FakeGit();
+        git.unstaged = ["大文件.bin"];
+        const { service } = makeService(git, fake, tinyThreshold);
+
+        const outcome = await service.sync();
+
+        expect(outcome.kind).toBe("large-files-pending");
+        expect(git.calls.some((call) => call.startsWith("pull"))).toBe(false);
+        expect(git.calls).not.toContain("push");
+    });
+
+    it("清单按大小降序 —— 先看最占地方的那个", async () => {
+        __setApiVersion("1.13.1");
+        const fake = createFakeApp({
+            "小一点.bin": "x".repeat(4096),
+            "很大.bin": "y".repeat(16384),
+        });
+        const git = new FakeGit();
+        git.unstaged = ["小一点.bin", "很大.bin"];
+        const { service } = makeService(git, fake, tinyThreshold);
+
+        const outcome = await service.commitAll();
+
+        expect(outcome.largeFiles?.map((file) => file.path)).toEqual(["很大.bin", "小一点.bin"]);
+    });
+});
 
 describe("commitAll", () => {
     it("有更改时：暂存全部 → 按模板提交", async () => {

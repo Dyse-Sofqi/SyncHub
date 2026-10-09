@@ -29,6 +29,7 @@ import {
 import { EditRemoteModal } from "./features/sync/ui/EditRemoteModal";
 import { DIFF_VIEW_TYPE, DiffView, type DiffRequest } from "./features/sync/ui/DiffView";
 import { SourceControlView, SYNC_VIEW_TYPE } from "./features/sync/ui/SourceControlView";
+import { runWithLargeFileGuard, type LargeFileGuardDeps } from "./features/sync/ui/largeFileGuard";
 import { setHttpDebugLogger } from "./host/http";
 import { getHost } from "./host/hostRegistry";
 import { redactUrl } from "./host/redact";
@@ -608,7 +609,12 @@ export default class ObsyncPlugin extends Plugin {
             // （醒目提示，见 SyncService.announceInSync）。自动定时器不传。
             callback: () =>
                 void this.runSyncAction(() =>
-                    this.sync!.service.sync({ announceInSync: true })
+                    runWithLargeFileGuard(this.largeFileGuardDeps(), (options) =>
+                        this.sync!.service.sync({
+                            announceInSync: true,
+                            allowLargeFiles: options.allowLargeFiles,
+                        })
+                    )
                 ),
         });
 
@@ -617,7 +623,12 @@ export default class ObsyncPlugin extends Plugin {
             name: t.sync.cmdCommit,
             callback: () =>
                 void this.runSyncAction(() =>
-                    this.sync!.service.commitAll({ announce: true })
+                    runWithLargeFileGuard(this.largeFileGuardDeps(), (options) =>
+                        this.sync!.service.commitAll({
+                            announce: true,
+                            allowLargeFiles: options.allowLargeFiles,
+                        })
+                    )
                 ),
         });
 
@@ -1025,6 +1036,22 @@ export default class ObsyncPlugin extends Plugin {
     }
 
     /** 同步动作的统一错误出口。sync 层的错误类型都带用户可读文案，直接展示。 */
+    /**
+     * `runWithLargeFileGuard` 要的那一包依赖。
+     *
+     * 与面板里那份同形（`SourceControlView.largeFileGuardDeps`）—— 命令面板与侧边栏
+     * 是两条独立的入口，但喂给守卫的东西必须一样，否则同一件事在两边行为不同。
+     */
+    private largeFileGuardDeps(): LargeFileGuardDeps {
+        return {
+            app: this.app,
+            t: this.t,
+            notifier: this.notifier,
+            service: this.sync!.service,
+            thresholdMb: this.sync!.service.deps.getLargeFileThresholdMb(),
+        };
+    }
+
     private async runSyncAction(action: () => Promise<unknown>): Promise<void> {
         try {
             await action();
