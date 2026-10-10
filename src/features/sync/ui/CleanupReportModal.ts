@@ -46,7 +46,23 @@ export interface CleanupModalDeps {
 }
 
 /** 弹窗当前处在哪个阶段。 */
-type CleanupStage = "loading" | "report" | "confirm" | "running" | "result";
+type CleanupStage =
+    | "loading"
+    | "report"
+    | "confirm"
+    | "running"
+    | "result"
+    | "settle"
+    | "settled";
+
+/**
+ * 打开弹窗时从哪一步开始。
+ *
+ * - `"inspect"`：体检 → 确认 → 重写 → 结果（从零开始一次清理）；
+ * - `"settle"`：直接跳到**收尾**那一页（重写已经做完了，只剩
+ *   「强制推送 → 确认库没问题 → 丢弃备份」）。
+ */
+export type CleanupStartAt = "inspect" | "settle";
 
 export class CleanupReportModal extends Modal {
     private stage: CleanupStage = "loading";
@@ -57,6 +73,11 @@ export class CleanupReportModal extends Modal {
     private outcome: { result: RewriteResult; ignoredRules: number } | undefined;
     /** 「开始重写」那颗按钮 —— 一个都没勾时置灰。 */
     private primaryButton: ButtonComponent | undefined;
+
+    /** 本次会话里强制推送成功了没有（决定收尾页那一行显示按钮还是「已推过」）。 */
+    private pushed = false;
+    /** 丢弃备份释放的字节数（`undefined` = 读不出来，与 `discardBackups` 同一口径）。 */
+    private freedBytes: number | undefined;
 
     /**
      * 弹窗**已经关掉**了。
@@ -79,12 +100,25 @@ export class CleanupReportModal extends Modal {
     constructor(
         app: App,
         private readonly t: LocaleStrings,
-        private readonly deps: CleanupModalDeps
+        private readonly deps: CleanupModalDeps,
+        /**
+         * 从哪一步开始（见 `CleanupStartAt`）。
+         *
+         * `"settle"` 是给设置页那条「继续上次的清理」用的 —— 它**不读历史**
+         * （`load()` 要跑几秒，而收尾这一步根本不需要那些数据）。
+         */
+        private readonly startAt: CleanupStartAt = "inspect"
     ) {
         super(app);
     }
 
     onOpen(): void {
+        if (this.startAt === "settle") {
+            this.stage = "settle";
+            this.render();
+            return;
+        }
+
         // 重开只发生在一种情况下（见 `runRewrite`）：重写跑完了，而窗口在跑的过程中
         // 被关掉过。那时结果已经拿到，直接画结果页 —— 再 `load()` 一次等于重读几秒
         // 历史，还会把用户已经做完的选择抹掉。
@@ -157,6 +191,12 @@ export class CleanupReportModal extends Modal {
                 return;
             case "result":
                 this.renderResult();
+                return;
+            case "settle":
+                this.renderSettle();
+                return;
+            case "settled":
+                this.renderSettled();
                 return;
         }
     }
@@ -362,11 +402,78 @@ export class CleanupReportModal extends Modal {
             this.contentEl.createEl("p", { text: t.ignored(outcome.ignoredRules) });
         }
         this.contentEl.createEl("p", { text: t.pushHint, cls: "obsync-warning-heading" });
+        // 「还剩一步」必须说出来：原来这一页的次要按钮写着「完成」，会让用户以为
+        // 整件事结束了 —— 而空间要到「丢弃备份」那一步才真正释放（见 `renderSettle`）。
+        this.contentEl.createEl("p", { text: t.nextSteps, cls: "setting-item-description" });
 
         this.addButtons([
-            { text: t.push, onClick: () => void this.runForcePush() },
-            { text: t.done, cta: true, onClick: () => this.close() },
+            // 强制推送是这一页的**主操作**：它是下一步，而且推完会直接切到收尾页。
+            { text: t.push, cta: true, onClick: () => void this.runForcePush() },
+            // 「稍后再说」而不是「完成」—— 见上。收尾页在设置页那条
+            // 「继续上次的清理」里随时能回来。
+            { text: this.t.sync.cleanup.settle.later, onClick: () => this.close() },
         ]);
+    }
+
+    /**
+     * 「收尾」这一页 —— 重写已经做完，只剩两件事。
+     *
+     * ## 为什么必须有它（用户要「小白也能操作的方案」）
+     *
+     * 一次深度清理真正的完整流程是四步：**体检 → 重写 → 强制推送 → 丢弃备份**。
+     * 而后两步原来散在两个地方（弹窗结果页 + 设置页的另一行），中间还要用户
+     * 自己去判断「库是不是没问题了」—— 于是最常见的结局是：他做完重写就走了，
+     * 备份一直拉着旧对象，**空间根本没释放**，而他会得出「这个清理没用」的结论。
+     *
+     * 现在这一页把「还剩什么」直接列出来，而且**两条入口都能到**：
+     * 重写完成后点「强制推送」会走到这里；设置页那条「继续上次的清理」也直接开到这里。
+     *
+     * ## 检查清单为什么写得这么具体
+     *
+     * 「确认库一切正常」这种话对用户等于没说 —— 他不知道该看什么、看到什么算正常。
+     * 所以列成三件**可执行**的事（打开几篇笔记、看图能不能显示、别的设备重新 clone）。
+     * 这一步不能由插件代劳：它要判断的是「笔记内容有没有被清坏」，
+     * 而那是只有人看得出来的事。
+     */
+    private renderSettle(): void {
+        const t = this.t.sync.cleanup.settle;
+        this.titleEl.setText(t.title);
+        this.contentEl.createEl("p", { text: t.intro, cls: "setting-item-description" });
+
+        // ① 强制推送
+        this.contentEl.createEl("p", { text: t.pushHeading, cls: "obsync-warning-heading" });
+        this.contentEl.createEl("p", { text: t.pushDesc, cls: "setting-item-description" });
+        if (this.pushed) {
+            this.contentEl.createEl("p", { text: t.pushDone, cls: "obsync-modal-status" });
+        }
+
+        // ② 检查清单 + 丢弃备份
+        this.contentEl.createEl("p", { text: t.verifyHeading, cls: "obsync-warning-heading" });
+        const list = this.contentEl.createEl("ul", { cls: "obsync-steps" });
+        for (const item of t.verifyItems) list.createEl("li", { text: item });
+        this.contentEl.createEl("p", { text: t.discardDesc, cls: "obsync-warning-heading" });
+
+        const buttons: Array<{ text: string; cta?: boolean; onClick: () => void }> = [];
+        // 推过之后就不再给这颗按钮 —— 再推一次没有意义，留着只会让人以为「还没成功」。
+        if (!this.pushed) {
+            buttons.push({ text: t.push, onClick: () => void this.runForcePush() });
+        }
+        buttons.push({ text: t.discard, cta: true, onClick: () => void this.runDiscardBackups() });
+        // 「稍后再说」：收尾不必现在做完，但**下次进来还能找到它**
+        // （设置页那条「继续上次的清理」）。没有这颗按钮，用户会被困在这一页。
+        buttons.push({ text: t.later, onClick: () => this.close() });
+        this.addButtons(buttons);
+    }
+
+    private renderSettled(): void {
+        const t = this.t.sync.cleanup.settled;
+        this.titleEl.setText(t.title);
+        const freed = this.freedBytes;
+        this.contentEl.createEl("p", {
+            text: freed === undefined ? t.doneUnknown : t.done(formatBytes(freed)),
+        });
+        this.contentEl.createEl("p", { text: t.after, cls: "setting-item-description" });
+        this.addButtons([{ text: t.close, cta: true, onClick: () => this.close() }]);
     }
 
     private async runRewrite(): Promise<void> {
@@ -412,10 +519,34 @@ export class CleanupReportModal extends Modal {
         }
     }
 
+    /**
+     * 强制推送。成功之后**接着往下走一步**（切到收尾页）——
+     * 让整条流程在一个窗口里走完，用户不必记住「还要回设置页丢弃备份」，
+     * 而那一步才是空间真正释放的地方。
+     */
     private async runForcePush(): Promise<void> {
         try {
             await this.deps.service.forcePush();
+            this.pushed = true;
             this.deps.notifier.success(this.t.sync.cleanup.pushDone);
+            if (this.stage === "result") this.stage = "settle";
+            this.render();
+        } catch (err) {
+            this.deps.notifier.reportError(err);
+        }
+    }
+
+    /**
+     * 丢弃备份并回收 —— 整个清理流程的最后一步，也是空间真正释放的那一步。
+     *
+     * **不可逆**：调用之后没有任何办法回到重写前的历史。所以它只出现在收尾页，
+     * 而且上面就是那张「先确认这几件事」的清单。
+     */
+    private async runDiscardBackups(): Promise<void> {
+        try {
+            this.freedBytes = await this.deps.service.discardBackups();
+            this.stage = "settled";
+            this.render();
         } catch (err) {
             this.deps.notifier.reportError(err);
         }

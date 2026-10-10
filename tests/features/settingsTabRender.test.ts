@@ -2429,40 +2429,45 @@ describe("设置页 · 仓库同步页", () => {
     });
 
     /**
-     * 「清理」一节的「强制推送」（2026-10-10）。
+     * 「清理」一节的收尾入口（2026-10-10，用户要「小白也能操作的方案」）。
      *
-     * ## 它为什么必须在这一页
+     * ## 这一节要回答的问题
      *
-     * 深度清理（重写历史）之后本地与远端**没有任何共同提交**：普通推送被拒绝、
-     * 拉取报「没有共同提交」。而那个强制推送原来只存在于清理弹窗的**结果页**上 ——
-     * 用户关掉窗口、重启 Obsidian 之后，插件自己造出的状态就**没有任何出口**了。
-     * 他实测报的就是这个（`refusing to merge unrelated histories`）。
+     * 一次深度清理是四步：**体检 → 重写 → 强制推送 → 丢弃备份**，而**空间要到
+     * 第四步才真正释放**。后两步很容易被忘掉、或在中途关掉 Obsidian 时丢掉，
+     * 结局是「用户以为清理没用」。
      *
-     * 所以这一行钉的是「持久入口 + 持久信号」：
-     * 入口在这一页（一直都在），信号是 `refs/obsync-backup/*`（写在 git 里，
-     * 重启、换设备都还在）—— 而不是某个弹窗实例上的内存状态。
+     * 所以这里钉两件事：
+     *
+     * 1. **「继续上次的清理」**：有备份（= 有活没干完）时可用，点它直接开到收尾页；
+     *    没有备份时置灰并说明 —— 信号是 `refs/obsync-backup/*`，写在 git 里，
+     *    所以跨重启、跨设备都还在，不依赖任何弹窗实例上的内存状态。
+     * 2. **「强制推送」不灰**：它可能在「备份已经丢弃、但远端还没推」时仍然需要，
+     *    灰掉它等于把用户堵死。
      */
-    describe("清理一节 · 强制推送", () => {
-        function forcePushRow() {
-            const row = createdSettings.find(
-                (setting) => setting.name === zhCN.settings.sync.cleanup.forcePushName
-            );
-            if (!row) throw new Error("找不到「强制推送」那一行");
-            return row;
+    describe("清理一节 · 收尾入口", () => {
+        function row(name: string) {
+            const found = createdSettings.find((setting) => setting.name === name);
+            if (!found) throw new Error(`找不到「${name}」那一行`);
+            return found;
         }
 
-        it("没有重写备份时置灰，并说明「不需要这一步」", async () => {
+        function settleRow() {
+            return row(zhCN.settings.sync.cleanup.settleName);
+        }
+
+        it("没有未完成的清理时置灰，并说明「还剩什么会显示在这里」", async () => {
             const sync = createSyncStub("# 规则\n");
             const tab = createTab(createFakeApp(), {}, sync);
 
             renderSyncPage(tab);
             await flush();
 
-            expect(forcePushRow().disabled).toBe(true);
-            expect(forcePushRow().desc).toBe(zhCN.settings.sync.cleanup.forcePushDescNone);
+            expect(settleRow().disabled).toBe(true);
+            expect(settleRow().desc).toBe(zhCN.settings.sync.cleanup.settleDescNone);
         });
 
-        it("有备份（= 重写之后还没收拾完）时可用，且排在「丢弃备份」之前", async () => {
+        it("有备份时可用，且排在「体检并清理」之前（它是唯一一行「有活没干完」）", async () => {
             const sync = createSyncStub("# 规则\n");
             sync.backups = ["refs/obsync-backup/20261010-114300"];
             const tab = createTab(createFakeApp(), {}, sync);
@@ -2470,17 +2475,16 @@ describe("设置页 · 仓库同步页", () => {
             renderSyncPage(tab);
             await flush();
 
-            expect(forcePushRow().disabled).toBe(false);
-            expect(forcePushRow().desc).toBe(zhCN.settings.sync.cleanup.forcePushDesc);
+            expect(settleRow().disabled).toBe(false);
+            expect(settleRow().desc).toBe(zhCN.settings.sync.cleanup.settleDesc);
 
-            // 时间顺序：先强制推送、确认没问题之后再丢弃备份（退路最后再扔）。
             const names = createdSettings.map((setting) => setting.name);
-            expect(names.indexOf(zhCN.settings.sync.cleanup.forcePushName)).toBeLessThan(
-                names.indexOf(zhCN.settings.sync.cleanup.discardName)
+            expect(names.indexOf(zhCN.settings.sync.cleanup.settleName)).toBeLessThan(
+                names.indexOf(zhCN.settings.sync.cleanup.checkName)
             );
         });
 
-        it("点它走的是 service.forcePush()（与清理弹窗结果页那颗是同一份实现）", async () => {
+        it("点「继续」直接开到收尾页 —— 不读历史（那要几秒），也不重来一遍体检", async () => {
             const sync = createSyncStub("# 规则\n");
             sync.backups = ["refs/obsync-backup/20261010-114300"];
             const tab = createTab(createFakeApp(), {}, sync);
@@ -2488,7 +2492,39 @@ describe("设置页 · 仓库同步页", () => {
             renderSyncPage(tab);
             await flush();
 
-            await forcePushRow().buttons[0]!.click();
+            settleRow().buttons[0]!.click();
+            await flush();
+
+            const modal = openedModals.at(-1);
+            expect(modal).toBeDefined();
+            const text = (modal!.contentEl as unknown as { children?: Array<{ text?: string }> })
+                .children?.map((child) => child.text ?? "")
+                .join("\n");
+            expect(text).toContain(zhCN.sync.cleanup.settle.intro);
+            // 收尾页的两个动作都在。
+            expect(text).toContain(zhCN.sync.cleanup.settle.pushHeading);
+            expect(text).toContain(zhCN.sync.cleanup.settle.verifyHeading);
+        });
+
+        it("「强制推送」**不置灰** —— 备份丢弃之后它可能仍然需要", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(createFakeApp(), {}, sync);
+
+            renderSyncPage(tab);
+            await flush();
+
+            expect(row(zhCN.settings.sync.cleanup.forcePushName).disabled).toBe(false);
+        });
+
+        it("点「强制推送」走的是 service.forcePush()（与收尾页那颗是同一份实现）", async () => {
+            const sync = createSyncStub("# 规则\n");
+            sync.backups = ["refs/obsync-backup/20261010-114300"];
+            const tab = createTab(createFakeApp(), {}, sync);
+
+            renderSyncPage(tab);
+            await flush();
+
+            await row(zhCN.settings.sync.cleanup.forcePushName).buttons[0]!.click();
             await flush();
 
             expect(sync.forcePushes).toBe(1);

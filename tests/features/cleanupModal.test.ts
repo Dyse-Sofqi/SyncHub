@@ -77,6 +77,17 @@ function lastButton(text: string): ButtonComponent | undefined {
     return undefined;
 }
 
+/**
+ * 取**当前这一屏**底部按钮行里的按钮。
+ *
+ * `lastButton` 是从后往前找某个文案（够用），但它会命中**上一屏**留下的同名按钮 ——
+ * 「推过之后不再给强制推送」这种断言必须只看当前那一行。
+ * `addButtons` 每次渲染都新建一个 `Setting`，所以最后一个就是当前按钮行。
+ */
+function currentButtons(): ButtonComponent[] {
+    return createdSettings.at(-1)?.buttons ?? [];
+}
+
 /** 让已经 resolve 的 promise 链跑完（`load()` 里有两次 await）。 */
 async function flush(times = 10): Promise<void> {
     for (let index = 0; index < times; index += 1) await Promise.resolve();
@@ -123,6 +134,8 @@ function makeService(rewrite: () => Promise<RewriteOutcome>): SyncService {
         commitCount: async () => COMMIT_COUNT,
         rewriteHistory: rewrite,
         forcePush: async () => ({ kind: "pushed" as const }),
+        /** 收尾那一步：返回释放的字节数（`undefined` = 读不出来，这里给一个真值）。 */
+        discardBackups: async () => 3_000_000,
     } as unknown as SyncService;
 }
 
@@ -244,7 +257,9 @@ describe("深度清理弹窗 —— 重写进行中", () => {
         const text = allText(modal.contentEl as unknown as FakeEl);
         expect(text).toContain(RESULT.backupRef);
         expect(lastButton(zhCN.sync.cleanup.result.push)).toBeDefined();
-        expect(lastButton(zhCN.sync.cleanup.result.done)).toBeDefined();
+        // 次要按钮是「稍后再说」而不是「完成」—— 空间要到丢弃备份那一步才释放，
+        // 写「完成」会让用户以为整件事结束了（见 `renderResult` 的注释）。
+        expect(lastButton(zhCN.sync.cleanup.settle.later)).toBeDefined();
     });
 
     it("重写期间关掉窗口：失败时把错误报出来，而不是弹回一个空窗口", async () => {
@@ -264,6 +279,46 @@ describe("深度清理弹窗 —— 重写进行中", () => {
         } finally {
             consoleError.mockRestore();
         }
+    });
+
+    /**
+     * 整条流程在一个窗口里走完（2026-10-10，用户要「小白也能操作的方案」）。
+     *
+     * 一次深度清理是四步，而后两步原来散在两个地方、中间还要用户自己判断
+     * 「库是不是没问题了」—— 最常见的结局是「做完重写就走了，空间没释放」。
+     * 这条用例钉的就是那条链：**重写 → 强制推送 → 收尾页 → 丢弃备份 → 完成**。
+     */
+    it("推完自动走到收尾页；丢弃备份之后给出释放了多少 —— 一条链走完整个清理", async () => {
+        const { modal, messages } = await openToRunning(async () => ({
+            result: RESULT,
+            ignoredRules: 1,
+        }));
+        openModal = modal;
+        await flush();
+
+        // 结果页 → 点「强制推送」（它是这一页的主操作）。
+        lastButton(zhCN.sync.cleanup.result.push)!.click();
+        await flush();
+
+        // 到了收尾页：清单 + 「已推过」+ 丢弃备份。推过之后**不再给**强制推送那颗按钮
+        // （再推一次没有意义，留着只会让人以为「还没成功」）。
+        const settleText = allText(modal.contentEl as unknown as FakeEl);
+        expect(settleText).toContain(zhCN.sync.cleanup.settle.pushDone);
+        expect(settleText).toContain(zhCN.sync.cleanup.settle.verifyItems[0]!);
+        const settleButtons = currentButtons().map((button) => button.text);
+        expect(settleButtons).not.toContain(zhCN.sync.cleanup.settle.push);
+        expect(settleButtons).toContain(zhCN.sync.cleanup.settle.discard);
+        expect(settleButtons).toContain(zhCN.sync.cleanup.settle.later);
+
+        // 点「丢弃备份并回收」→ 完成页说出释放了多少。
+        lastButton(zhCN.sync.cleanup.settle.discard)!.click();
+        await flush();
+
+        expect(allText(modal.titleEl as unknown as FakeEl)).toContain(
+            zhCN.sync.cleanup.settled.title
+        );
+        expect(allText(modal.contentEl as unknown as FakeEl)).toContain("备份已丢弃");
+        expect(messages).toContain(zhCN.sync.cleanup.pushDone);
     });
 });
 

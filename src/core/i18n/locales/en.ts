@@ -360,7 +360,23 @@ export const en = {
             },
             cleanupHeading: "Cleanup",
             cleanup: {
-                checkName: "Inspect repository history",
+                /**
+                 * "Resume the last cleanup" — the **entry point** of the beginner flow
+                 * (2026-10-10).
+                 *
+                 * A deep clean is four steps (inspect → rewrite → force push → discard the
+                 * backup), and users easily forget the last two or quit halfway. This row turns
+                 * "there is unfinished work" into something visible and clickable; whether it
+                 * exists is decided by `refs/obsync-backup/*`, which lives in git, so it
+                 * survives restarts and other devices.
+                 */
+                settleName: "Resume the last cleanup",
+                settleDesc:
+                    "The last deep clean rewrote the history but was never finished: force push and, once you are happy with the vault, discard the backup. That is when the space is actually freed. Click Resume to walk through it.",
+                settleDescNone:
+                    "No cleanup is pending right now \u2014 after you run \u201cInspect and clean history\u201d, this row shows what is left.",
+                settleAction: "Resume",
+                checkName: "Inspect and clean history",
                 checkDesc:
                     "See what actually takes up the space in history, grouped by directory. Read-only. Look here first — in a 460 MB repository the notes themselves are often only a few dozen MB.",
                 checkAction: "Inspect",
@@ -377,8 +393,6 @@ export const en = {
                 forcePushName: "Force push (after a history rewrite)",
                 forcePushDesc:
                     "A deep clean replaces every commit hash, so the remote and your local history become two unrelated lineages — a normal push is rejected and a pull reports \u201cno commit in common\u201d. This overwrites the remote with the cleaned history. Do it once you are happy with the result.",
-                forcePushDescNone:
-                    "No rewrite backup right now — this step is only needed after a deep clean.",
                 forcePushAction: "Force push",
                 discardName: "Discard backups and reclaim",
                 discardDesc:
@@ -1275,9 +1289,62 @@ export const en = {
                 ignored: (count: number) =>
                     `${count} ignore rule(s) were added to .gitignore — without them those files would come straight back on the next commit.`,
                 pushHint:
-                    "The remote has now diverged from your local history, so a force push is needed. The same button also lives in the Cleanup section of the settings — you can still find it after closing this window, or after restarting.",
+                    "The remote has now diverged from your local history, so a force push is needed.",
+                /**
+                 * "What is left to do" on the result page — added when the user asked for
+                 * "a flow a beginner can follow".
+                 *
+                 * This page used to end with Force push + Done, and "Done" reads as "the whole
+                 * thing is finished": the user closes the window, the backup keeps holding the
+                 * old objects, **the space is never freed**, and he concludes the cleanup did
+                 * nothing. So the last step has to be spelled out.
+                 */
+                nextSteps:
+                    "One last step after the push: confirm the vault is fine \u2192 discard the backup. That is when the space is actually freed. Closing this window is fine \u2014 \u201cResume the last cleanup\u201d in the Cleanup section of the settings brings you back here.",
                 push: "Force push",
-                done: "Done",
+            },
+            /**
+             * The "settle" page (2026-10-10, the user asked for "a flow a beginner can follow").
+             *
+             * A deep clean is really four steps: **inspect \u2192 rewrite \u2192 force push \u2192
+             * discard the backup**. The last two used to live in two different places, and the
+             * user had to decide on his own whether the vault was fine — so the usual outcome
+             * was "he did the rewrite and left, the space was never freed". This page lists
+             * what is left, and both entry points lead to it.
+             */
+            settle: {
+                title: "Finish this cleanup",
+                intro: "The history has been rewritten. Two steps left \u2014 only then is the space actually freed.",
+                pushHeading: "1. Force push",
+                pushDesc:
+                    "The remote has diverged from your local history, so a normal push is rejected. A force push is required.",
+                pushDone: "\u2713 already pushed",
+                push: "Force push",
+                verifyHeading: "2. Confirm the vault is fine, then discard the backup",
+                /**
+                 * Three **actionable** items. "Confirm everything is fine" tells the user
+                 * nothing — he does not know what to look at or what counts as fine. And this
+                 * step cannot be automated: it is about whether the notes survived intact,
+                 * which only a human can see.
+                 */
+                verifyItems: [
+                    "Open a few notes and check the content is there and looks right",
+                    "Check that images still display",
+                    "If you have another device, clone the repository again on it",
+                ],
+                discardDesc:
+                    "Once you are happy, discard the backup and reclaim \u2014 this cannot be undone, and the old history is gone for good.",
+                discard: "Discard backup and reclaim",
+                later: "Later",
+            },
+            settled: {
+                title: "Cleanup complete",
+                done: (size: string) => `Backup discarded, ${size} freed.`,
+                doneUnknown:
+                    "Backup discarded. The size could not be read, so the freed amount is unknown.",
+                after:
+                    "That is the whole cleanup done. If you have other devices using this repository, remember to clone it again on them.",
+                close: "Done",
             },
         },
         discard: {

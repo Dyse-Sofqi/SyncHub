@@ -1668,27 +1668,21 @@ export class ObsyncSettingsTab extends PluginSettingTab {
     }
 
     /**
-     * 「清理」一节：体检 / 回收 / 强制推送 / 丢弃备份。
+     * 「清理」一节：继续上次的清理 / 体检并清理 / 回收 / 强制推送 / 丢弃备份。
      *
-     * 四行按**风险递增 + 时间顺序**排，而且每一行的描述里都写着代价：
+     * ## 为什么最上面那行是「继续上次的清理」（2026-10-10，用户要「小白也能操作的方案」）
      *
-     * - 体检只是看（零风险），所以它是入口 —— 用户先看到「空间被什么占了」才有依据决定下一步；
-     * - 回收只清不可达对象（安全，但**常常回收不到**，那句反直觉的话必须写在描述里，
-     *   否则用户会以为功能坏了）；
-     * - 强制推送改的是**远端**历史（重写之后必然分叉，普通推送会被拒绝）；
-     * - 丢弃备份是唯一不可逆的一行，它删掉的是重写之后的唯一退路。
+     * 一次深度清理是四步：**体检 → 重写 → 强制推送 → 丢弃备份**。后两步很容易被忘掉
+     * 或在中途关掉 Obsidian 时丢掉 —— 而**空间要到第四步才真正释放**，所以忘掉的
+     * 结局是「用户以为清理没用」。这一行把「还有活没干完」变成一个看得见、点得到的
+     * 东西，点进去就是一步一步的收尾页。
      *
-     * ## 「强制推送」这一行为什么必须在这里（2026-10-10）
+     * 有没有它由 `refs/obsync-backup/*` 决定 —— 那个引用**写在 git 里**，
+     * 不依赖插件数据，所以跨重启、跨设备都还在（见 `cleanup.ts` 的 `backupRefName`）。
      *
-     * 它原来只存在于清理弹窗的**结果页**上。用户做完深度清理、关掉那个窗口、
-     * 重启 Obsidian 之后再点「立即同步」，拿到的是一句
-     * `fatal: refusing to merge unrelated histories` —— 那个按钮已经随窗口一起没了，
-     * **插件自己造出来的状态没有任何出口**。
-     *
-     * 所以它挪到（也保留在）这一节里：这一节是持久存在的，而「有没有待完成的
-     * 强制推送」由一个**同样持久**的信号回答 —— `refs/obsync-backup/*` 还在
-     * 就说明重写之后还没收拾完。那个引用写在 git 里，不依赖插件数据，
-     * 重启、换设备都还在。
+     * 下面几行是**手动路径**：向导之外仍然保留每件事单独做一次的入口，
+     * 因为向导只覆盖「刚做完重写」那条主线，而强制推送还可能在别的时候需要
+     * （比如用户先丢弃了备份才发现远端没推）。
      */
     private renderCleanupSection(): void {
         const t = this.obsync.t;
@@ -1696,6 +1690,24 @@ export class ObsyncSettingsTab extends PluginSettingTab {
         if (!sync) return;
 
         const { rows } = this.openSection(t.settings.sync.cleanupHeading);
+
+        const settle = new Setting(rows)
+            .setName(t.settings.sync.cleanup.settleName)
+            .setDesc(t.settings.sync.cleanup.settleDesc)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.settings.sync.cleanup.settleAction)
+                    .setCta()
+                    .onClick(() => {
+                        new CleanupReportModal(
+                            this.app,
+                            t,
+                            { service: sync.service, notifier: this.obsync.notifier },
+                            // 重写已经做完了，直接跳到收尾页 —— 不读历史（那要几秒）。
+                            "settle"
+                        ).open();
+                    })
+            );
 
         new Setting(rows)
             .setName(t.settings.sync.cleanup.checkName)
@@ -1718,7 +1730,9 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     .onClick(() => void this.runGarbageCollection())
             );
 
-        const forcePush = new Setting(rows)
+        // 强制推送**不灰掉**：它可能在「备份已经丢弃、但远端还没推」时仍然需要，
+        // 而那时没有任何备份引用可用 —— 灰掉它就等于把用户堵死。
+        new Setting(rows)
             .setName(t.settings.sync.cleanup.forcePushName)
             .setDesc(t.settings.sync.cleanup.forcePushDesc)
             .addButton((button) =>
@@ -1737,7 +1751,7 @@ export class ObsyncSettingsTab extends PluginSettingTab {
                     .onClick(() => void this.runDiscardBackups())
             );
 
-        // 没有备份时把「强制推送」与「丢弃备份」两行一起灰掉并说明原因 ——
+        // 没有备份时把「继续上次的清理」与「丢弃备份」两行一起灰掉并说明原因 ——
         // 而不是让用户点了才知道「现在不需要」。用 `setDisabled` 而不是改写它的值：
         // 这两个动作没有「值」，只有「能不能点」。
         //
@@ -1747,8 +1761,8 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             try {
                 const backups = await sync.service.listBackups();
                 if (backups.length === 0) {
-                    forcePush.setDesc(t.settings.sync.cleanup.forcePushDescNone);
-                    forcePush.setDisabled(true);
+                    settle.setDesc(t.settings.sync.cleanup.settleDescNone);
+                    settle.setDisabled(true);
                     discard.setDesc(t.settings.sync.cleanup.discardDescNone);
                     discard.setDisabled(true);
                 }
