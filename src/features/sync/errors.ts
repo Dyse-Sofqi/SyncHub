@@ -144,6 +144,34 @@ export class HistoryRewriteBlockedError extends ObsyncError {
 }
 
 /**
+ * 本地与远端**没有任何共同提交** —— 普通拉取与推送两条路都堵死。
+ *
+ * ## 它几乎只有一个来源：刚做过「深度清理」而还没强制推送
+ *
+ * `filter-branch` 会把**每一个**提交都换成新哈希（连根提交也是，因为它的树也变了），
+ * 于是本地那条链与远端那条链在 git 眼里是**两条互不相干的历史**：
+ *
+ * - `git pull`（merge）直接拒绝 —— `fatal: refusing to merge unrelated histories`；
+ * - `git push` 因为不是快进也会被拒绝。
+ *
+ * 唯一的出路是一次**强制推送**（`GitManager.forcePush`）。
+ *
+ * ## 为什么必须单独一个类型
+ *
+ * 它的应对方式与别的失败都不一样：不是去解冲突、不是去查令牌、也不是重试 ——
+ * 是**去强制推送一次**。没有类型的话它落进兜底分支，用户拿到的就是
+ * `fatal: refusing to merge unrelated histories` 这句英文原文：
+ * 它不含任何可行动信息，而「重写之后必须强制推送」恰恰是他唯一需要知道的事。
+ *
+ * 用户实测报的就是这一条（2026-10-10）：他在测试库里做完深度清理、**关掉弹窗
+ * 重启了 Obsidian**，然后点「立即同步」—— 那个弹窗里的「强制推送」按钮已经
+ * 随窗口一起没了，于是他卡在一个插件自己造出来、却没有任何出口的状态里。
+ * 所以修这一条是**两件事**：把这个错误翻译成人话，以及给强制推送一个
+ * 关掉弹窗、重启之后仍然找得到的入口（设置页「清理」那一节）。
+ */
+export class UnrelatedHistoriesError extends ObsyncError {}
+
+/**
  * 把 git 层的错误翻译成用户可读文案。
  *
  * 在 `createSyncModule` 里注册进 `Notifier`，这样任何调用点
@@ -163,6 +191,7 @@ export function describeSyncError(err: unknown, t: LocaleStrings): string | unde
     if (err instanceof DetachedHeadError) return t.sync.detachedHead;
     if (err instanceof GitTimeoutError) return t.sync.gitTimeout;
     if (err instanceof GitNetworkError) return t.sync.gitNetworkFailed;
+    if (err instanceof UnrelatedHistoriesError) return t.sync.unrelatedHistories;
     if (err instanceof ConflictError) return t.sync.conflictDetected(err.files.length);
     if (err instanceof HistoryRewriteBlockedError) {
         return t.sync.cleanup.blocked[err.reason];

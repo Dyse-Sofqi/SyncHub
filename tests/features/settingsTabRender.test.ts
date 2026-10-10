@@ -144,6 +144,15 @@ function createSyncStub(initial?: string) {
         fileRecovery: true as boolean | undefined,
         /** 远端地址（「远端地址」那一行读它、改它）。 */
         remoteUrl: "https://github.com/owner/repo.git" as string | undefined,
+        /**
+         * `listBackups()` 返回的历史备份引用（2026-10-10）。
+         *
+         * 「强制推送」与「丢弃备份」两行都读它：**备份还在 = 重写历史之后还没收拾完**。
+         * 默认空数组 —— 也就是「没做过深度清理」，两行都该是灰的。
+         */
+        backups: [] as string[],
+        /** `forcePush()` 被调了几次（设置页那颗按钮走的就是它）。 */
+        forcePushes: 0,
         /** `setRemoteUrl` 收到的地址（就地编辑远端那一条用例看它）。 */
         savedRemotes: [] as string[],
         /** `service.refresh()` 被调了几次（远端改完要强制刷新）。 */
@@ -212,6 +221,20 @@ function createSyncStub(initial?: string) {
             },
             async refresh(): Promise<void> {
                 stub.refreshes += 1;
+            },
+            /**
+             * 重写历史留下的备份引用（2026-10-10）。
+             *
+             * 「强制推送」与「丢弃备份」两行的可用性都读它 —— 而且它们是**同一个信号**：
+             * 备份还在就说明重写之后还没收拾完。默认空数组 = 没做过深度清理。
+             */
+            async listBackups(): Promise<string[]> {
+                return [...stub.backups];
+            },
+            /** `forcePush()` 被调了几次（设置页那颗按钮走的就是它）。 */
+            async forcePush(): Promise<{ kind: "pushed" }> {
+                stub.forcePushes += 1;
+                return { kind: "pushed" as const };
             },
         },
     };
@@ -2402,6 +2425,73 @@ describe("设置页 · 仓库同步页", () => {
                 // 空数组直接返回（服务层判空），不会拿空名单去碰 git
                 expect(sync.untracked).toEqual([[]]);
             });
+        });
+    });
+
+    /**
+     * 「清理」一节的「强制推送」（2026-10-10）。
+     *
+     * ## 它为什么必须在这一页
+     *
+     * 深度清理（重写历史）之后本地与远端**没有任何共同提交**：普通推送被拒绝、
+     * 拉取报「没有共同提交」。而那个强制推送原来只存在于清理弹窗的**结果页**上 ——
+     * 用户关掉窗口、重启 Obsidian 之后，插件自己造出的状态就**没有任何出口**了。
+     * 他实测报的就是这个（`refusing to merge unrelated histories`）。
+     *
+     * 所以这一行钉的是「持久入口 + 持久信号」：
+     * 入口在这一页（一直都在），信号是 `refs/obsync-backup/*`（写在 git 里，
+     * 重启、换设备都还在）—— 而不是某个弹窗实例上的内存状态。
+     */
+    describe("清理一节 · 强制推送", () => {
+        function forcePushRow() {
+            const row = createdSettings.find(
+                (setting) => setting.name === zhCN.settings.sync.cleanup.forcePushName
+            );
+            if (!row) throw new Error("找不到「强制推送」那一行");
+            return row;
+        }
+
+        it("没有重写备份时置灰，并说明「不需要这一步」", async () => {
+            const sync = createSyncStub("# 规则\n");
+            const tab = createTab(createFakeApp(), {}, sync);
+
+            renderSyncPage(tab);
+            await flush();
+
+            expect(forcePushRow().disabled).toBe(true);
+            expect(forcePushRow().desc).toBe(zhCN.settings.sync.cleanup.forcePushDescNone);
+        });
+
+        it("有备份（= 重写之后还没收拾完）时可用，且排在「丢弃备份」之前", async () => {
+            const sync = createSyncStub("# 规则\n");
+            sync.backups = ["refs/obsync-backup/20261010-114300"];
+            const tab = createTab(createFakeApp(), {}, sync);
+
+            renderSyncPage(tab);
+            await flush();
+
+            expect(forcePushRow().disabled).toBe(false);
+            expect(forcePushRow().desc).toBe(zhCN.settings.sync.cleanup.forcePushDesc);
+
+            // 时间顺序：先强制推送、确认没问题之后再丢弃备份（退路最后再扔）。
+            const names = createdSettings.map((setting) => setting.name);
+            expect(names.indexOf(zhCN.settings.sync.cleanup.forcePushName)).toBeLessThan(
+                names.indexOf(zhCN.settings.sync.cleanup.discardName)
+            );
+        });
+
+        it("点它走的是 service.forcePush()（与清理弹窗结果页那颗是同一份实现）", async () => {
+            const sync = createSyncStub("# 规则\n");
+            sync.backups = ["refs/obsync-backup/20261010-114300"];
+            const tab = createTab(createFakeApp(), {}, sync);
+
+            renderSyncPage(tab);
+            await flush();
+
+            await forcePushRow().buttons[0]!.click();
+            await flush();
+
+            expect(sync.forcePushes).toBe(1);
         });
     });
 });

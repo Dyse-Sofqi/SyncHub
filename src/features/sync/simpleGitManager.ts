@@ -15,6 +15,7 @@ import {
     NoUpstreamError,
     DetachedHeadError,
     PushRejectedError,
+    UnrelatedHistoriesError,
 } from "./errors";
 import type {
     CommitInfo,
@@ -759,6 +760,22 @@ export class SimpleGitManager implements GitManager {
             return { kind: "up-to-date" };
         }
 
+        /**
+         * **动手之前**先确认两边还有共同祖先（2026-10-10）。
+         *
+         * 没有共同提交时：merge 会直接拒绝（`refusing to merge unrelated histories`），
+         * 而 **rebase 会真的开始重放**，把本地全部提交往那条不相干的链上叠，
+         * 然后留下一仓库冲突 —— 那比一句清楚的错误难收拾得多。所以必须在这里拦。
+         *
+         * 这种状态几乎只有一个来源：**刚做过「深度清理」而还没强制推送**。
+         * 用户实测报的就是它（关掉结果弹窗、重启 Obsidian 之后点「立即同步」）。
+         */
+        if (!(await this.hasCommonAncestor(git, localCommit, upstreamCommit))) {
+            throw new UnrelatedHistoriesError(
+                `pull (${strategy}): ${branch} and ${upstream} have no common commit`
+            );
+        }
+
         try {
             if (strategy === "merge") {
                 await git.merge([upstream]);
@@ -789,6 +806,36 @@ export class SimpleGitManager implements GitManager {
         const files = diff.split(/\r\n|\r|\n/).filter((line) => line.length > 0);
 
         return { kind: "pulled", files: files.length };
+    }
+
+    /**
+     * 两个提交有没有共同祖先（`git merge-base`）。
+     *
+     * ## 判据是**输出为空**，不是「抛不抛」—— 这是实测出来的
+     *
+     * `git merge-base a b` 在「没有共同祖先」时**以 exit 1 退出、且什么都不输出**
+     * （不写 stderr）。而 simple-git 的 `raw()` 在这种「非零退出但两边都没有可读内容」
+     * 的情况下**照样 resolve**，拿到的是空串 —— 2026-10-10 用一个手工造的
+     * 「两条无关历史」仓库实测确认（`.probe/mergebase-check.mjs`）：
+     *
+     * ```
+     * merge-base RESOLVED, output = ""
+     * ```
+     *
+     * 第一版写的是「抛错就算 false」，于是**永远返回 true**，那条保护形同虚设 ——
+     * 症状是 rebase 照跑不误。所以这里必须读输出，与 `refExists` 同一个写法
+     * （它也是靠 `sha.trim().length > 0`，而不是靠抛错）。
+     *
+     * `catch` 仍然留着：别的 git/simple-git 组合下它也可能真的抛，
+     * 而「抛」与「读到空输出」在这里是同一件事。
+     */
+    private async hasCommonAncestor(git: SimpleGit, a: string, b: string): Promise<boolean> {
+        try {
+            const base = await git.raw(["merge-base", a, b]);
+            return base.trim().length > 0;
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -1442,6 +1489,22 @@ export function mapError(err: unknown, what: string): Error {
         )
     ) {
         return new GitAuthError(`remote authentication failed (${detail})`, {
+            cause: err,
+        });
+    }
+    /**
+     * 本地与远端**没有共同提交**（2026-10-10）。
+     *
+     * 真实输出原文：`fatal: refusing to merge unrelated histories`
+     * （git 2.35.1.windows.2，`git merge origin/master` 在两条无共同祖先的
+     * 历史之间）。rebase 策略下同样是这句话。
+     *
+     * 放在推送判断**之前**：两者措辞不重叠，但这条更具体 ——
+     * 而且它绝不能落进 `PushRejectedError`（那是「先拉取」），
+     * 用户照做会发现拉取也走不通，然后卡在原地。
+     */
+    if (/refusing to merge unrelated histories/i.test(message)) {
+        return new UnrelatedHistoriesError(`unrelated histories (${detail})`, {
             cause: err,
         });
     }

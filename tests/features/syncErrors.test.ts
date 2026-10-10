@@ -10,6 +10,7 @@ import {
     GitNotRepoError,
     GitTimeoutError,
     PushRejectedError,
+    UnrelatedHistoriesError,
     describeSyncError,
 } from "../../src/features/sync/errors";
 
@@ -52,6 +53,26 @@ describe("describeSyncError", () => {
         // 「正在推送…」等一个不会来的结果（他报的就是这个症状）。
         expect(describeSyncError(new GitTimeoutError("block timeout reached"), zhCN)).toBe(
             zhCN.sync.gitTimeout
+        );
+    });
+
+    /**
+     * 「本地与远端没有共同提交」（2026-10-10，用户实测报的）。
+     *
+     * 用户看到的是 git 的英文原文 `fatal: refusing to merge unrelated histories`，
+     * 而此刻唯一该做的事是**强制推送一次**。所以这条文案有两处硬要求：
+     * 说清「重写历史之后还没强制推送」，以及**指出强制推送在哪**（那个弹窗已经关了）。
+     */
+    it("「没有共同提交」要说清是重写之后没推，并指出强制推送在哪", () => {
+        const text = describeSyncError(new UnrelatedHistoriesError("unrelated"), zhCN);
+
+        expect(text).toBe(zhCN.sync.unrelatedHistories);
+        // 不能退化成推送被拒那句 —— 那会引导用户去「先拉取」，而拉取同样走不通。
+        expect(text).not.toBe(zhCN.sync.pushRejected);
+        expect(text).toContain("强制推送");
+        expect(text).toContain(zhCN.settings.sync.cleanupHeading);
+        expect(describeSyncError(new UnrelatedHistoriesError("unrelated"), en)).toBe(
+            en.sync.unrelatedHistories
         );
     });
 

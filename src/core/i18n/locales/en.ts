@@ -368,6 +368,18 @@ export const en = {
                 gcDesc:
                     "Drops unreachable objects (dangling ones, leftovers from deleted branches). Safe, but it often reclaims nothing — large files usually sit in reachable history, and only a rewrite can remove those.",
                 gcAction: "Reclaim",
+                /**
+                 * Added 2026-10-10. A deep clean leaves local and remote with no commit in
+                 * common, and the force push used to live only on the result page of the
+                 * cleanup modal — so closing that window (or restarting Obsidian) left the
+                 * user with a state the plugin itself created and no way out of it.
+                 */
+                forcePushName: "Force push (after a history rewrite)",
+                forcePushDesc:
+                    "A deep clean replaces every commit hash, so the remote and your local history become two unrelated lineages — a normal push is rejected and a pull reports \u201cno commit in common\u201d. This overwrites the remote with the cleaned history. Do it once you are happy with the result.",
+                forcePushDescNone:
+                    "No rewrite backup right now — this step is only needed after a deep clean.",
+                forcePushAction: "Force push",
                 discardName: "Discard backups and reclaim",
                 discardDesc:
                     "A rewrite leaves a backup behind — that is your only way back to the old history. Discarding it and reclaiming is what actually deletes the old objects and frees the space. This step cannot be undone.",
@@ -1059,6 +1071,17 @@ export const en = {
             "The platform rejected the username in the credential — the token itself is valid. This is a plugin configuration error (the platform only accepts specific usernames). Please report this.",
         pushRejected:
             "The push was rejected by the remote. It likely has commits you do not have locally — pull first, then push.",
+        /**
+         * Local and remote have no commit in common (2026-10-10).
+         *
+         * The user hit exactly this: he ran a deep clean, **closed the modal and restarted
+         * Obsidian**, then clicked Sync now and got the bare English
+         * `fatal: refusing to merge unrelated histories`. The one thing he needs to do is a
+         * force push, so this line has to say so — and point at where to find it (the Cleanup
+         * section in settings, since that modal is long gone).
+         */
+        unrelatedHistories:
+            "Local and remote no longer share a single commit — this usually means a deep clean (history rewrite) that has not been force-pushed yet. Neither pulling nor pushing can work now; you need one force push: \u201cForce push\u201d in the Cleanup section of the settings.",
         noUpstream:
             "No remote repository is configured, so pulling is not possible. Set the remote URL in settings.",
         detachedHead:
@@ -1219,7 +1242,8 @@ export const en = {
                     "The size will not shrink yet — the backup still holds the old objects. Once you are happy, use \u201cDiscard backups and reclaim\u201d in the Cleanup section.",
                 ignored: (count: number) =>
                     `${count} ignore rule(s) were added to .gitignore — without them those files would come straight back on the next commit.`,
-                pushHint: "The remote has now diverged from your local history, so a force push is needed.",
+                pushHint:
+                    "The remote has now diverged from your local history, so a force push is needed. The same button also lives in the Cleanup section of the settings — you can still find it after closing this window, or after restarting.",
                 push: "Force push",
                 done: "Done",
             },

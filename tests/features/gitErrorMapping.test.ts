@@ -8,6 +8,7 @@ import {
     GitNotRepoError,
     GitTimeoutError,
     PushRejectedError,
+    UnrelatedHistoriesError,
 } from "../../src/features/sync/errors";
 
 /**
@@ -93,6 +94,33 @@ describe("mapError 的分类", () => {
                 "testing remote access"
             )
         ).toBeInstanceOf(GitAuthError);
+    });
+
+    /**
+     * 「本地与远端没有共同提交」（2026-10-10，用户实测报的原文）。
+     *
+     * 它**必须**有自己的类型：兜底分支会把这句英文原文直接弹给用户，
+     * 而它不含任何可行动信息 —— 用户该做的是**强制推送**（重写历史之后还没推），
+     * 而不是去解冲突、查令牌或重试。
+     *
+     * 也不能落进 `PushRejectedError`（那句说的是「先拉取」）—— 在这个状态下
+     * 拉取同样走不通，用户照做只会原地打转。
+     */
+    it("本地与远端没有共同提交 → UnrelatedHistoriesError（不是推送被拒，也不是兜底）", () => {
+        // git 2.35.1.windows.2 的真实输出原文
+        expect(
+            mapError(
+                gitFailed("fatal: refusing to merge unrelated histories"),
+                "pulling (merge)"
+            )
+        ).toBeInstanceOf(UnrelatedHistoriesError);
+        // rebase 策略下是同一句话，同样要认出来。
+        expect(
+            mapError(
+                gitFailed("fatal: refusing to merge unrelated histories"),
+                "pulling (rebase)"
+            )
+        ).toBeInstanceOf(UnrelatedHistoriesError);
     });
 
     it("推送被拒（本地落后）是 PushRejectedError", () => {

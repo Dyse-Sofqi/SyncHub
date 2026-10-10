@@ -75,6 +75,14 @@ hash 不会）。
 编一个百分比就是骗人。**弹窗渲染要 try/catch**：白框与「正在加载」长得一样，
 用户没法区分也没法报告（`cleanup.renderFailed`）。
 
+**插件自己造出来的状态，必须留一个「持久」出口。** 重写历史之后本地与远端
+**必然**没有共同提交（每个提交都换了哈希，连根提交也是），出路只有一次**强制推送**
+—— 而它原来只在清理弹窗的**结果页**上，用户关掉窗口 / 重启 Obsidian 之后就再也
+找不到了（他实测报的 `refusing to merge unrelated histories` 就是这么来的）。
+现在它在**设置页「清理」**里，可用性由 `refs/obsync-backup/*` 决定 ——
+**信号存在 git 里，不依赖插件数据**，跨重启跨设备都在。同类判断：任何「只在某个
+瞬时弹窗里可做」的必要动作，都要问一句「关掉之后他还能找到吗」。
+
 ### 图片同步（`features/images`）
 
 1. **`run()` 只复制，从不删除。** 双向删除 2026-09-23 去掉：「一边少了 = 用户删的」
@@ -216,6 +224,11 @@ HEAD 未出生时报 `fatal: could not resolve 'HEAD'` —— **HEAD 带单引�
   `mod-primary`。选择器只认旧名字的症状是「功能**静默消失**」（无报错）。**别把版本
   修饰类写进选择器**，永远留一条不依赖它的兜底；升级 Obsidian 后重抠 `.probe` 的
   `app.css` 并重跑对应探针。
+- **simple-git 的 `raw()` 对「非零退出 + 没有输出」照样 resolve**（2026-10-10 踩到）：
+  `git merge-base a b` 在「没有共同祖先」时 exit 1 **且什么都不打印**，而
+  `git.raw(["merge-base", a, b])` **resolve 出空串、不抛** —— 于是「靠 catch 判 false」
+  的写法**永远返回 true**，保护形同虚设。**判据一律读输出**（`out.trim().length > 0`），
+  与 `refExists` 同款。探针：`.probe/mergebase-check.mjs`。
 
 ### 提交与发版
 

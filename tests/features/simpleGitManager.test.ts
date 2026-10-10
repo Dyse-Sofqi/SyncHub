@@ -8,6 +8,7 @@ import {
     ConflictError,
     GitNotRepoError,
     PushRejectedError,
+    UnrelatedHistoriesError,
 } from "../../src/features/sync/errors";
 
 /**
@@ -675,6 +676,54 @@ describe("远端：push / pull / 冲突", () => {
         const status = await manager.status();
         expect(status.ahead).toBe(0);
         expect(status.behind).toBe(0);
+    });
+
+    /**
+     * 本地与远端**没有任何共同提交**（2026-10-10，用户实测报的）。
+     *
+     * 触发形态：他做完「深度清理」（重写历史）、关掉结果弹窗、重启 Obsidian，
+     * 再点「立即同步」—— 拿到的是一句
+     * `fatal: refusing to merge unrelated histories`（英文原文、没有可行动信息），
+     * 而此刻唯一该做的事是**强制推送一次**。
+     *
+     * 这里钉两件事：
+     *
+     * 1. 它变成 `UnrelatedHistoriesError`（展示层据此给出人话 + 指向强制推送）；
+     * 2. **在动手之前**就拦下来 —— merge 拒绝是无害的，但 **rebase 会真的开始重放**，
+     *    把本地全部提交往那条不相干的链上叠，然后留下一仓库冲突。
+     */
+    it("本地与远端没有共同提交时，pull 给出可行动的错误，而不是让 rebase 真的跑起来", async () => {
+        const { a, b } = await makeCluster();
+
+        // 远端先改一次 shared.md：这样**万一 rebase 真的跑起来**，
+        // 它一定会在这个文件上冲突 —— 那正是这条用例要拦住的结局。
+        await write(a.dir, "shared.md", "remote change\n");
+        await a.manager.stage([]);
+        await a.manager.commit("a writes");
+        await a.manager.push();
+
+        const git = simpleGit(b.dir);
+
+        // 造出「重写历史之后还没强制推送」的形态：本地换成一条**全新**的历史
+        // （孤儿分支 → 根提交 → 改名回 main），远端仍是旧的那条。
+        // 两条链没有任何共同提交 —— 这正是 filter-branch 跑完的后果。
+        await git.raw(["checkout", "--orphan", "unrelated"]);
+        await write(b.dir, "shared.md", "rewritten history\n");
+        await b.manager.stage([]);
+        await b.manager.commit("unrelated root");
+        await git.raw(["branch", "-M", "main"]);
+
+        await expect(b.manager.pull("merge")).rejects.toBeInstanceOf(UnrelatedHistoriesError);
+        // rebase 走的是另一条代码路径（`git rebase`），必须同样被拦在前面。
+        await expect(b.manager.pull("rebase")).rejects.toBeInstanceOf(UnrelatedHistoriesError);
+
+        // 仓库没有被留在任何中途状态：工作区一个字没动，也没有 rebase 残留目录
+        // （留下那个目录会让**下一次**动作莫名其妙地失败）。
+        await expect(read(b.dir, "shared.md")).resolves.toBe("rewritten history\n");
+        await expect(b.manager.status()).resolves.toMatchObject({ conflicted: [] });
+        for (const dir of ["rebase-merge", "rebase-apply"]) {
+            await expect(fs.access(path.join(b.dir, ".git", dir))).rejects.toThrow();
+        }
     });
 
     it("pull reset 丢弃本地提交、以远端为准", async () => {
