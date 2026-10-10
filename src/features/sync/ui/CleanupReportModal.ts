@@ -1,10 +1,11 @@
 import { Modal, Setting, type App, type ButtonComponent } from "obsidian";
 import type { LocaleStrings } from "../../../core/i18n";
+import { logger } from "../../../core/logger";
 import type { Notifier } from "../../../core/notice";
 import type { SyncService } from "../syncService";
 import { formatBytes } from "../repoSize";
 import { ROOT_DIRECTORY, type HistorySummary } from "../historyObjects";
-import { estimateRewriteMinutes, normalizeRemovalPaths } from "../cleanup";
+import { estimateRewriteMinutes, formatElapsed, normalizeRemovalPaths } from "../cleanup";
 import { HistoryRewriteBlockedError } from "../errors";
 import type { RewriteResult } from "../types";
 
@@ -24,12 +25,19 @@ import type { RewriteResult } from "../types";
  * | --- | --- | --- |
  * | 体检 | 「空间被什么占了」 | 按**目录**汇总（因为剔除的单位就是目录）+ 最大的单个对象 |
  * | 确认 | 「动手会失去什么」 | 三条后果逐条列出，预计耗时当场算出来 |
+ * | 重写中 | 「跑到哪了、还要多久、能不能先干别的」 | 已用时长 / 预计时长 + 不确定进度条 + 「在后台继续」 |
  * | 结果 | 「现在该怎么办」 | 备份在哪、为什么空间还没变小、接下来要强制推送 |
  *
- * ## 关掉弹窗 = 什么都不做
+ * ## 关掉弹窗：动手前 = 什么都不做；动手后 = 结果会弹回来
  *
- * 与 `ConfirmUntrackImagesModal` 一致：这一步什么都不做才是安全的那一侧。
- * 重写历史没有「点了才后悔」的余地 —— 它不可逆。
+ * **还没点「确认重写」时**关掉 = 什么都不做（与 `ConfirmUntrackImagesModal` 一致）——
+ * 重写历史没有「点了才后悔」的余地，它不可逆。
+ *
+ * **已经开始重写之后**关掉则另当别论：那时事情已经在跑了，用户的意思只是
+ * 「我不想一直盯着看」。所以重写跑完会把结果页**重新弹出来**（见 `runRewrite`），
+ * 并在状态栏与仓库同步面板上留一个「正在重写历史…」的活动态 ——
+ * 这两件事是 2026-10-10 那次修复的核心，用户报的原话是
+ * 「重写进行时只有一个弹框提示，退出弹框后，没有任何正在进行的提示，无法判断进度和状态」。
  */
 
 export interface CleanupModalDeps {
@@ -50,6 +58,24 @@ export class CleanupReportModal extends Modal {
     /** 「开始重写」那颗按钮 —— 一个都没勾时置灰。 */
     private primaryButton: ButtonComponent | undefined;
 
+    /**
+     * 弹窗**已经关掉**了。
+     *
+     * 重写要跑几分钟，而用户完全可能在这期间把窗口关掉 —— 那之后 `runRewrite`
+     * 那个 `await` 还挂着，回来时会接着调 `render()`。没有这个标记的话，
+     * 那些绘制会落到一个**已经脱离文档**的 `contentEl` 上：不报错、也看不见，
+     * 症状正是用户报的「退出弹框后什么都没了」（结果页连同那颗「强制推送」
+     * 一起消失，用户根本没法收尾）。
+     */
+    private closed = false;
+
+    /** 「已用时长」那一行 —— 每秒只改它的文本，不重绘整个弹窗。 */
+    private elapsedEl: HTMLElement | undefined;
+    /** 重写开始的时刻（算已用时长用）。0 = 还没开始。 */
+    private startedAt = 0;
+    /** 每秒刷新「已用时长」的定时器。 */
+    private timer: number | undefined;
+
     constructor(
         app: App,
         private readonly t: LocaleStrings,
@@ -59,11 +85,16 @@ export class CleanupReportModal extends Modal {
     }
 
     onOpen(): void {
+        // 重开只发生在一种情况下（见 `runRewrite`）：重写跑完了，而窗口在跑的过程中
+        // 被关掉过。那时结果已经拿到，直接画结果页 —— 再 `load()` 一次等于重读几秒
+        // 历史，还会把用户已经做完的选择抹掉。
         this.render();
-        void this.load();
+        if (this.stage === "loading") void this.load();
     }
 
     onClose(): void {
+        this.closed = true;
+        this.stopTimer();
         this.contentEl.empty();
     }
 
@@ -88,9 +119,29 @@ export class CleanupReportModal extends Modal {
     }
 
     private render(): void {
+        // 关掉之后绝不再往已经脱离文档的节点上画（见 `closed`）。
+        if (this.closed) return;
+
         this.contentEl.empty();
         this.primaryButton = undefined;
 
+        try {
+            this.renderStage();
+        } catch (err) {
+            // 画不出来时**别留一个白框**。
+            //
+            // 用户报过「重写途中窗口白屏」—— 静态读代码没能定位到那个现场（见
+            // HANDOVER 里这一轮的记录），但这类症状最难查的地方恰恰是「什么都没留下」：
+            // 一个空的 `contentEl` 与「正在加载」长得一样，用户没法区分、
+            // 也没法告诉你他去到哪一步。所以这里至少把原因写进控制台，
+            // 并在窗口里留一句人话 —— 仓库本身不受影响，重开一次即可。
+            logger.error("cleanup modal render failed", err);
+            this.contentEl.empty();
+            this.contentEl.createEl("p", { text: this.t.sync.cleanup.renderFailed });
+        }
+    }
+
+    private renderStage(): void {
         switch (this.stage) {
             case "loading":
                 this.renderLoading();
@@ -228,10 +279,68 @@ export class CleanupReportModal extends Modal {
         ]);
     }
 
+    /**
+     * 重写进行中的那一页。
+     *
+     * ## 为什么必须有「已用时长」和一颗「在后台继续」
+     *
+     * 用户报的原话是「重写进行时只有一个弹框提示，退出弹框后，没有任何正在进行的
+     * 提示，无法判断进度和状态」。那一页原来只有两句话，既答不了「跑到哪了」，
+     * 也没告诉他关掉之后去哪看 —— 于是用户关掉窗口，屏幕上就真的什么都没有了。
+     *
+     * 现在这一页给三样东西：
+     *
+     * 1. **已用时长 / 预计时长**（每秒刷新，只改一个文本节点，不重绘整个弹窗）——
+     *    这是界面上唯一能诚实说出来的进度信息，见 `formatElapsed`；
+     * 2. **一条不确定进度条**（复用面板横幅那条样式）—— 它只表达「在动」；
+     * 3. **「在后台继续」** + 一句明确的话，告诉他关掉之后进度会显示在
+     *    **状态栏与仓库同步面板**上（那是这次修复的另一半，见
+     *    `SyncService.rewriteHistory` 的 `withActivity("rewriting")`）。
+     */
     private renderRunning(): void {
         const t = this.t.sync.cleanup.running;
         this.titleEl.setText(t.title);
         this.contentEl.createEl("p", { text: t.text, cls: "setting-item-description" });
+
+        this.elapsedEl = this.contentEl.createEl("p", { cls: "obsync-modal-status" });
+        this.elapsedEl.setText(this.elapsedText());
+
+        this.contentEl.createDiv({ cls: "obsync-sync-progress" });
+
+        this.contentEl.createEl("p", {
+            text: t.backgroundHint,
+            cls: "setting-item-description",
+        });
+
+        this.addButtons([{ text: t.background, onClick: () => this.close() }]);
+    }
+
+    /** 「已用 X，预计总共约 N 分钟」那一句（`renderRunning` 与定时器共用）。 */
+    private elapsedText(): string {
+        return this.t.sync.cleanup.running.progress(
+            formatElapsed(this.elapsedSeconds()),
+            estimateRewriteMinutes(this.commitCount)
+        );
+    }
+
+    private elapsedSeconds(): number {
+        return this.startedAt === 0 ? 0 : (Date.now() - this.startedAt) / 1000;
+    }
+
+    /** 每秒刷新「已用时长」；只改那个文本节点，绝不重绘（重绘会丢滚动位置）。 */
+    private startTimer(): void {
+        this.stopTimer();
+        this.timer = window.setInterval(() => {
+            const el = this.elapsedEl;
+            if (!el) return;
+            el.setText(this.elapsedText());
+        }, 1000);
+    }
+
+    private stopTimer(): void {
+        if (this.timer === undefined) return;
+        window.clearInterval(this.timer);
+        this.timer = undefined;
     }
 
     private renderResult(): void {
@@ -269,13 +378,33 @@ export class CleanupReportModal extends Modal {
         }
 
         this.stage = "running";
+        // 记开始时刻必须在 `render()` **之前** —— `renderRunning` 会立刻按它算一次
+        // 「已用时长」，否则第一秒里显示的是 `startedAt` 为 0 时的那个巨大数字。
+        this.startedAt = Date.now();
         this.render();
+        this.startTimer();
         try {
             this.outcome = await this.deps.service.rewriteHistory(normalized.paths);
+            this.stopTimer();
             this.stage = "result";
+            if (this.closed) {
+                // 用户在重写期间把窗口关掉了。结果页上有一个**必须做的动作**
+                // （强制推送 —— 重写之后本地与远端必然分叉，不推就同步不上去），
+                // 丢掉它等于让用户没法收尾。所以把它弹回来。
+                //
+                // 这是刻意的取舍：关窗口的意思是「我不想一直盯着看」，
+                // 不是「结果不用告诉我」—— 与「关掉弹窗 = 什么都不做」那条
+                // 完全相反，因为那时还没动手，而现在**已经动过了**。
+                this.closed = false;
+                this.open();
+                return;
+            }
             this.render();
         } catch (err) {
-            this.close();
+            this.stopTimer();
+            // 已经关掉时不再 close 一次（真实 Modal 的 close 会 pop 一次键位作用域，
+            // 重复调用没有意义）。
+            if (!this.closed) this.close();
             this.deps.notifier.reportError(err);
         }
     }

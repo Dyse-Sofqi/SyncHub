@@ -41,7 +41,15 @@ import type { RepoStatus } from "./types";
  * TypeError，这正是踩过的坑）。
  */
 
-export type StatusBarActivity = "idle" | "pulling" | "pushing" | "committing";
+/**
+ * 同步模块可能处在的活动态。
+ *
+ * `rewriting`（2026-10-10）是**唯一一个不属于「同步」的活动**：重写历史只能从
+ * 设置页「清理」发起，跑起来要几分钟，期间用户会把那个弹窗关掉 ——
+ * 而关掉之后屏幕上必须还有东西能回答「它在动吗、走到哪了」。没有它的话，
+ * 状态栏与面板都停在 idle，界面上一点痕迹都没有（用户报的正是这个）。
+ */
+export type StatusBarActivity = "idle" | "pulling" | "pushing" | "committing" | "rewriting";
 
 /** 活动态里**真的有动作在跑**的那几个（`idle` 是「没有动作」）。 */
 export type BusyActivity = Exclude<StatusBarActivity, "idle">;
@@ -87,13 +95,24 @@ export function activityText(
     activity: BusyActivity,
     chain: boolean
 ): string {
-    if (activity === "pulling") {
-        return chain ? t.sync.statusChainPulling : t.sync.statusPulling;
+    switch (activity) {
+        case "pulling":
+            return chain ? t.sync.statusChainPulling : t.sync.statusPulling;
+        case "pushing":
+            return chain ? t.sync.statusChainPushing : t.sync.statusPushing;
+        case "committing":
+            return chain ? t.sync.statusChainCommitting : t.sync.statusCommitting;
+        case "rewriting":
+            // 重写**永远不在「立即同步」那条链路里**（它只能从设置页「清理」发起），
+            // 所以没有 chain 变体。
+            return t.sync.statusRewriting;
+        default: {
+            // 穷尽检查：以后往 `StatusBarActivity` 里再加一个阶段却忘了写文案时，
+            // 这里**编译不过** —— 而不是安静地退回「正在提交…」。
+            const exhaustive: never = activity;
+            return exhaustive;
+        }
     }
-    if (activity === "pushing") {
-        return chain ? t.sync.statusChainPushing : t.sync.statusPushing;
-    }
-    return chain ? t.sync.statusChainCommitting : t.sync.statusCommitting;
 }
 
 export interface StatusBarDeps {

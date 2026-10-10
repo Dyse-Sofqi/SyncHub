@@ -47,6 +47,30 @@ export function estimateRewriteMinutes(commitCount: number): number {
 }
 
 /**
+ * 把「已经跑了多少秒」格式化成 `分:秒`（`m:ss`）。
+ *
+ * ## 为什么界面要报「已用」而不是百分比
+ *
+ * 重写是 `--index-filter` 逐提交跑的，而 **git 全程不会输出「处理到第几个提交」**
+ * —— 唯一的进度信号是它自己往 stderr 打的那行 `Rewrite <sha> (n/total)`，
+ * 而那行不经过我们的调用栈（simple-git 只是把它攒在缓冲区里，跑完才给）。
+ * 所以界面上能诚实说出来的只有两件事：**已用多久**、**按估算还要多久**。
+ * 编一个 0%~100% 就是骗人 —— 它会停在一个数字上不动，或者冲过 100%。
+ *
+ * ## 为什么超过一小时也照 `m:ss` 报
+ *
+ * 一个 10000 提交的库要跑约 10 小时（见文件头的系数），`600:00` 读起来怪，
+ * 但它比 `10:00:00` 更省位置，而这个数字旁边永远有「预计总共约 N 分钟」作对照。
+ * 真要跑到那个量级，用户看的是「还在涨」这件事，不是精确的位数。
+ */
+export function formatElapsed(seconds: number): string {
+    const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+/**
  * 把用户勾选的目录归一成可以交给 `git rm -r --cached` 的路径。
  *
  * ## 为什么要有这一步（而不是直接把勾选项传下去）

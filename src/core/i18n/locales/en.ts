@@ -994,6 +994,14 @@ export const en = {
         statusChainCommitting: "Syncing: committing…",
         statusChainPulling: "Syncing: pulling…",
         statusChainPushing: "Syncing: pushing…",
+        /**
+         * The status bar / panel banner while history is being rewritten (2026-10-10).
+         *
+         * This is the only activity that is not a sync: the rewrite runs for minutes and the
+         * user will close the modal, so something on screen has to keep answering
+         * "is it still moving". This is that place.
+         */
+        statusRewriting: "Rewriting history…",
         notARepo: "This vault is not a git repository yet.",
         /**
          * The message when git cannot be found (filled in 2026-10-02).
@@ -1139,6 +1147,15 @@ export const en = {
             discardUnknown:
                 "Backups discarded, but the size could not be read, so the freed amount is unknown.",
             pushDone: "Force-pushed to the remote.",
+            /**
+             * Left in the window when the modal fails to draw itself (2026-10-10).
+             *
+             * See `CleanupReportModal.render`: a sentence telling you to reopen it beats a
+             * blank box — a blank box looks exactly like "still loading", so the user cannot
+             * tell the difference nor report which step it happened at.
+             */
+            renderFailed:
+                "This window could not be drawn; the reason is in the console. Close and reopen it — the repository itself is unaffected.",
             report: {
                 title: "Repository size inspection",
                 loading: "Analysing history…",
@@ -1173,6 +1190,25 @@ export const en = {
             running: {
                 title: "Rewriting history",
                 text: "Every commit is processed one at a time, so this is slow by nature. Please do not close Obsidian.",
+                /**
+                 * Elapsed / estimated time.
+                 *
+                 * Only elapsed and an estimate — never a percentage: the rewrite walks commits
+                 * one at a time and git never reports "commit N of M", so a progress percentage
+                 * would be made up (the same reason the panel's bar is indeterminate).
+                 */
+                progress: (elapsed: string, minutes: number) =>
+                    `${elapsed} elapsed, about ${minutes} minute(s) in total.`,
+                /**
+                 * Where the progress goes once the modal is closed — the point of this fix.
+                 *
+                 * The user's words: "after closing the modal there is no indication that
+                 * anything is running, so I cannot tell the progress or the state". So it must
+                 * say **where to look**, not merely that closing is allowed.
+                 */
+                backgroundHint:
+                    "You can close this window — the progress keeps showing in the bottom-left status bar and at the top of the Repository sync panel. The result pops back up when the rewrite finishes.",
+                background: "Continue in background",
             },
             result: {
                 title: "History rewritten",

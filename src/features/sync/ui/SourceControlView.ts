@@ -1317,9 +1317,22 @@ export const SYNC_STAGES: Array<{ kind: BusyActivity; label: (t: LocaleStrings) 
  */
 export function busyTitle(t: LocaleStrings, activity: BusyActivity, chain: boolean): string {
     if (chain) return t.sync.statusSyncing;
-    if (activity === "pulling") return t.sync.statusPulling;
-    if (activity === "pushing") return t.sync.statusPushing;
-    return t.sync.statusCommitting;
+    switch (activity) {
+        case "pulling":
+            return t.sync.statusPulling;
+        case "pushing":
+            return t.sync.statusPushing;
+        case "committing":
+            return t.sync.statusCommitting;
+        case "rewriting":
+            // 重写历史不在「立即同步」链路里（见 `activityText`），它有自己的标题。
+            return t.sync.statusRewriting;
+        default: {
+            // 穷尽检查 —— 新增阶段忘了写标题时编译不过（见 `activityText` 同款守卫）。
+            const exhaustive: never = activity;
+            return exhaustive;
+        }
+    }
 }
 
 /**
@@ -1337,6 +1350,9 @@ export function busyHint(
     if (chain) return t.sync.actSyncHint;
     if (activity === "committing") return t.sync.actCommitHint;
     if (activity === "pushing") return t.sync.actPushHint;
+    // 重写历史复用清理弹窗里那句「每个提交都要单独处理一次，慢是正常的」——
+    // 用户在横幅上看到的解释与他在弹窗里读到的是同一句，不会出现两种说法。
+    if (activity === "rewriting") return t.sync.cleanup.running.text;
     return undefined;
 }
 

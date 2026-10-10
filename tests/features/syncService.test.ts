@@ -1149,6 +1149,43 @@ describe("动作订阅：面板的「正在同步」横幅靠它", () => {
         expect(service.currentActivity).toEqual({ kind: "idle", chain: false });
     });
 
+    /**
+     * 重写历史也必须进活动系统（2026-10-10）。
+     *
+     * 用户报的原话是「重写进行时只有一个弹框提示，退出弹框后，没有任何正在进行的
+     * 提示，无法判断进度和状态」—— 根因是重写**没走 `withActivity`**：
+     * 状态栏与面板都停在 idle，那个弹窗一关屏幕上就一点痕迹都没有了。
+     *
+     * 这条契约只能在这一层测：状态栏 / 面板拿到的就是这份推送。
+     */
+    it("重写历史也推活动态（关掉弹窗之后屏幕上还有东西在说「它在跑」）", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+
+        const seen: Array<{ kind: string; chain: boolean }> = [];
+        service.onActivityChange((activity) => seen.push({ ...activity }));
+
+        await service.rewriteHistory(["字体"]);
+
+        expect(seen[0]).toEqual({ kind: "rewriting", chain: false });
+        expect(seen[seen.length - 1]).toEqual({ kind: "idle", chain: false });
+    });
+
+    it("重写失败时活动态也要收回 —— 否则状态栏会永远转着「正在重写历史…」", async () => {
+        const git = new FakeGit();
+        const fake = createFakeApp();
+        const { service } = makeService(git, fake);
+        git.rewriteError = new Error("filter-branch exploded");
+
+        const seen: Array<{ kind: string; chain: boolean }> = [];
+        service.onActivityChange((activity) => seen.push({ ...activity }));
+
+        await expect(service.rewriteHistory(["字体"])).rejects.toThrow("filter-branch exploded");
+
+        expect(seen[seen.length - 1]).toEqual({ kind: "idle", chain: false });
+    });
+
     it("退订之后不再收到（面板关掉不该继续被推）", async () => {
         const git = new FakeGit();
         const fake = createFakeApp();

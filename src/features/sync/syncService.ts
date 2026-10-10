@@ -1147,16 +1147,24 @@ export class SyncService {
      *
      * 整个过程进 `enqueue`：重写要跑几分钟，这期间任何同步动作都必须排队等着，
      * 否则会有另一个 git 进程在历史被改写的中途去读写引用。
+     *
+     * 2026-10-10：外面又包了一层 `withActivity("rewriting")`。用户报的原话是
+     * 「退出弹框后，没有任何正在进行的提示，无法判断进度和状态」—— 根因就是
+     * 重写**根本没进活动系统**：状态栏与面板都停在 idle，那个弹窗一关，
+     * 屏幕上就一点痕迹都没有了。现在它和拉取/推送一样有活动态，
+     * 关掉弹窗之后状态栏那一格会一直转着「正在重写历史…」。
      */
     async rewriteHistory(
         paths: string[]
     ): Promise<{ result: RewriteResult; ignoredRules: number }> {
-        return this.enqueue(async () => {
-            const result = await this.git.rewriteHistory(paths);
-            // 走无锁写入：我们此刻**就在队列里**，再进一次队列就是自己等自己。
-            const ignoredRules = await this.writeIgnoreRules(paths, false);
-            return { result, ignoredRules };
-        });
+        return this.enqueue(() =>
+            this.withActivity("rewriting", async () => {
+                const result = await this.git.rewriteHistory(paths);
+                // 走无锁写入：我们此刻**就在队列里**，再进一次队列就是自己等自己。
+                const ignoredRules = await this.writeIgnoreRules(paths, false);
+                return { result, ignoredRules };
+            })
+        );
     }
 
     /** 强制推送（重写之后本地与远端必然分叉，普通 push 会被拒绝）。 */

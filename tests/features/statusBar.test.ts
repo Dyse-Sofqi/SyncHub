@@ -290,6 +290,31 @@ describe("StatusBar 忙碌时的强调", () => {
 
         expect(last()).toBe("SyncHub: 正在拉取…");
     });
+
+    /**
+     * 重写历史也进活动系统（2026-10-10）。
+     *
+     * 用户报的原话是「重写进行时只有一个弹框提示，退出弹框后，没有任何正在进行的
+     * 提示，无法判断进度和状态」。根因就是重写**根本没进活动系统**：状态栏与面板
+     * 都停在 idle，那个弹窗一关屏幕上就一点痕迹都没有了。
+     *
+     * 这一条钉两件事：它有自己的文案（**不是**退回「正在提交…」），
+     * 而且它不在「立即同步」链路里（没有 chain 变体）。
+     */
+    it("重写历史有自己的一句，且不借用「立即同步」链路的文案", () => {
+        const { item, last, classes } = createItem();
+        const bar = new StatusBar({ item, getT: () => zhCN });
+
+        bar.setActivity("rewriting");
+
+        expect(last()).toBe(`SyncHub: ${zhCN.sync.statusRewriting}`);
+        expect(classes).toContain("obsync-status-bar-busy");
+
+        // 即便误传 chain（重写不可能来自「立即同步」），也不能变成链路文案 ——
+        // 那会让用户以为后面还有拉取与推送。
+        bar.setActivity("rewriting", { chain: true });
+        expect(last()).toBe(`SyncHub: ${zhCN.sync.statusRewriting}`);
+    });
 });
 
 describe("StatusBar 的语言", () => {

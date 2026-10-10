@@ -5,6 +5,7 @@ import {
     backupStampOf,
     estimateRewriteMinutes,
     estimateRewriteSeconds,
+    formatElapsed,
     normalizeRemovalPaths,
     shellQuote,
 } from "../../src/features/sync/cleanup";
@@ -88,6 +89,28 @@ describe("estimateRewriteSeconds / estimateRewriteMinutes", () => {
     it("随提交数线性增长", () => {
         expect(estimateRewriteSeconds(1000)).toBe(3505);
         expect(estimateRewriteMinutes(1000)).toBe(59);
+    });
+});
+
+describe("formatElapsed", () => {
+    it("秒补零，分钟不补（`m:ss`）", () => {
+        // 重写要跑好几分钟，界面上那个「已用 0:07」是用户唯一能看出「它在动」的数字。
+        expect(formatElapsed(7)).toBe("0:07");
+        expect(formatElapsed(59)).toBe("0:59");
+        expect(formatElapsed(60)).toBe("1:00");
+        expect(formatElapsed(151)).toBe("2:31");
+    });
+
+    it("负数 / 非有限数 / undefined 都当 0 —— 不显示 `NaN:NaN`", () => {
+        // 定时器第一次跑时 `startedAt` 可能还没写好，这里必须有个安全的落点。
+        expect(formatElapsed(0)).toBe("0:00");
+        expect(formatElapsed(-5)).toBe("0:00");
+        expect(formatElapsed(Number.NaN)).toBe("0:00");
+        expect(formatElapsed(Number.POSITIVE_INFINITY)).toBe("0:00");
+    });
+
+    it("超过一小时继续按分钟报（与旁边的「预计 N 分钟」对照着读）", () => {
+        expect(formatElapsed(600 * 60)).toBe("600:00");
     });
 });
 
