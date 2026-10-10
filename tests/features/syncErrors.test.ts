@@ -9,6 +9,8 @@ import {
     GitCredentialUsernameRejectedError,
     GitNotRepoError,
     GitTimeoutError,
+    HistoryRewriteEmptiedError,
+    HistoryRewriteRefusedError,
     PushRejectedError,
     UnrelatedHistoriesError,
     describeSyncError,
@@ -73,6 +75,31 @@ describe("describeSyncError", () => {
         expect(text).toContain(zhCN.settings.sync.cleanupHeading);
         expect(describeSyncError(new UnrelatedHistoriesError("unrelated"), en)).toBe(
             en.sync.unrelatedHistories
+        );
+    });
+
+    /**
+     * 重写的两种失败（2026-10-10，用户实测报的）。
+     *
+     * 共同要求：**绝不能把 git 的英文原文弹给用户**（他原话就是「弹框提示没适配中文」）。
+     * 两句的落点不同：前者是「重试一次」（插件会自动覆盖那份中间引用），
+     * 后者是「**已经还原了，库是好的**」+「少勾一些路径」。
+     */
+    it("重写被 refs/original 挡住 / 把历史清空，各有各的中文话", () => {
+        const refused = describeSyncError(new HistoryRewriteRefusedError("refused"), zhCN);
+        expect(refused).toBe(zhCN.sync.cleanup.rewriteRefused);
+        expect(refused).toContain("重试");
+        expect(describeSyncError(new HistoryRewriteRefusedError("refused"), en)).toBe(
+            en.sync.cleanup.rewriteRefused
+        );
+
+        const emptied = describeSyncError(new HistoryRewriteEmptiedError("emptied"), zhCN);
+        expect(emptied).toBe(zhCN.sync.cleanup.rewriteEmptied);
+        // 用户只点了一个「确认重写」，所以必须告诉他「已经还原了」——
+        // 否则他会以为库坏了、要自己去把分支找回来。
+        expect(emptied).toContain("还原");
+        expect(describeSyncError(new HistoryRewriteEmptiedError("emptied"), en)).toBe(
+            en.sync.cleanup.rewriteEmptied
         );
     });
 

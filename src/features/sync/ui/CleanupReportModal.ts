@@ -266,6 +266,9 @@ export class CleanupReportModal extends Modal {
         warning.createEl("p", { text: t.warningHashes });
         warning.createEl("p", { text: t.warningRemote });
         warning.createEl("p", { text: t.warningBackup });
+        // 「本地文件会留着」—— 这句是**承诺**，不是安慰：`rewriteHistory` 里那一步
+        // `restoreRemovedPaths` 就是为它存在的（filter-branch 的收尾会删掉它们）。
+        warning.createEl("p", { text: t.warningLocalFiles });
 
         this.addButtons([
             {

@@ -12,6 +12,8 @@ import {
     GitNetworkError,
     GitTimeoutError,
     HistoryRewriteBlockedError,
+    HistoryRewriteEmptiedError,
+    HistoryRewriteRefusedError,
     NoUpstreamError,
     DetachedHeadError,
     PushRejectedError,
@@ -1159,10 +1161,38 @@ export class SimpleGitManager implements GitManager {
             .map(shellQuote)
             .join(" ")}`;
 
+        /**
+         * 这里**故意不立刻抛** —— 见下面「引用动没动」那一段。
+         *
+         * filter-branch 的**最后一步**是 `git read-tree -u -m HEAD`
+         * （见 `git-filter-branch` 脚本末尾），而**引用在那之前就已经改写完了**。
+         * 所以「它报错」不等于「什么都没发生」：真出错的往往只是收尾那次工作区同步。
+         * 这个区别很要紧 —— 报成「重写失败」会让用户以为库还是原样，
+         * 于是下一次同步把刚被剔掉的路径**原样提交回去**。
+         */
+        let failure: unknown;
         try {
             await wrap("rewriting history", () =>
                 longGit.raw([
                     "filter-branch",
+                    // `--force`：允许 git **覆盖**上一次重写留下的 `refs/original/`。
+                    //
+                    // 没有它的话第二次深度清理**必然失败**（2026-10-10 用户实测报的）：
+                    // filter-branch 把「改写前的引用」备份在 `refs/original/` 下，
+                    // 见到它已经存在就拒绝开始，原话是
+                    // `Cannot create a new backup. A previous backup already exists in
+                    //  refs/original/ Force overwriting the backup with -f`。
+                    // 而本插件只在「丢弃备份并回收」里清它 —— 也就是清理两次之间
+                    // 必须先丢弃备份，而 `cleanup.ts` 里备份引用带时间戳的理由
+                    // 恰恰是「用户可能清理多次」。实现与设计意图不符，所以带上它。
+                    //
+                    // **为什么覆盖它是安全的**：`refs/original/` 是 filter-branch 自己的
+                    // 记账，而我们的退路是 `refs/obsync-backup/<时间戳>` ——
+                    // 那个命名空间**不在** `--branches --tags --remotes` 里，
+                    // 所以一次都不会被改写（见 `cleanup.ts` 的 `backupRefName`）。
+                    // 合成仓实测：连续两次重写，第一次的备份引用仍指向第一次重写前的
+                    // 提交，第二次的指向第二次重写前的提交，两份都在。
+                    "--force",
                     "--index-filter",
                     filter,
                     "--prune-empty",
@@ -1173,18 +1203,114 @@ export class SimpleGitManager implements GitManager {
                 ])
             );
         } catch (err) {
-            // 失败也要让日志里留下备份引用的名字 —— 用户此刻最需要知道的是「退路在哪」。
-            logger.error("history rewrite failed", { backupRef, paths, err });
-            throw err;
+            failure = err;
+        }
+
+        // 把被剔除的路径放回工作区 —— filter-branch 的收尾会把它们**从磁盘上删掉**。
+        await this.restoreRemovedPaths(longGit, backupRef, paths);
+
+        /**
+         * `--prune-empty` 有可能把**全部**提交都摘掉 —— 用户勾选的路径若覆盖了
+         * 每个提交的全部内容，就没有提交能活下来，filter-branch 会把这条分支
+         * **整个删掉**，仓库落到「HEAD 未出生」的状态（实测原话
+         * `Ref 'refs/heads/master' was deleted`）。
+         *
+         * 这是插件自己造出来的坏状态，必须**当场收拾**：备份引用在动手前就建好了，
+         * 直接把它接回分支，用户回到与重写前一模一样的状态。
+         * 只在确认分支没了之后才动 —— 正常路径上这一步零成本（一次本地 rev-parse）。
+         */
+        if (!(await this.refExists(git, "HEAD"))) {
+            if (status.branch) {
+                await wrap("restoring the branch after an emptied rewrite", () =>
+                    git.raw(["update-ref", `refs/heads/${status.branch}`, previousHead])
+                );
+            }
+            logger.error("history rewrite emptied the branch", {
+                backupRef,
+                paths,
+                branch: status.branch,
+            });
+            throw new HistoryRewriteEmptiedError(
+                "rewrite history: every commit was pruned, the branch was deleted and has been restored"
+            );
+        }
+
+        /**
+         * 「重写到底发生了没有」由**引用动没动**回答，而不是由 git 的退出码回答。
+         *
+         * 为什么只能这样：filter-branch 每改写完一个引用就立刻 `update-ref`，
+         * 而最后那次工作区同步（`read-tree -u -m HEAD`）是**之后**才跑的 ——
+         * 它失败会让整个命令以非零退出，但历史**已经变了**。拿退出码当结论，
+         * 就会把「历史已改写、只是工作区没同步」报成「重写失败」，于是：
+         * 忽略规则不会写（下次同步把刚剔掉的文件原样提交回去，用户实测 206 个
+         * 文件又回来了）、结果页不会出现（用户不知道该强制推送）、
+         * 而真正的后果（哈希全变、远端分叉）已经发生了 —— **报错与后果对不上**，
+         * 正是这个项目最怕的那类失败。
+         *
+         * 反过来，退出码非零**且**引用没动，才是真的什么都没发生，照旧抛出。
+         */
+        const head = await this.headHash();
+        if (head === previousHead) {
+            logger.error("history rewrite failed", { backupRef, paths, err: failure });
+            throw failure ?? new Error("filter-branch finished without changing HEAD");
+        }
+        if (failure) {
+            logger.warn("filter-branch reported an error but the history was rewritten", {
+                backupRef,
+                paths,
+                err: failure,
+            });
         }
 
         return {
             previousHead,
-            head: await this.headHash(),
+            head,
             backupRef,
             commitsBefore,
             commitsAfter: await this.countCommits(),
         };
+    }
+
+    /**
+     * 把被剔除的路径放回工作区（内容取自重写前的备份引用）。
+     *
+     * ## 为什么必须有这一步（2026-10-10 实测发现的真 bug）
+     *
+     * `git filter-branch` 的**最后一步**是 `git read-tree -u -m HEAD`
+     * （见 `git-filter-branch` 脚本末尾），作用是把工作区对齐到改写后的 HEAD ——
+     * 于是**被剔除的路径会从磁盘上消失**。用本类的 `rewriteHistory` 实测：
+     * `drop/b.md` 从磁盘上没了，而没被剔的 `keep/a.md` 还在。
+     *
+     * 这与界面和文档说好的完全相反（「只清历史，本地文件一个都不动」），
+     * 后果也很重：用户勾一个装着笔记的目录，笔记就没了 ——
+     * 而这个动作的设计目的恰恰是「让 git 以后别跟踪它们」，不是「删掉它们」。
+     *
+     * ## 两个实现细节
+     *
+     * - **用 `git restore --worktree`，不用 `git checkout <ref> -- <path>`**：
+     *   后者会把恢复出来的文件**加进索引**（实测 `status` 显示 `A  drop/b.md`），
+     *   等于又把它跟踪起来，正好是这件事要避免的。
+     * - **逐个路径恢复**：某个路径在重写前的提交里本来就不存在时（用户手写的、
+     *   或体检报告里那一行 `.`）整条命令会失败 —— 一次全传会让**能恢复的
+     *   也一起不恢复**。失败只记日志，不打断：重写本身已经完成了，
+     *   为一次恢复失败把整个动作报成失败，只会让用户以为要重来一遍。
+     */
+    private async restoreRemovedPaths(
+        git: SimpleGit,
+        source: string,
+        paths: string[]
+    ): Promise<void> {
+        for (const path of paths) {
+            try {
+                await git.raw(["restore", "--source", source, "--worktree", "--", path]);
+            } catch (err) {
+                logger.warn(
+                    "could not restore a removed path into the working tree",
+                    path,
+                    err
+                );
+            }
+        }
     }
 
     /** 本插件建的历史备份引用（新的在前）。见 `cleanup.ts` 的 `backupRefName`。 */
@@ -1503,6 +1629,27 @@ export function mapError(err: unknown, what: string): Error {
      * 而且它绝不能落进 `PushRejectedError`（那是「先拉取」），
      * 用户照做会发现拉取也走不通，然后卡在原地。
      */
+    /**
+     * filter-branch 拒绝开始：上一次重写留下的 `refs/original/` 还在（2026-10-10）。
+     *
+     * 真实输出原文（git 2.35.1.windows.2，第二次跑 `git filter-branch` 时）：
+     *
+     * ```
+     * Cannot create a new backup.
+     * A previous backup already exists in refs/original/
+     * Force overwriting the backup with -f
+     * ```
+     *
+     * `rewriteHistory` 现在会带 `--force`，所以这条**正常路径上碰不到** ——
+     * 留着它是因为：一、别的 git 版本/实现可能仍会拒绝；二、兜底分支会把这段
+     * 英文原文直接弹给用户，而它不含任何可行动信息（用户该做的是**重试一次**）。
+     */
+    if (/a previous backup already exists in refs\/original/i.test(message)) {
+        return new HistoryRewriteRefusedError(
+            `filter-branch refused to start: stale refs/original (${detail})`,
+            { cause: err }
+        );
+    }
     if (/refusing to merge unrelated histories/i.test(message)) {
         return new UnrelatedHistoriesError(`unrelated histories (${detail})`, {
             cause: err,

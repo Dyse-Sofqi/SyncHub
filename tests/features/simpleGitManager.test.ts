@@ -7,6 +7,7 @@ import { SimpleGitManager, createGitInstance } from "../../src/features/sync/sim
 import {
     ConflictError,
     GitNotRepoError,
+    HistoryRewriteEmptiedError,
     PushRejectedError,
     UnrelatedHistoriesError,
 } from "../../src/features/sync/errors";
@@ -861,4 +862,83 @@ describe("非交互设置真的传到了 git 进程", () => {
         const seen = await fs.readFile(path.join(dir, ".git", "obsync-env.txt"), "utf8");
         expect(seen.trim()).toBe("0/never");
     });
+});
+
+/**
+ * 深度清理（重写历史）—— 本插件**唯一不可逆的动作**，而它此前一条真仓库测试都没有。
+ *
+ * 2026-10-10 补上这一组，起因是用户实测报的两条（都在这层坐实）：
+ *
+ * 1. 第二次深度清理**必然失败** —— filter-branch 见到上一次留下的 `refs/original/`
+ *    就拒绝开始；
+ * 2. **重写会把它剔掉的路径从磁盘上删掉** —— filter-branch 的收尾是
+ *    `git read-tree -u -m HEAD`（见 `git-filter-branch` 脚本末尾），而界面与文档
+ *    都承诺「只清历史，本地文件不动」。勾一个装着笔记的目录，笔记就没了。
+ *
+ * 这两条都只有真 git 才暴露得出来：参数拼错了 mock 照样「通过」。
+ *
+ * ⚠ 这一组**很慢**：本机实测 `filter-branch` 一次约 28 秒 —— 它内部要起几十个
+ * 子进程（`sh` + 每个提交一个 `git rm`），而本机进程创建约 340ms。
+ * 所以三条用例都带**显式超时**，别把默认的 30 秒当成「它卡死了」。
+ */
+describe("深度清理（重写历史）", () => {
+    it("连续两次重写都能跑通，且两份备份各自指向它那次重写前的提交", async () => {
+        const { manager, dir } = await makeReadyRepo("rewrite-twice");
+        await write(dir, "keep/a.md", "a\n");
+        await write(dir, "drop/b.md", "b\n");
+        await write(dir, "stay/s.md", "s\n");
+        await manager.stage([]);
+        await manager.commit("c1");
+
+        const first = await manager.rewriteHistory(["drop"]);
+
+        // 第二次：`refs/original/` 还在（第一次留下的）—— 没有 `--force` 时
+        // git 会直接拒绝开始，用户实测报的就是这条。
+        const second = await manager.rewriteHistory(["keep"]);
+        expect(second.backupRef).not.toBe(first.backupRef);
+
+        // 两份退路都在，而且各自指向**它那次重写前**的 HEAD ——
+        // 备份引用带时间戳的理由就是「用户可能清理多次，每一次都有意义」。
+        const git = simpleGit(dir);
+        await expect(git.revparse([first.backupRef])).resolves.toBe(first.previousHead);
+        await expect(git.revparse([second.backupRef])).resolves.toBe(second.previousHead);
+        expect(second.previousHead).toBe(first.head);
+        // 两次重写 ≈ 56 秒（见 `describe` 的说明）—— 默认 30 秒会误判成卡死。
+    }, 120_000);
+
+    it("重写之后被剔除的路径**还在磁盘上**，只是不再被 git 跟踪", async () => {
+        const { manager, dir } = await makeReadyRepo("rewrite-keeps-files");
+        await write(dir, "notes/keep.md", "keep\n");
+        await write(dir, "big/asset.bin", "asset\n");
+        await manager.stage([]);
+        await manager.commit("c1");
+
+        await manager.rewriteHistory(["big"]);
+
+        // 文件还在，内容也没变 —— 这是「只清历史」这句承诺的全部内容。
+        await expect(read(dir, "big/asset.bin")).resolves.toBe("asset\n");
+        await expect(read(dir, "notes/keep.md")).resolves.toBe("keep\n");
+        // 但历史（与索引）里已经没有它了 —— 否则下次提交又原样回去。
+        const tracked = await manager.listTracked();
+        expect(tracked).not.toContain("big/asset.bin");
+        expect(tracked).toContain("notes/keep.md");
+    }, 90_000);
+
+    it("重写把整条历史清空时，分支被自动还原（不留下一个没有提交的仓库）", async () => {
+        const { manager, dir } = await makeReadyRepo("rewrite-empties");
+        await write(dir, "only/note.md", "note\n");
+        await manager.stage([]);
+        await manager.commit("c1");
+
+        // 勾选的路径覆盖了这个提交的全部内容 → 它被 `--prune-empty` 摘掉 →
+        // git 把这条分支整个删掉。插件必须当场接回去。
+        await expect(manager.rewriteHistory(["only"])).rejects.toBeInstanceOf(
+            HistoryRewriteEmptiedError
+        );
+
+        // 与重写前一模一样：分支在、提交在、文件也在。
+        await expect(manager.countCommits()).resolves.toBe(1);
+        await expect(read(dir, "only/note.md")).resolves.toBe("note\n");
+        await expect(manager.status()).resolves.toMatchObject({ branch: "main" });
+    }, 90_000);
 });

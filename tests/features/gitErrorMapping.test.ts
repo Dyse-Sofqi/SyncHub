@@ -7,6 +7,7 @@ import {
     GitNetworkError,
     GitNotRepoError,
     GitTimeoutError,
+    HistoryRewriteRefusedError,
     PushRejectedError,
     UnrelatedHistoriesError,
 } from "../../src/features/sync/errors";
@@ -121,6 +122,27 @@ describe("mapError 的分类", () => {
                 "pulling (rebase)"
             )
         ).toBeInstanceOf(UnrelatedHistoriesError);
+    });
+
+    /**
+     * 「上一次重写留下的 `refs/original/` 还在，git 拒绝开始」（2026-10-10，用户实测报的）。
+     *
+     * 用户看到的是那段英文原文（`Cannot create a new backup. A previous backup already
+     * exists in refs/original/`）—— 它不含任何可行动信息，而用户该做的是**重试一次**。
+     * `rewriteHistory` 现在带 `--force`，正常路径上碰不到；留着是兜底。
+     */
+    it("filter-branch 拒绝开始（refs/original 残留）→ HistoryRewriteRefusedError", () => {
+        // git 2.35.1.windows.2 的真实输出原文
+        expect(
+            mapError(
+                gitFailed(
+                    "Cannot create a new backup.\n" +
+                        "A previous backup already exists in refs/original/\n" +
+                        "Force overwriting the backup with -f"
+                ),
+                "rewriting history"
+            )
+        ).toBeInstanceOf(HistoryRewriteRefusedError);
     });
 
     it("推送被拒（本地落后）是 PushRejectedError", () => {

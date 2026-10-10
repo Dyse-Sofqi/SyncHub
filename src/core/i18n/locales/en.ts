@@ -1161,6 +1161,27 @@ export const en = {
                 "no-commits": "This repository has no commits yet, so there is no history to clean.",
                 "no-paths": "No paths were selected.",
             },
+            /**
+             * git refused to **start** the rewrite: the previous rewrite's scratch refs are
+             * still there (2026-10-10).
+             *
+             * The user hit the bare English `Cannot create a new backup. A previous backup
+             * already exists in refs/original/`. `rewriteHistory` now passes `--force`, so this
+             * should be unreachable — it stays as the safety net so that English text can never
+             * be shown on its own, since it carries no actionable information.
+             */
+            rewriteRefused:
+                "The rewrite did not start: git refused to overwrite the scratch refs (refs/original) left by a previous rewrite. Try once more — the plugin overwrites them automatically. If it keeps happening, please report this message.",
+            /**
+             * The rewrite emptied the whole history and git deleted the branch — it has been
+             * **restored automatically**.
+             *
+             * The point is "restored, the vault is fine" plus "select fewer paths next time":
+             * all the user did was press Rewrite once, so he should not have to work out how to
+             * get his branch back.
+             */
+            rewriteEmptied:
+                "The rewrite emptied the entire history (the paths you selected covered the full contents of every commit), so git deleted the current branch — it has been restored automatically to the state before the rewrite, and the vault is fine. Select fewer paths and try again.",
             gcFreed: (size: string) => `Reclaimed ${size}.`,
             gcNothing:
                 "Nothing to reclaim — the large files sit in reachable history, and only a deep clean can remove those.",
@@ -1207,6 +1228,17 @@ export const en = {
                     "Old history already pushed to the remote still exists in other people's clones — this cannot remove that.",
                 warningBackup:
                     "A backup ref is created first, so you can still go back; but once that backup is discarded, there is no way back.",
+                /**
+                 * "Your local files stay" — a **promise**, not a reassurance.
+                 *
+                 * Measured on 2026-10-10: filter-branch's final step deletes the paths it
+                 * removed **from disk** (a side effect of `read-tree -u -m HEAD`), which is the
+                 * opposite of what this feature is for. `rewriteHistory` now restores them, so
+                 * this line holds — and it tells the user that selecting a folder full of notes
+                 * will not lose the notes.
+                 */
+                warningLocalFiles:
+                    "Your local files all stay — only the copies in history are removed. They are then written into .gitignore so they will not be committed again.",
                 back: "Back",
                 go: "Rewrite",
             },

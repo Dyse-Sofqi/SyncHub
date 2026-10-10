@@ -160,6 +160,27 @@ R2 走 S3 + SigV4，`sha256.ts` / `sigv4.ts` 手写，**不用 `crypto.subtle`**
 **靠 git 错误文案做分支判断时，正则必须用真实输出校准。** `git restore --staged` 在
 HEAD 未出生时报 `fatal: could not resolve 'HEAD'` —— **HEAD 带单引号**（见 `HEAD_UNBORN_RE`）。
 
+### 重写历史（`filter-branch`）的四条实测行为（2026-10-10）
+
+全在 `simpleGitManager.rewriteHistory` 上，**别再凭直觉改**：
+
+1. **它最后会改工作区**：脚本末尾是 `git read-tree -u -m HEAD` ——
+   **被剔除的路径会从磁盘上删掉**（实测 `drop/b.md` 消失）。本插件要的是
+   「只清历史」，所以之后必须 `git restore --source=<备份引用> --worktree -- <路径>` 放回来。
+   **必须用 `--worktree`**：`git checkout <ref> -- <path>` 会把文件加进索引（`A  file`），
+   等于又跟踪起来。**逐个路径恢复**，某个路径不存在时整条命令会失败。
+2. **报错 ≠ 什么都没发生**：引用是**边改写边 update-ref** 的，收尾那次工作区同步
+   失败会让命令非零退出，但历史已经变了。判据是**引用动没动**（`head === previousHead`），
+   不是退出码 —— 否则会漏掉写忽略规则与结果页，而哈希全变、远端分叉已经发生。
+3. **见到 `refs/original/` 就拒绝开始**（`Cannot create a new backup…`）→
+   必须带 `--force`，否则**第二次深度清理必然失败**。覆盖它是安全的：我们的退路是
+   `refs/obsync-backup/<时间戳>`，那个命名空间不在 `--branches --tags --remotes` 里。
+4. **`--prune-empty` 可能把分支整个删掉**（所有提交都变空时，原话
+   `Ref 'refs/heads/master' was deleted`）→ 检测到就 `update-ref` 接回去再抛错。
+
+⚠ 本机 `filter-branch` 一次约 **28 秒**（内部几十个子进程，进程创建 ~340ms）——
+真仓库测试要**显式超时**，别把默认 30 秒当「卡死」。
+
 ### git diff 输出
 
 `diffFile` 的三个选项各防一种真实环境：`-c core.quotePath=false`（否则中文路径被转义

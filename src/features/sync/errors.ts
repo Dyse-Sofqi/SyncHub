@@ -144,6 +144,51 @@ export class HistoryRewriteBlockedError extends ObsyncError {
 }
 
 /**
+ * git **拒绝开始**重写：仓库里还留着上一次重写写的中间引用（`refs/original/`）。
+ *
+ * ## 现场（2026-10-10 用户实测报的）
+ *
+ * 用户第一次深度清理成功、强制推送也做完了，想再清一轮时拿到的是：
+ *
+ * ```
+ * Cannot create a new backup.
+ * A previous backup already exists in refs/original/
+ * Force overwriting the backup with -f
+ * ```
+ *
+ * `filter-branch` 把「改写前的引用」备份在 `refs/original/` 下，见到它已经存在就
+ * **拒绝开始**。而本插件只在「丢弃备份并回收」里清它 —— 也就是**清理过两次
+ * 之间必须先丢弃备份**，否则第二次必然失败。而 `cleanup.ts` 里备份引用带时间戳的
+ * 理由恰恰是「用户可能清理多次」，所以这是实现与设计意图不符，已改（见下）。
+ *
+ * ## 为什么单独一个类型
+ *
+ * 它的应对方式与 `HistoryRewriteBlockedError` 那三种都不同 —— 用户没有做错什么，
+ * 该做的是**重试**（`rewriteHistory` 现在会带 `--force`，git 直接覆盖那份中间引用）。
+ * 混进兜底分支的话，用户拿到的就是上面那段英文原文，看不出下一步该做什么。
+ */
+export class HistoryRewriteRefusedError extends ObsyncError {}
+
+/**
+ * 重写把**整条历史都清空了**，git 因此删掉了当前分支 —— 已**自动还原**。
+ *
+ * ## 它是怎么发生的（实测确认，不是推测）
+ *
+ * `--prune-empty` 会摘掉「剔除这些路径之后变空」的提交。用户勾选的路径若覆盖了
+ * 每个提交的**全部**内容，就没有任何提交能活下来，`filter-branch` 会直接把这条
+ * 分支删掉（原话 `Ref 'refs/heads/master' was deleted`），仓库落到「HEAD 未出生」
+ * 的状态。合成仓实测：只剩一个提交、而它被摘掉时就是这样。
+ *
+ * ## 为什么必须单独一个类型，而且必须还原
+ *
+ * 这是**插件自己造出来的坏状态**：用户会看到一个「没有分支、没有提交」的仓库，
+ * 而他从头到尾只点了一个「确认重写」。备份引用在动手前就建好了，所以
+ * `rewriteHistory` 会**当场把分支接回去**（回到重写前一模一样的状态）再抛这个错。
+ * 文案的重点因此不是「失败了」，而是「**已经还原了，库是好的**」+「少勾一些路径」。
+ */
+export class HistoryRewriteEmptiedError extends ObsyncError {}
+
+/**
  * 本地与远端**没有任何共同提交** —— 普通拉取与推送两条路都堵死。
  *
  * ## 它几乎只有一个来源：刚做过「深度清理」而还没强制推送
@@ -196,5 +241,7 @@ export function describeSyncError(err: unknown, t: LocaleStrings): string | unde
     if (err instanceof HistoryRewriteBlockedError) {
         return t.sync.cleanup.blocked[err.reason];
     }
+    if (err instanceof HistoryRewriteRefusedError) return t.sync.cleanup.rewriteRefused;
+    if (err instanceof HistoryRewriteEmptiedError) return t.sync.cleanup.rewriteEmptied;
     return undefined;
 }
