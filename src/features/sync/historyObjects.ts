@@ -48,6 +48,22 @@ export interface HistoryDirectory {
      * **不是文件数** —— 见文件头「为什么按对象算」。
      */
     objects: number;
+    /**
+     * 这个目录里有多少**篇笔记**（`.md` / `.canvas`，**按不同路径去重**）。
+     *
+     * ## 为什么要有它（2026-10-10，用户提问引出来的）
+     *
+     * 用户问：「每次清理完 .gitignore 都会多出一些仓库目录，同步了之后这些目录
+     * 岂不是不进同步了？」—— 答案是**对，而且这是故意的**（清历史的目的是
+     * 「以后也别进来」）。但这句话此前**没有任何地方说过**，于是最危险的误操作
+     * 毫无提示：**勾一个装着笔记的目录**，那些笔记从此不再跟着 git 走，
+     * 别的设备 clone 之后再也看不到它们。
+     *
+     * 所以界面要能在他勾之前就说出来：「这个目录里有 120 篇笔记」。
+     * 这也是为什么它**按路径去重**（`objects` 数的是版本数，会夸大）——
+     * 用户想知道的是「里面有几篇笔记」，不是「历史上存了几份」。
+     */
+    notes: number;
 }
 
 export interface HistorySummary {
@@ -128,6 +144,17 @@ export function topLevelOf(path: string): string {
 }
 
 /**
+ * 这个路径是不是「笔记」—— `.md` / `.canvas`。
+ *
+ * 判据刻意只有这两个：它们是 Obsidian 里**只有本机能创建、丢了就没了**的东西。
+ * 附件（图片、PDF）另有「图片同步」兜着，字体与插件目录本来就是每台机器上重装 ——
+ * 所以警告只该对着笔记发，否则会变成「什么都说危险」＝什么都没说。
+ */
+export function isNotePath(path: string): boolean {
+    return /\.(md|canvas)$/i.test(path);
+}
+
+/**
  * 汇总体检结果。
  *
  * 只统计 **blob**：tree 与 commit 加起来通常不到千分之一，把它们混进「谁占得多」
@@ -146,6 +173,13 @@ export function summarizeHistory(
     const topObjects = options.topObjects ?? 20;
 
     const byDirectory = new Map<string, HistoryDirectory>();
+    /**
+     * 每个目录里出现过的笔记路径（去重）。
+     *
+     * 单独攒一个 Set 而不是直接累加：`entries` 是**每个版本一条**，
+     * 直接数会把「一篇改了 20 次的笔记」报成 20 篇。
+     */
+    const notePaths = new Map<string, Set<string>>();
     const blobs: HistoryBlob[] = [];
     let totalBytes = 0;
 
@@ -164,8 +198,23 @@ export function summarizeHistory(
             current.bytes += info.bytes;
             current.objects += 1;
         } else {
-            byDirectory.set(directory, { path: directory, bytes: info.bytes, objects: 1 });
+            byDirectory.set(directory, {
+                path: directory,
+                bytes: info.bytes,
+                objects: 1,
+                notes: 0,
+            });
         }
+        if (isNotePath(entry.path)) {
+            const set = notePaths.get(directory) ?? new Set<string>();
+            set.add(entry.path);
+            notePaths.set(directory, set);
+        }
+    }
+
+    for (const [directory, paths] of notePaths) {
+        const row = byDirectory.get(directory);
+        if (row) row.notes = paths.size;
     }
 
     return {

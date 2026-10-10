@@ -1224,7 +1224,18 @@ export const en = {
                 dirMeta: (size: string, objects: number) => `${size} · ${objects} objects`,
                 rootLabel: "(files at the vault root)",
                 rootNote: "Files at the vault root cannot be selected — removing them would wipe the whole vault.",
-                selectNote: "Selection only decides which paths are removed, not how long it takes.",
+                /**
+                 * One sentence answering two questions; missing either causes trouble
+                 * (see `renderReport`): "does selecting more change how long it takes" (no) and
+                 * "what does selecting actually do" (the directory stops going through git).
+                 *
+                 * The second half came out of the user's question on 2026-10-10 — the UI had
+                 * never said a word about it.
+                 */
+                selectNote:
+                    "Selection only decides which paths are removed, not how long it takes. Note also: a selected directory stops going through git from now on (it is written into .gitignore).",
+                /** The "N notes" badge on a directory row — it should be visible before ticking. */
+                notesBadge: (count: number) => `${count} note(s)`,
                 largestHeading: "Largest single objects",
                 empty: "No history objects to analyse.",
                 toConfirm: "Rewrite history",
@@ -1233,6 +1244,18 @@ export const en = {
             confirm: {
                 title: "Confirm the history rewrite",
                 pathsHeading: "These paths will be removed from all of history:",
+                /**
+                 * **The most important consequence of this action** (raised by the user's
+                 * question on 2026-10-10). The UI had never said "removing means it stops
+                 * syncing from now on", which is the one thing to know beforehand: tick a
+                 * folder full of notes and those notes stop going through git, so other
+                 * devices will never see them again.
+                 */
+                warningSync:
+                    "Note: these directories stop going through git from now on \u2014 they are written into .gitignore. Other devices will not have them after cloning (your local files stay).",
+                /** When a selected folder holds notes, name the count — far better than "be careful". */
+                warningNotes: (count: number) =>
+                    `\u26a0 The directories you selected contain ${count} note(s) (markdown / canvas). Once removed they stop syncing, and other devices will never see them again \u2014 if that is not what you want, go back and untick the folders that hold notes.`,
                 estimate: (commits: number, minutes: number) =>
                     `This vault has ${commits} commits. The rewrite processes every commit one at a time, each spawning its own git process — so it makes no difference how many paths you pick, or how big the vault is. Measured at about 3.5 s per commit, that is roughly ${minutes} minute(s) — please do not close Obsidian while it runs.`,
                 warningHeading: "What this changes:",
@@ -1287,7 +1310,7 @@ export const en = {
                 noShrink:
                     "The size will not shrink yet — the backup still holds the old objects. Once you are happy, use \u201cDiscard backups and reclaim\u201d in the Cleanup section.",
                 ignored: (count: number) =>
-                    `${count} ignore rule(s) were added to .gitignore — without them those files would come straight back on the next commit.`,
+                    `${count} ignore rule(s) were added to .gitignore: those directories no longer go through git (without them they would come straight back on the next commit).`,
                 pushHint:
                     "The remote has now diverged from your local history, so a force push is needed.",
                 /**

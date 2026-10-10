@@ -231,8 +231,15 @@ export class CleanupReportModal extends Modal {
         this.contentEl.createEl("p", { text: t.note, cls: "setting-item-description" });
 
         this.contentEl.createEl("p", { text: t.dirsHeading, cls: "obsync-warning-heading" });
-        // 这一句回答的是「我勾多勾少，耗时会不会变」—— 不会（重写是逐提交的），
-        // 但不说的话，用户在确认页看到那个**恒定**的耗时数字会以为它是写死的。
+        /**
+         * 这一句要回答两个问题，缺一个都会出事：
+         *
+         * 1. 「我勾多勾少，耗时会不会变」—— **不会**（重写是逐提交的）。不说的话，
+         *    用户在确认页看到那个**恒定**的耗时数字会以为它是写死的；
+         * 2. 「勾了会怎么样」—— **这些目录以后不再跟着 git 走**（会被写进 .gitignore）。
+         *    用户 2026-10-10 问的正是这个（「那以后这些目录岂不是不进同步了？」），
+         *    而此前没有任何地方说过 —— 那是这个动作**最要紧的后果**。
+         */
         this.contentEl.createEl("p", { text: t.selectNote, cls: "setting-item-description" });
 
         // 库根目录的文件只报账、不提供勾选 —— 剔掉它们等于清空整个库（见 rootNote）。
@@ -246,9 +253,14 @@ export class CleanupReportModal extends Modal {
 
         for (const directory of summary.directories) {
             if (directory.path === ROOT_DIRECTORY) continue;
+            // 有笔记的目录**把篇数写在行上**：用户勾之前就该看见「这里有 120 篇笔记」——
+            // 剔掉它们等于这些笔记以后不再同步（见 `notesBadge` 与确认页那句警告）。
+            const meta = t.dirMeta(formatBytes(directory.bytes), directory.objects);
             new Setting(this.contentEl)
                 .setName(directory.path)
-                .setDesc(t.dirMeta(formatBytes(directory.bytes), directory.objects))
+                .setDesc(
+                    directory.notes > 0 ? `${meta} · ${t.notesBadge(directory.notes)}` : meta
+                )
                 .addToggle((toggle) =>
                     toggle.setValue(this.selected.has(directory.path)).onChange((value) => {
                         if (value) this.selected.add(directory.path);
@@ -287,6 +299,19 @@ export class CleanupReportModal extends Modal {
         this.primaryButton?.setDisabled(this.selected.size === 0);
     }
 
+    /**
+     * 勾选的目录里一共有多少篇笔记（`.md` / `.canvas`，跨目录累加）。
+     *
+     * 只用来决定那句警告显不显示 —— 判据取自体检报告（见 `HistoryDirectory.notes`）。
+     */
+    private selectedNoteCount(): number {
+        const summary = this.summary;
+        if (!summary) return 0;
+        return summary.directories
+            .filter((directory) => this.selected.has(directory.path))
+            .reduce((total, directory) => total + directory.notes, 0);
+    }
+
     private renderConfirm(): void {
         const t = this.t.sync.cleanup.confirm;
         this.titleEl.setText(t.title);
@@ -294,6 +319,26 @@ export class CleanupReportModal extends Modal {
         this.contentEl.createEl("p", { text: t.pathsHeading, cls: "obsync-warning-heading" });
         const list = this.contentEl.createEl("ul", { cls: "obsync-diag-list" });
         for (const path of this.selected) list.createEl("li", { text: path });
+
+        /**
+         * **这个动作最要紧的后果，必须紧跟在路径清单后面**：
+         * 这些目录以后不再跟着 git 走（会被写进 .gitignore）。
+         *
+         * 用户 2026-10-10 问的就是它（「那以后这些目录岂不是不进同步了？」）——
+         * 而此前整个界面**一个字都没说过**。这不是措辞问题：勾一个装着笔记的目录
+         * 等于那些笔记以后不再同步，别的设备 clone 之后再也看不到它们。
+         */
+        this.contentEl.createEl("p", { text: t.warningSync, cls: "obsync-modal-warning" });
+
+        const notes = this.selectedNoteCount();
+        if (notes > 0) {
+            // 有笔记就**点出数量**。「小心别勾错」这种话用户会直接划过去，
+            // 「这里有一百二十篇笔记」不会。
+            this.contentEl.createEl("p", {
+                text: t.warningNotes(notes),
+                cls: "obsync-modal-warning",
+            });
+        }
 
         // 预计耗时按**提交数**算（实测 3.5 秒/提交，见 `cleanup.ts`）——
         // 这是用户唯一能判断「现在动手还是晚上动手」的依据。

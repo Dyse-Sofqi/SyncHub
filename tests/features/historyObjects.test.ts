@@ -99,7 +99,7 @@ describe("summarizeHistory", () => {
         const summary = summarizeHistory(entries, objects);
         const notes = summary.directories.find((entry) => entry.path === "notes");
         // tree 的 90 字节**不该**算进来 —— 混进去只会让目录之间的差距变小、判断变糊。
-        expect(notes).toEqual({ path: "notes", bytes: 1500, objects: 2 });
+        expect(notes).toEqual({ path: "notes", bytes: 1500, objects: 2, notes: 2 });
     });
 
     it("目录按体积降序，且顺序稳定", () => {
@@ -114,7 +114,41 @@ describe("summarizeHistory", () => {
     it("库根文件归到 `.` 这一行", () => {
         const summary = summarizeHistory(entries, objects);
         const root = summary.directories.find((entry) => entry.path === ROOT_DIRECTORY);
-        expect(root).toEqual({ path: ROOT_DIRECTORY, bytes: 50, objects: 1 });
+        expect(root).toEqual({ path: ROOT_DIRECTORY, bytes: 50, objects: 1, notes: 0 });
+    });
+
+    /**
+     * 「这个目录里有几篇笔记」（2026-10-10，用户提问引出来的）。
+     *
+     * 用户问「清理完 .gitignore 多出目录，那以后这些目录岂不是不进同步了」——
+     * 答案是「对」，而最危险的误操作是**勾一个装着笔记的目录**：那些笔记从此
+     * 不再跟着 git 走，别的设备 clone 之后再也看不到。所以界面要在他勾之前
+     * 就能说出「这里有 N 篇笔记」。
+     *
+     * 判据按**路径去重**：`entries` 是每个版本一条，直接数会把「改过 20 次的
+     * 一篇笔记」报成 20 篇 —— 而用户想知道的是「有几篇」，不是「存了几份」。
+     */
+    it("notes 数的是「有几篇笔记」，同一篇的多个版本只算一篇", () => {
+        const withVersions = [
+            { sha: "sha-md1", path: "notes/a.md" },
+            { sha: "sha-md2", path: "notes/a.md" },
+            { sha: "sha-md2", path: "notes/b.canvas" },
+            { sha: "sha-font1", path: "字体/大.ttf" },
+            { sha: "sha-root", path: "README.md" },
+        ];
+        const summary = summarizeHistory(withVersions, objects);
+
+        const notes = summary.directories.find((entry) => entry.path === "notes");
+        // a.md 两个版本 → 1 篇；b.canvas → 1 篇；共 2 篇（而 objects 是 3）。
+        expect(notes).toMatchObject({ notes: 2, objects: 3 });
+        // 字体目录里没有笔记。
+        expect(summary.directories.find((entry) => entry.path === "字体")).toMatchObject({
+            notes: 0,
+        });
+        // 库根那一行的 README.md 也照数 —— 它不提供勾选，但账目要一致。
+        expect(summary.directories.find((entry) => entry.path === ROOT_DIRECTORY)).toMatchObject({
+            notes: 1,
+        });
     });
 
     it("totalBytes 只算 blob；objectCount 是全部可达对象", () => {

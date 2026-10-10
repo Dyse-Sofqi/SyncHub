@@ -114,8 +114,11 @@ const SUMMARY: HistorySummary = {
     totalBytes: 12_000_000,
     objectCount: 3000,
     directories: [
-        { path: "字体", bytes: 8_000_000, objects: 5 },
-        { path: ROOT_DIRECTORY, bytes: 4_000_000, objects: 20 },
+        { path: "字体", bytes: 8_000_000, objects: 5, notes: 0 },
+        { path: ROOT_DIRECTORY, bytes: 4_000_000, objects: 20, notes: 0 },
+        // 放在**最后**：`openToRunning` 勾的是最后一个 toggle，于是这些用例走的正是
+        // 「勾了一个装着笔记的目录」那条最危险的路径（见下面那条警告用例）。
+        { path: "notes", bytes: 2_000_000, objects: 300, notes: 120 },
     ],
     largest: [{ path: "字体/big.ttf", bytes: 5_000_000 }],
 };
@@ -279,6 +282,48 @@ describe("深度清理弹窗 —— 重写进行中", () => {
         } finally {
             consoleError.mockRestore();
         }
+    });
+
+    /**
+     * 「剔掉之后这些目录就不进 git 了」必须在**动手之前**说出来（2026-10-10）。
+     *
+     * 用户问：「每次清理完 .gitignore 都会多出一些仓库目录，如果我同步了 .gitignore，
+     * 那以后这些目录岂不是不进同步了？」—— 答案是「对，而且这是故意的」，
+     * 但此前整个界面**一个字都没说过**。而最危险的误操作毫无提示：
+     * **勾一个装着笔记的目录**，那些笔记从此不再跟着 git 走，别的设备再也看不到。
+     */
+    it("勾了装着笔记的目录：报告页报篇数，确认页把「以后不进 git」说清楚", async () => {
+        const pending = deferred<RewriteOutcome>();
+        const modal = new CleanupReportModal({} as App, zhCN, {
+            service: makeService(() => pending.promise),
+            notifier: makeNotifier([]),
+        });
+        openModal = modal;
+        modal.open();
+        await flush();
+
+        // 报告页：目录行上直接写着「120 篇笔记」—— 勾之前就该看见。
+        // （`setDesc` 在替身里是 Setting 上的一个字段，不在 contentEl 的树里，
+        //   所以这一条要从 `createdSettings` 取，不能靠 `allText`。）
+        const notesRow = createdSettings.find((setting) => setting.name === "notes");
+        expect(notesRow?.desc).toContain(zhCN.sync.cleanup.report.notesBadge(120));
+        // 而且报告页顶部就说了「勾中的目录以后不会再跟着 git 同步」。
+        expect(allText(modal.contentEl as unknown as FakeEl)).toContain(
+            zhCN.sync.cleanup.report.selectNote
+        );
+
+        // 勾上（helper 与这里都勾最后一个 toggle = notes 目录）→ 进确认页。
+        const toggle = createdSettings.flatMap((setting) => setting.toggles).at(-1);
+        toggle!.toggle(true);
+        lastButton(zhCN.sync.cleanup.report.toConfirm)!.click();
+        await flush();
+
+        const confirmText = allText(modal.contentEl as unknown as FakeEl);
+        expect(confirmText).toContain(zhCN.sync.cleanup.confirm.warningSync);
+        expect(confirmText).toContain(zhCN.sync.cleanup.confirm.warningNotes(120));
+
+        pending.resolve({ result: RESULT, ignoredRules: 0 });
+        await flush();
     });
 
     /**
