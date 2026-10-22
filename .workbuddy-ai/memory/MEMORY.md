@@ -1,283 +1,204 @@
 # SyncHub 项目长期约定
 
-> 2026-09-23 二次精简。只留「下次还会踩」的规则 —— 细节、排查过程、代码位置看
+> 2026-10-22 精简。只留「下次还会踩」的规则；过程与代码位置看
 > `.workbuddy-ai/memory/YYYY-MM-DD.md` 与 `docs/`。
-> **这个文件有注入长度上限（约 14KB，超了会被截断成半截），别往里堆。**
+> **本文件有注入上限（约 14KB，超了会被截断），别往里堆。**
 
 ## 项目定位
 
-单个 Obsidian 插件，共用一层平台抽象：`features/installer`（复刻 BRAT）、
-`features/sync`（复刻 obsidian-git）、`features/images`（图片同步到 Cloudflare R2）、
-`host/`（GitHub / Gitee 适配层）。参考源码在 `F:\_Workspace\GitHub-Project\`，
-**只读，不要改**。
+单个 Obsidian 插件，共用一层平台抽象：`features/installer`（复刻 BRAT）、`features/sync`
+（复刻 obsidian-git）、`features/images`（图片同步到 R2）、`host/`（GitHub / Gitee 适配）。
+参考源码 `F:\_Workspace\GitHub-Project\`，**只读**。
 
-**名字三层**：显示名 `SyncHub`（可改，**不得含 Obsidian 缩写片段**，`OBS` 就会被拒）；
-插件 id `ob-sync`（**别动** —— 由审核系统的提交记录决定，本地唯一事实来源是
-`selfUpdate.ts` 的 `SELF_PLUGIN_ID`；「没进目录」≠「没有既有身份」，商标规则只管显示名）；
-内部前缀 `obsync-`（**一律不动**，改了作废用户令牌与面板状态）。
+**名字三层**：显示名 `SyncHub`（**不得含 Obsidian 缩写片段**，`OBS` 就被拒）；插件 id
+`ob-sync`（**别动**，事实来源是 `selfUpdate.ts` 的 `SELF_PLUGIN_ID`）；内部前缀 `obsync-`
+（**一律不动**，改了作废令牌与面板状态）。
 
 ## 命令与部署
 
-`pnpm dev / check / build / typecheck / test / test:live / verify:mobile / verify:head`。
-部署目标 `F:/_Workspace/Plugin-Test/.obsidian/plugins/ob-sync`；`OBSYNC_DEPLOY_DIR`
-覆盖（`;` 分隔，空串跳过）；部署失败不中断构建。
+`pnpm dev / check / build / test / test:live / verify:mobile / verify:head`。
 
-**每次改完代码都要部署，而且两个库都要**（用户 2026-10-09 的要求：改完要能立刻测）。
-跑 `pnpm build:both` —— 它一条龙跑完自查 / lint:review / typecheck / 构建，并把产物
-部署到**两个库**：`F:/_Workspace/Plugin-Test`（测试库）与 `D:/_Workspace/learning-records`
-（用户的常用库，**用户实际在这里看效果**）。只改文档时不部署。部署后核对三个产物
-（`main.js` / `styles.css` / `manifest.json`）与源码的 SHA256 一致（mtime 会骗人，
-hash 不会）。
+**改完代码必须部署到两个库**：`pnpm build:both` → `F:/_Workspace/Plugin-Test` 与
+`D:/_Workspace/learning-records`（**用户在这里看效果**）。只改文档不部署。
 
-> **只用 `pnpm build` 是个坑**（2026-10-09 实测踩到）：它只部署 Plugin-Test，而用户
-> 同时在 learning-records 里看着 —— 那边停在旧版，症状是「新功能全无效、旧功能正常」，
-> **极容易被误判成代码 bug**（这次就绕了好几圈）。另外两个库的热重载状态不同：
-> Plugin-Test 有 hot-reload（部署后自动加载），learning-records **没启** hot-reload ——
-> 那边部署完要提醒用户手动重载（`Ctrl+R` 或设置里关开一次插件）。
+> **只用 `pnpm build` 是坑**：它只部署 Plugin-Test，learning-records 停在旧版，症状是
+> 「新功能全无效、旧功能正常」，**极易误判成代码 bug**。热重载也不同：Plugin-Test 自动
+> 加载，learning-records **没启** —— 那边要提醒用户手动 `Ctrl+R`。
 
-**核实部署产物**：esbuild 把中文转义成 `\uXXXX`，`grep "仓库同步"` 匹配不到（看着像没部署），
-要查 `\u4ED3\u5E93\u540C\u6B65`（grep 模式用单引号，反斜杠才不会被 shell 吃掉）。
+**核实产物**：esbuild 把中文转义成 `\uXXXX`，`grep "仓库同步"` 匹配不到（像没部署），要查
+`\u4ED3\u5E93\u540C\u6B65`。产物与源码对 **SHA256**，mtime 会骗人。
 
 ## 约定
 
 ### i18n
 
-`src/core/i18n/locales/zh-cn.ts` 是**规范源**，`LocaleStrings` 从它推导；其他语言
-`satisfies LocaleStrings`，漏译在 typecheck 报错。**不要加 `as const`**。新增语言：
-建 `locales/xx.ts` → `i18n/index.ts` 的 `LOCALES` → `LANGUAGE_OPTIONS`。
-
+`locales/zh-cn.ts` 是**规范源**，`LocaleStrings` 由它推导；其他语言 `satisfies` 它，漏译在
+typecheck 报错。**不要加 `as const`**。新增语言：建 `locales/xx.ts` → `LOCALES` →
+`LANGUAGE_OPTIONS`。**文案别用 Markdown**（`**加粗**`）：界面是纯文本，`pnpm check` 会拦。
 ### 错误与文案的归属
 
-**逻辑层抛「类型码 + 参数」，展示层拼「用户能看懂的话」。** 逻辑层（`host/`、
-`features/*/xxxService.ts`）拿不到 `t`，`message` 只放英文技术描述进日志；
-`createXxxModule()` 里 `notifier.registerErrorTranslator(...)` 注册，
-`Notifier.describeError()` 按类型码取 locale 文案。
+**逻辑层抛「类型码 + 参数」，展示层拼人话。** 逻辑层拿不到 `t`，`message` 只放英文进日志；
+`createXxxModule()` 里 `notifier.registerErrorTranslator(...)`，按类型码取文案。可辨识联合 +
+穷尽 `switch`；`Notifier` 用**注册制**（`core/` 不该知道 `features/`）。
+**断言错误类型码，不要断言消息文本**。**错误类型用错比没有更糟**：曾把「没有上游分支」
+「游离 HEAD」都抛成 `GitNotRepoError`，提示变成「请先初始化仓库」，把用户指错方向。
 
-- 可辨识联合 + `switch` 穷尽检查（`const exhaustive: never = detail`）。`Notifier` 用
-  **注册制**，不 import 各功能错误类型（`core/` 不该知道 `features/`）。
-- **断言错误类型码，不要断言消息文本**。
-- **错误类型用错比没有类型更糟**：曾把「没有上游分支」「游离 HEAD」都抛成
-  `GitNotRepoError`，提示变成「请先初始化仓库」，把用户指错方向。
+### 长任务的可见性
 
-### 长任务的可见性（2026-10-10）
+**可能跑几分钟的动作必须走 `withActivity`**，否则用户把入口弹窗一关，屏幕上毫无痕迹：状态栏
+一格 + 面板横幅（`activityText` / `busyTitle` / `busyHint`，三者都是**穷尽 switch**），且
+**关掉入口 ≠ 结果可以丢**（跑完把结果页弹回来：`closed` 标记 + `open()`）。进度只报**已用 +
+估算**，不报百分比。**弹窗渲染要 try/catch**（白框与「正在加载」一样）。
 
-**任何可能跑几分钟的动作都必须走 `withActivity`** —— 否则用户在入口那个弹窗一关，
-屏幕上一点痕迹都没有（重写历史就是这么漏的：`rewriteHistory` 只包了 `enqueue`，
-而 `StatusBarActivity` 里连「重写」这个阶段都没有）。两处要同时成立：
+**插件自己造出来的状态必须留一个「持久」出口**：重写历史后本地与远端必然没有共同提交，
+出路只有一次**强制推送** —— 它原来只在结果页上，关窗就再也找不到（用户报的
+`refusing to merge unrelated histories` 就是这么来的）。现在在**设置页「清理」**，可用性由
+`refs/obsync-backup/*` 决定（**信号存在 git 里**，不依赖插件数据）。任何「只在瞬时弹窗里
+可做」的必要动作，都要问「关掉之后他还能找到吗」。
 
-- **入口之外还有落点**：状态栏那一格 + 面板横幅（`activityText` / `busyTitle` /
-  `busyHint`）。这三个都是**穷尽 switch**，新增阶段忘了写文案会编译不过。
-- **关掉入口 ≠ 结果可以丢**：动作跑完要把结果页**弹回来**（`CleanupReportModal`
-  的 `closed` 标记 + `open()`）。「动手前关掉 = 什么都不做」与「动手后关掉 =
-  结果会回来」是刻意相反的两条，别合并。
+**深度清理四步**：体检 → 重写 → **强制推送** → **丢弃备份**。**空间到第四步才释放**，
+所以「收尾」必须是能被找到、能续做的入口（设置页第一行「继续上次的清理」）。细则见
+`docs/conventions-detail.md`。
 
-进度只报**已用 + 估算**，不报百分比（`formatElapsed`）—— git 不会报「第几个提交」，
-编一个百分比就是骗人。**弹窗渲染要 try/catch**：白框与「正在加载」长得一样，
-用户没法区分也没法报告（`cleanup.renderFailed`）。
+### 清理：剔掉 = 以后不再同步
 
-**插件自己造出来的状态，必须留一个「持久」出口。** 重写历史之后本地与远端
-**必然**没有共同提交（每个提交都换了哈希，连根提交也是），出路只有一次**强制推送**
-—— 而它原来只在清理弹窗的**结果页**上，用户关掉窗口 / 重启 Obsidian 之后就再也
-找不到了（他实测报的 `refusing to merge unrelated histories` 就是这么来的）。
-现在它在**设置页「清理」**里，可用性由 `refs/obsync-backup/*` 决定 ——
-**信号存在 git 里，不依赖插件数据**，跨重启跨设备都在。同类判断：任何「只在某个
-瞬时弹窗里可做」的必要动作，都要问一句「关掉之后他还能找到吗」。
-
-**深度清理是四步，别只做前两步**：体检 → 重写 → **强制推送** → **丢弃备份**。
-**空间到第四步才真正释放**，所以「收尾」必须是一个能被找到、能续做的入口 ——
-设置页第一行「继续上次的清理」（`CleanupReportModal` 的 `startAt: "settle"`，
-直接开收尾页、不读历史），弹窗里推完也自动切到收尾页。
-结果页的次要按钮**不能**写「完成」（那会让用户以为整件事结束了）。
-
-### 清理：剔掉 = 以后不再同步（2026-10-10）
-
-**清历史之后写进 `.gitignore` 的目录，以后不再跟着 git 走** —— 这是刻意的
-（不写的话下次 `git add -A` 原样加回来，清理白做），所以 **`.gitignore` 必须同步**。
-但它是这个动作**最要紧的后果**，必须在**动手之前**说：报告页目录行报「N 篇笔记」
-（`HistoryDirectory.notes`，按**路径去重**、只认 `.md`/`.canvas`）+ 确认页
-`warningSync` / `warningNotes`。**笔记目录被剔 = 那些笔记以后不再同步**，
-别的设备再也看不到 —— 这是这个功能唯一会让人丢东西的路径。
-
-> 写 locale 文案**别用 Markdown**（`**加粗**`）：界面是纯文本，会原样显示星号，
-> `pnpm check` 第 7 项会拦（踩过两次了）。
+清历史后写进 `.gitignore` 的目录**以后不再跟着 git 走**（刻意如此：不写的话下次
+`git add -A` 原样加回来），所以 **`.gitignore` 必须同步**。这是最要紧的后果，必须在**动手
+之前**说：报告页报「N 篇笔记」（`HistoryDirectory.notes`，按**路径去重**、只认 `.md` /
+`.canvas`）+ 确认页 `warningSync` / `warningNotes`。**笔记目录被剔 = 那些笔记以后不再同步**。
 
 ### 图片同步（`features/images`）
 
-1. **`run()` 只复制，从不删除。** 双向删除 2026-09-23 去掉：「一边少了 = 用户删的」
-   本质上做不准。**不要再把删除加回 `decide()`。**
-2. **用户选「保留云端」必须记墓碑**（`SyncedEntry.remoteOnly`），否则删掉的图下一轮
-   自己回来。**「没点按钮直接关窗」也按保留处理**；墓碑在 `noteDeleted` 里**早于询问**
-   就记（攒批那几百毫秒里可能有同步在跑）。
-3. **`folders` 与 `prefix` 各管一件事**：`folders` = 管哪些（唯一边界），
-   `prefix` = 放桶的哪儿。`prefix` 存原文，归一只在 `buildR2Config` 里。
-   - **`folders` 默认 `["."]`（仓库根目录 = 整个库）**；`""` 是它归一后的规范形状，
-     **`normalizeFolders` 必须保留 `""`** —— 丢它等于把「同步整个库」悄悄改回
-     「什么都没管」（落盘→读回、服务层每次重跑都会踩）。空行（`"   "`）只在**文本
-     解析侧**丢（`parseFolders`）：拆行产生的 `""` 与规范形状长得一样，两者处置相反。
-     界面显示空串用 `formatFolderPath`。
-   - **坏形状的 `folders` 退空数组，不拿默认值兜底** —— 默认值现在是整个库，兜底等于
-     把一次手滑变成「同步全部」；只有「缺失」才拿默认值。判据在 `normalizeSettings`
-     读**磁盘原文**（`mergeWithDefaults` 的类型回退会先把坏值换成默认值）。
-4. **删除有两条路，别混**：`noteDeleted`（文件管理器里删图 → 攒批 → 问「云端也删吗」）
-   vs `deleteImages`（面板上勾选点按钮 → 处置已选定 → 删完绝不能再问，
-   `panelDeleted` 每批 `clear()`，否则后来手动删同名文件会**悄悄跳过询问**）。
-   顺序**先云端后本地**；边界检查放在**列举云端之前**；面板从云端列举出发，
-   清单里本来没有的条目也要能建墓碑（`markRemoteOnlyForced`）。
+细则见 `docs/conventions-detail.md` 第 5 节。四条硬规则：
 
-`delete` 事件挂在 `main.ts` 的 `vault.on("delete")` 上（图片模块不依赖 `Plugin`，
-要能在移动端加载）。`syncState.ts` 只做三件事：判断某边变了没、`hasEntry`、记墓碑
-—— **不再是删除的安全边界**。
+1. **`run()` 只复制，从不删除**；**不要再把删除加回 `decide()`**（「一边少了 = 用户删的」
+   做不准）。
+2. **选「保留云端」必须记墓碑**（`SyncedEntry.remoteOnly`），**「没点按钮直接关窗」也按保留
+   处理**；墓碑在 `noteDeleted` 里**早于询问**就记。
+3. **`folders` 管哪些、`prefix` 管放哪儿**；`folders` 默认 `["."]`（= 整个库），`""` 是归一
+   后的规范形状（**`normalizeFolders` 必须保留**），空行只在 `parseFolders` 丢；**坏形状退
+   空数组、不拿默认值兜底**（只有「缺失」才拿），判据在 `normalizeSettings` 读**磁盘原文**。
+4. **删除两条路别混**：`noteDeleted`（攒批 + 询问）vs `deleteImages`（**删完绝不能再问**，
+   `panelDeleted` 每批 `clear()`）；顺序**先云端后本地**，边界检查在**列举云端之前**。
 
-**图片管理面板**：本地 / 云端 / 已链接是**三条独立的轴，不是三个桶**，筛选用三档下拉
-（任意/有/无）。批量压缩**保持原格式**且只在变小时写回；重命名改了扩展名 → 跳过。
+`delete` 事件挂在 `main.ts` 的 `vault.on("delete")`（图片模块不依赖 `Plugin`，要能在移动端
+加载）。`syncState.ts` **不再是删除的安全边界**。面板上本地 / 云端 / 已链接是**三条独立的
+轴，不是三个桶**。**Excalidraw 的引用必须解压场景才扫得到**，⚠ 载荷折行（每 256 字符），
+解压前必须剥空白，否则返回 `null` **且不报错**。R2 的 `sha256.ts` / `sigv4.ts` 手写，
+**不用 `crypto.subtle`**；正确性靠 **AWS 官方向量**校准。
 
-**Excalidraw 的引用必须解压场景才扫得到**（否则图会被当失联删掉）。⚠ **载荷是折行的**
-（每 256 字符），解压前必须剥空白，否则位流错位返回 `null` **且不报错**。校准用测试库
-真实载荷 + `lz-string` 官方实现当基准。
+### 自查脚本（`scripts/checks.mjs`）
 
-R2 走 S3 + SigV4，`sha256.ts` / `sigv4.ts` 手写，**不用 `crypto.subtle`**（移动端可能
-非安全上下文，且会把签名链污染成 async）；正确性靠 **AWS 官方向量**校准 —— 自造期望值
-两边一起错也照样绿，而 R2 只回一个没解释的 403。
-
-### 自查脚本（`scripts/checks.mjs`，随 `pnpm check`）
-
-六项全只读：minAppVersion 一致性（按**类作用域**限定，否则同名成员大量误报）、硬编码中文、
-未使用的 i18n 键、CSS 类覆盖、移动端安全、设置项无人读取。加豁免条目**必须写清为什么安全**。
-删掉一处 `t.x.y` 用法时顺手删键；CSS 检查扫**所有** `obsync-*` 字符串（含存储键），
-存储键要进 `NOT_A_CLASS`。
+八项全只读（minAppVersion / 硬编码中文 / 未使用 i18n 键 / CSS 类覆盖 / 移动端安全 / 设置项
+无人读取 / locale 加粗 / CSS 注释完整性）。加豁免**必须写清为什么安全**；删 `t.x.y` 用法时
+顺手删键；CSS 检查扫**所有** `obsync-*` 字符串，存储键要进 `NOT_A_CLASS`。
 
 ### 测试
 
-- `tests/live/**` 默认排除，`OBSYNC_LIVE=1` 开启。`privateRepoAuth.live.test.ts` 是
-  **对照组 + 接受**结构，对照组**不能删**。
-- **`testTimeout` 30 秒**。`simpleGitManager.test.ts` 单跑约 150 秒，**慢不代表挂了**。
-- `obsidian` 在测试里 alias 到 `tests/stubs/obsidian.ts`；**stub 辅助函数必须用相对路径
-  import**（TS 会解析到真实类型包）。stub 的 `openedModals` 记录弹窗实例 —— 验「点这个
-  按钮弹出什么」用它。
-- stub 的 `TFile` / `TFolder` 缺 `vault` 字段：测试里 `as unknown as` 断言一次即可，
-  **别给替身加行为不对的 `vault`**。
-- **模拟「用户删了文件」必须真的从库里拿掉**（`fakeImageVault.remove()`）：
-  `vault.on("delete")` 在文件消失之后才触发。
-- stub 的 `requestUrl`：`json` 必须是**惰性 getter**；只给 `text` 时必须**从 text 派生
-  `arrayBuffer`**（否则下载静默变空，以「manifest 不是合法 JSON」假失败）。
-- 单测 HTTP mock 里**可选文件也要给 404 路由**，否则每用例白耗 1.6 秒重试退避。
-- **不要给 simple-git 传 `.env({...process.env})`**：3.36 起守卫 `GIT_PAGER`，直接抛错，
-  表现为「本地服务器收到 0 个请求」。
+`tests/live/**` 默认排除（`OBSYNC_LIVE=1` 开启）；**`testTimeout` 30 秒**；
+`simpleGitManager.test.ts` 单跑约 150 秒。`obsidian` alias 到 `tests/stubs/obsidian.ts`，
+**stub 辅助函数必须用相对路径 import**，`openedModals` 记录弹窗实例。
+其余全是踩过的坑（惰性 `json`、404 路由、`.env` 与 `GIT_PAGER`、删文件要真的删），
+见 `docs/conventions-detail.md` 第 3 节 —— **写新测试前读一遍**。
 
-### 网络可达性（决定两处必须保留的降级）
+### 网络可达性（两处降级必须保留）
 
-- **GitHub 三条通道可达性互不相关**：`api.github.com` 稳、`raw.githubusercontent.com` 稳、
-  `releases/download/` → `objects.githubusercontent.com` **3 次里 2 次 21 秒超时 0 字节**。
-  所以 `loadReleaseFile` 在资产下载失败时回退源码、`GitHubHost.readFile` 在 raw 不可达时
-  回退 contents API。**别删。**
-- **Gitee 匿名 API 配额极低**：连续请求直接 403，一分钟内不恢复。live 测试里 Gitee API
-  用例**跳过**（不是失败）。
+**GitHub 三条通道互不相关**：`api.github.com` 稳、`raw.githubusercontent.com` 稳、
+`releases/download/` → `objects.githubusercontent.com` **3 次里 2 次 21 秒超时 0 字节**。
+所以 `loadReleaseFile` 资产失败时回退源码、`GitHubHost.readFile` raw 不可达时回退 contents
+API。**Gitee 匿名 API 配额极低**（连续请求直接 403）→ live 测试里 Gitee API 用例**跳过**。
 
 ### git 错误文案
 
-**靠 git 错误文案做分支判断时，正则必须用真实输出校准。** `git restore --staged` 在
-HEAD 未出生时报 `fatal: could not resolve 'HEAD'` —— **HEAD 带单引号**（见 `HEAD_UNBORN_RE`）。
+**靠 git 错误文案分支判断时，正则必须用真实输出校准。** `git restore --staged` 在 HEAD 未
+出生时报 `fatal: could not resolve 'HEAD'` —— **HEAD 带单引号**（`HEAD_UNBORN_RE`）。
 
-### 重写历史（`filter-branch`）的四条实测行为（2026-10-10）
+### 重写历史（`filter-branch`）四条实测
 
-全在 `simpleGitManager.rewriteHistory` 上，**别再凭直觉改**：
+全在 `simpleGitManager.rewriteHistory`，**别凭直觉改**（细节见 `docs/conventions-detail.md`）：
 
-1. **它最后会改工作区**：脚本末尾是 `git read-tree -u -m HEAD` ——
-   **被剔除的路径会从磁盘上删掉**（实测 `drop/b.md` 消失）。本插件要的是
-   「只清历史」，所以之后必须 `git restore --source=<备份引用> --worktree -- <路径>` 放回来。
-   **必须用 `--worktree`**：`git checkout <ref> -- <path>` 会把文件加进索引（`A  file`），
-   等于又跟踪起来。**逐个路径恢复**，某个路径不存在时整条命令会失败。
-2. **报错 ≠ 什么都没发生**：引用是**边改写边 update-ref** 的，收尾那次工作区同步
-   失败会让命令非零退出，但历史已经变了。判据是**引用动没动**（`head === previousHead`），
-   不是退出码 —— 否则会漏掉写忽略规则与结果页，而哈希全变、远端分叉已经发生。
-3. **见到 `refs/original/` 就拒绝开始**（`Cannot create a new backup…`）→
-   必须带 `--force`，否则**第二次深度清理必然失败**。覆盖它是安全的：我们的退路是
-   `refs/obsync-backup/<时间戳>`，那个命名空间不在 `--branches --tags --remotes` 里。
-4. **`--prune-empty` 可能把分支整个删掉**（所有提交都变空时，原话
-   `Ref 'refs/heads/master' was deleted`）→ 检测到就 `update-ref` 接回去再抛错。
+1. **它最后会改工作区**：**被剔除的路径会从磁盘删掉** → 之后必须
+   `git restore --source=<备份引用> --worktree -- <路径>` 放回来（**必须 `--worktree`**，
+   `git checkout <ref> -- <path>` 会把文件加进索引）；**逐个路径恢复**。
+2. **报错 ≠ 什么都没发生**：判据是**引用动没动**（`head === previousHead`），不是退出码 ——
+   否则会漏写忽略规则与结果页，而哈希全变、远端分叉已经发生。
+3. **见到 `refs/original/` 就拒绝开始** → 必须 `--force`，否则**第二次深度清理必然失败**。
+   覆盖安全：退路是 `refs/obsync-backup/<时间戳>`。
+4. **`--prune-empty` 可能把分支整个删掉** → 检测到就 `update-ref` 接回去再抛错。
 
-⚠ 本机 `filter-branch` 一次约 **28 秒**（内部几十个子进程，进程创建 ~340ms）——
-真仓库测试要**显式超时**，别把默认 30 秒当「卡死」。
+⚠ 本机 `filter-branch` 一次约 **28 秒** —— 真仓库测试要**显式超时**。
 
 ### git diff 输出
 
-`diffFile` 的三个选项各防一种真实环境：`-c core.quotePath=false`（否则中文路径被转义
-成八进制 `"a/\344\270\255.md"`）、`--no-color`（用户可能配了 `color.ui=always`）、
-`--no-ext-diff`（外部 diff 工具输出的**不是** unified diff）。`commitPatch` 的
-`-m --first-parent` 是为合并提交（git 默认对它输出空）。**都别删。**
+`diffFile` 的三个选项各防一种真实环境，**都别删**：`-c core.quotePath=false`（否则中文路径被
+转义成八进制）、`--no-color`（用户可能配了 `color.ui=always`）、`--no-ext-diff`（外部 diff
+工具输出的**不是** unified diff）。`commitPatch` 的 `-m --first-parent` 是为合并提交。
 
 ### host 层设计原则
 
 - **`formatRepoId(ref)` 只给 `owner/repo`，不带 host**。跨 host 传递必须把 host 单独带上
-  （`fetchItem(spec, formatRepoId(ref), version, { defaultHost: ref.host })`），否则 gitee
-  坐标被按默认 `"github"` 重新解析，**悄悄指向另一个仓库**而界面毫无异常。
-- 平台差异**只允许出现在 `host/` 内部**；上层不得出现 `if (host === "gitee")`。能用属性
-  说清的（`tokenInQuery`、`gitAuthUsername`）就做属性，需要行为差异的做方法（`applyAuth`）。
-- **`IRepoHost.gitAuthUsername`**：Gitee → `oauth2`、GitHub → `x-access-token`。
-  **不要退回硬编码 `git`** —— Gitee 填 `git` 被直接拒绝，而**公开仓库照常能读**，
-  只有私有仓库 push/pull 失败，极易误判成令牌问题；`ls-remote` 这类「连接测试」发现不了。
-- 其余平台差异见 `docs/reference-analysis.md`。**涉及「对端校验规则」的假设要么实测，
-  要么标注未验证。**
+  （`{ defaultHost: ref.host }`），否则 gitee 坐标被按默认 `"github"` 重新解析，**悄悄指向
+  另一个仓库**而界面毫无异常。
+- **`owner/repo` 简写不含平台**：界面默认 `defaultHost: "auto"`（按 `SUPPORTED_HOSTS` 探
+  `manifest.json`，命中即止），地址里写明平台时**以地址为准、不探测**。服务层默认值仍是
+  `"github"` —— 改它会让既有调用点突然多打网络请求。
+- 平台差异**只允许出现在 `host/` 内部**；上层不得出现 `if (host === "gitee")`。能用属性说清
+  的（`tokenInQuery`、`gitAuthUsername`）就做属性，需要行为差异的做方法（`applyAuth`）。
+- **`gitAuthUsername`**：Gitee → `oauth2`、GitHub → `x-access-token`。**不要退回硬编码
+  `git`** —— Gitee 填 `git` 被直接拒绝，而**公开仓库照常能读**，只有私有仓库 push/pull
+  失败，极易误判成令牌问题。
+- 其余差异见 `docs/reference-analysis.md`。**涉及「对端校验规则」的假设要么实测，要么标注
+  未验证。**
 
 ### 凭据不能从消息 / 日志漏出去
 
-- **任何写进错误消息或日志的 URL 都要过 `host/redact.ts` 的 `redactUrl()`** ——
-  `Notifier` 会把 `NetworkError.message` 原样弹在屏幕上、`logger` 又写进控制台。
-  **回显用户输入的错误也要脱敏**。漏脱与**过脱**两种失败方式都要测，还要有
-  「**脱敏不能影响实际请求**」的守卫。
-- **别用 `new URL()` → `toString()` 脱敏**：会规范化 URL（日志里的地址与实际发出去的不是
-  同一个），畸形输入上还会抛错。定点正则替换即可。SSH 的 `git@` 是登录名不是令牌，但
-  `https://TOKEN@github.com` 是**真实用法**，仍要脱。
-- git 自己的报错会剥掉 userinfo；但 **`git remote -v` 会显示明文** —— 这正是 `auth.ts`
-  选择 `http.extraheader` 的理由，**别改回把令牌写进 remote URL**。
+- **写进错误消息或日志的 URL 都要过 `host/redact.ts` 的 `redactUrl()`** —— `Notifier` 会把
+  `NetworkError.message` 原样弹屏幕上、`logger` 又写进控制台。**回显用户输入的错误也要
+  脱敏**。漏脱与**过脱**都要测，还要有「**脱敏不能影响实际请求**」的守卫。
+- **别用 `new URL()` → `toString()` 脱敏**：会规范化 URL（日志里的地址与实际发出的不是
+  同一个），畸形输入上还会抛错。定点正则替换即可。`https://TOKEN@github.com` 是**真实
+  用法**，要脱；SSH 的 `git@` 是登录名，不用脱。
+- **`git remote -v` 会显示明文** —— 这正是 `auth.ts` 用 `http.extraheader` 的理由，
+  **别改回把令牌写进 remote URL**。
 
 ### 配置项的互斥与限制（「假防护」）
 
-- **UI 上灰掉一个开关 ≠ 拦住行为**：库里**已经**存着「开关开着 + 危险组合」的用户不会
-  去动设置页。**限制要在「读设置的那一层」也实现一份**（先例：`Automatics.start()`）。
-- **灰开关时不要改写它的值**（`setDisabled` 而非 `setValue(false)`）。**改「决定其它
-  控件可用性」的设置项后，`commit()` 要传 `redraw=true`**。
-- **注意事项放在被违反的那一页的标题正下方**（它针对的是**组合条件**），样式用
-  `.obsync-sync-notes` / `.obsync-image-notes`（正文**别**用 `--text-muted`）。
+- **UI 上灰掉一个开关 ≠ 拦住行为**：库里已存着「开关开着 + 危险组合」的用户不会去动设置页。
+  **限制要在「读设置的那一层」也实现一份**（先例：`Automatics.start()`）。
+- **灰开关时不要改写它的值**（`setDisabled` 而非 `setValue(false)`）。**改「决定其它控件
+  可用性」的设置项后，`commit()` 要传 `redraw=true`**。
+- **注意事项放在被违反的那一页的标题正下方**，样式用 `.obsync-sync-notes` /
+  `.obsync-image-notes`（正文**别**用 `--text-muted`）。### 代码风格
 
-### 代码风格
-
-注释用中文，写**为什么**而不是「做了什么」；不复刻参考项目的兼容包袱；
-敏感项（令牌、R2 secret）**绝不进 `data.json`**，走 `core/secretStore`。
-**静态样式放 CSS 类**：`no-static-styles-assignment` 只拦字面量，用 `const` 绕过是形式（2026-10-08 已收 `.obsync-gitignore` 的宽度）。
+注释用中文、写**为什么**；敏感项（令牌、R2 secret）**绝不进 `data.json`**，走
+`core/secretStore`；**静态样式放 CSS 类**（`no-static-styles-assignment` 只拦字面量）。
 
 ### 工具坑
 
-- **`pnpm test` 全绿 ≠ 工作区能编译**：vitest 不做类型检查。2026-09-23 实测工作区里
-  躺着 12 处 `tsc` 错误（方法改名后调用方没跟上）而测试只红了 9 条。改完代码
-  **一定要单独跑一次 `tsc --noEmit`**。
-- **`pnpm <script>` 会在跑脚本前查依赖状态**，不一致就想清空 `node_modules` 重装，
-  非 TTY 直接中止（`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`）。绕法：
-  `pnpm --config.verify-deps-before-run=false run <script>`，或展开成等价命令直跑。
-- **`locales/*.ts` 是 CRLF**：用 node 脚本做多行字符串替换时，搜索串必须先
-  `.replace(/\r?\n/g, "\r\n")`，否则 `includes` 恒假 —— 而**单行替换却会成功**，
-  症状像「脚本跑了一半」。`Edit` 工具自己会处理换行。
-- **`/tmp/xxx.mjs` 在 Windows 上被解析成 `F:\tmp\xxx.mjs`**：临时脚本写到工作区内
-  再用相对路径调用。
-- **Obsidian 大版本会改核心 DOM 的类名**：1.14 把功能区修饰类从 `mod-left` 改成
-  `mod-primary`。选择器只认旧名字的症状是「功能**静默消失**」（无报错）。**别把版本
-  修饰类写进选择器**，永远留一条不依赖它的兜底；升级 Obsidian 后重抠 `.probe` 的
-  `app.css` 并重跑对应探针。
-- **simple-git 的 `raw()` 对「非零退出 + 没有输出」照样 resolve**（2026-10-10 踩到）：
-  `git merge-base a b` 在「没有共同祖先」时 exit 1 **且什么都不打印**，而
-  `git.raw(["merge-base", a, b])` **resolve 出空串、不抛** —— 于是「靠 catch 判 false」
-  的写法**永远返回 true**，保护形同虚设。**判据一律读输出**（`out.trim().length > 0`），
-  与 `refExists` 同款。探针：`.probe/mergebase-check.mjs`。
+- **`pnpm test` 全绿 ≠ 能编译**：vitest 不做类型检查。改完**单独跑 `tsc --noEmit`**。
+- **`pnpm <script>` 跑前查依赖状态**，不一致就想清空 `node_modules` 重装，非 TTY 直接中止。
+  绕法：`pnpm --config.verify-deps-before-run=false run <script>`。
+- **`locales/*.ts` 是 CRLF**：node 脚本多行替换要先 `.replace(/\r?\n/g, "\r\n")`，否则
+  `includes` 恒假 —— 而**单行替换却成功**，症状像「脚本跑了一半」。
+- **`/tmp/xxx.mjs` 在 Windows 上被解析成 `F:\tmp\xxx.mjs`**：临时脚本写到工作区内。- **Obsidian 大版本会改核心 DOM 类名**（1.14 把 `mod-left` 改成 `mod-primary`），只认旧名字
+  的症状是「功能**静默消失**」。**别把版本修饰类写进选择器**；升级后重抠 `.probe` 的
+  `app.css` 并重跑探针。
+- **simple-git 的 `raw()` 对「非零退出 + 没输出」照样 resolve**：`git merge-base` 无共同祖先
+  时 exit 1 且不打印，`raw()` resolve 空串 —— 「靠 catch 判 false」**永远返回 true**。
+  **判据一律读输出**（`out.trim().length > 0`）。探针：`.probe/mergebase-check.mjs`。
+- **`.probe/settings-preview` 的替身缺方法时预览页只画一半**：渲染链中途 `TypeError`，后面的
+  DOM 全没有，截图看着像「样式没生效」（2026-10-22 撞的是 `DropdownComponent.setDisabled`）。
+  也**不能靠派发 `input` 事件模拟打字**（替身的 `TextComponent.onChange` 只记回调）。
+- **`Setting.setClass()` 一次只能一个类名**（替身会抛），两个类调两次。
 
 ### 提交与发版
 
-- **提交后要验的是 HEAD，不是工作区**（`pnpm test` 读工作区）。用 **`pnpm verify:head`**，
-  已挂 `pre-push`（**push 才是「别人能看到」的时刻**）。别手写
-  `git stash && pnpm test && git stash pop`（测试红了 `&&` 链断，改动留在 stash 里）。
-- **一次改动横跨多文件（代码 + 测试 + i18n + CSS）时最容易漏 `git add`**，症状恰好是
-  「本地一切正常」。提交前对着 `git status` 核一遍。
+- **提交后要验的是 HEAD，不是工作区**：用 **`pnpm verify:head`**（已挂 `pre-push`）。
+  别手写 `git stash && pnpm test && git stash pop`。
+- **一次改动横跨多文件（代码 + 测试 + i18n + CSS）最容易漏 `git add`**，症状恰好是「本地
+  一切正常」。提交前对着 `git status` 核一遍。
 - commit message：**中文、带用户原话、写清「为什么」与「代价」**，一条只讲一件事。
-- 发版流程见 `docs/RELEASE.md`。两条最容易错的：**顺序必须是「先推分支、再建 release」**；
-  **校验资产不要下载**（`github.com:443` 时段性阻断），用
-  `gh api repos/.../releases/tags/X --jq '.assets[] | "\(.name) \(.size) \(.digest)"'`
-  与本地 `sha256sum` 比对。Gitee 镜像**只同步代码与标签，不同步 release**。
+- 发版见 `docs/RELEASE.md`。两条最容易错：**先推分支、再建 release**；**校验资产不要下载**
+  （`github.com:443` 时段性阻断），用 `gh api repos/.../releases/tags/X --jq '.assets[] |
+  "\(.name) \(.size) \(.digest)"'` 与本地 `sha256sum` 比对。Gitee 镜像**只同步代码与标签，
+  不同步 release**。
