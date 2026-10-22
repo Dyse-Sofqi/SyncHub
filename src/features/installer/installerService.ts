@@ -7,8 +7,8 @@ import { availableUpdateKey, type ObsyncSettings } from "../../core/settings";
 import type { SecretStore } from "../../core/secretStore";
 import { RateLimitError } from "../../host/errors";
 import { getHost } from "../../host/hostRegistry";
-import { formatRepoId, isSameRepo, parseRepoRef } from "../../host/repoRef";
-import type { HostKind, RepoRef } from "../../host/types";
+import { formatRepoId, isSameRepo, parseRepoRef, parseRepoRefDetailed } from "../../host/repoRef";
+import { SUPPORTED_HOSTS, type HostKind, type RepoRef } from "../../host/types";
 import { InstallerError } from "./errors";
 import type { BindCandidate } from "./existingPlugins";
 import type { ThemeBindCandidate } from "./existingThemes";
@@ -96,6 +96,17 @@ export interface InstallerHost {
     saveSettings(): Promise<void>;
 }
 
+/**
+ * `owner/repo` 简写时平台从哪来。
+ *
+ * - `"auto"`：真的去探一次（见 `InstallerService.detectHost`）；
+ * - 具体平台：就用它，不探测。
+ *
+ * 两种情况都只在**地址里没写明平台**时生效 —— `https://gitee.com/a/b`
+ * 里的 `gitee.com` 永远优先，用户写在地址里的东西不该被一个下拉框改掉。
+ */
+export type HostChoice = HostKind | "auto";
+
 export interface InstallRequest {
     /** 用户输入的仓库地址（`owner/repo`、URL、scp 形式均可）。 */
     repo: string;
@@ -105,8 +116,8 @@ export interface InstallRequest {
     enableAfterInstall?: boolean;
     /** 是否允许用 Gitee 镜像替换 GitHub 源。 */
     allowMirror?: boolean;
-    /** 用于 `owner/repo` 简写时的默认平台。 */
-    defaultHost?: HostKind;
+    /** `owner/repo` 简写时的平台来源（见 `HostChoice`）。 */
+    defaultHost?: HostChoice;
     /**
      * 已经识别过的**源仓库地址**（来自「添加插件仓库」弹窗的「识别」那一步）。
      *
@@ -146,8 +157,8 @@ export interface VersionOption {
 export interface ThemeInstallRequest {
     /** 用户输入的仓库地址（`owner/repo`、URL、scp 形式均可）。 */
     repo: string;
-    /** 用于 `owner/repo` 简写时的默认平台。 */
-    defaultHost?: HostKind;
+    /** `owner/repo` 简写时的平台来源（见 `HostChoice`）。 */
+    defaultHost?: HostChoice;
     /** 取文件时的逐文件回调（理由见 `InstallRequest.onProgress` —— 这一步最慢）。 */
     onProgress?: (file: string) => void;
 }
@@ -278,13 +289,13 @@ export class InstallerService {
         input: string,
         options: {
             allowMirror?: boolean;
-            defaultHost?: HostKind;
+            defaultHost?: HostChoice;
             origin?: RepoRef;
             /** 用户已经确认过这个镜像（弹窗里勾了「使用镜像」）—— 只有这时才采用。 */
             acceptMirror?: boolean;
         } = {}
     ): Promise<ResolvedRepo> {
-        const ref = parseRepoRef(input, options.defaultHost ?? "github");
+        const ref = await this.resolveRef(input, options.defaultHost ?? "github");
 
         // 调用方自己带来了源地址，说明镜像那一步已经做过了（弹窗路径）。
         const providedOrigin =
@@ -324,6 +335,71 @@ export class InstallerService {
         }
 
         return { ref };
+    }
+
+    /**
+     * 把用户输入变成 `RepoRef`，`owner/repo` 简写时按需探测平台。
+     *
+     * 参考项目 BRAT 只认 GitHub，`owner/repo` 一律当 GitHub 处理。多平台之后
+     * 这一句就成了坑：`sofqi/Trefoil` 两边都存在时，用户填的到底是哪一个？
+     * 界面上的「识别平台」给了三种答案：
+     *
+     * - 地址里写了平台 → 以地址为准（**不探测**，用户已经说清楚了）；
+     * - 选了具体平台 → 用它（**不探测**，探测只会把用户的选择覆盖掉）；
+     * - `"auto"` → 按 `SUPPORTED_HOSTS` 的顺序各探一次，命中即止。
+     *
+     * 探测的成本是一次 `manifest.json` 的读取，走的是**源码 raw 通道**
+     * （匿名访问不花 API 配额，见 `GitHubHost.readFile` / `GiteeHost.readFile`）。
+     */
+    private async resolveRef(input: string, choice: HostChoice): Promise<RepoRef> {
+        const parsed = parseRepoRefDetailed(input, choice === "auto" ? "github" : choice);
+        if (parsed.hostExplicit || choice !== "auto") return parsed.ref;
+
+        const detected = await this.detectHost(parsed.ref);
+        if (!detected) {
+            // 两边都没探到：可能是私有仓库、也可能是地址打错了。按默认平台继续走，
+            // 让后面的报错（「找不到仓库」）把话说清楚 —— 这里给不出更好的答案。
+            logger.debug(
+                `no ${MANIFEST_FILE} found for ${formatRepoId(parsed.ref)} on any supported host`
+            );
+            return parsed.ref;
+        }
+        if (detected !== parsed.ref.host) {
+            logger.info(`${formatRepoId(parsed.ref)} detected on ${detected}`);
+        }
+        return { ...parsed.ref, host: detected };
+    }
+
+    /**
+     * 猜一个 `owner/repo` 简写属于哪个平台。
+     *
+     * 判据是「根目录有 manifest.json」而不是「仓库存在」：插件与主题都必须有它，
+     * 而「仓库存在但不是 Obsidian 项目」本来也装不了 —— 把它认成「就是这个平台」
+     * 只会让用户拿到一句更晚、更绕的报错。
+     *
+     * 顺序按 `SUPPORTED_HOSTS`（GitHub 在前）：绝大多数仓库在 GitHub 上，
+     * 于是常见情况只需要一次请求。
+     */
+    private async detectHost(ref: RepoRef): Promise<HostKind | undefined> {
+        for (const host of SUPPORTED_HOSTS) {
+            if (await this.hostHasFile({ ...ref, host }, MANIFEST_FILE)) return host;
+        }
+        return undefined;
+    }
+
+    /** 这个仓库在指定平台上有没有这个文件（不花 API 配额，见 `resolveRef`）。 */
+    private async hostHasFile(ref: RepoRef, path: string): Promise<boolean> {
+        try {
+            const raw = await getHost(ref.host).readFile(ref, path, {
+                token: this.tokenFor(ref.host),
+                ref: "HEAD",
+            });
+            return raw !== undefined;
+        } catch (err) {
+            // 探测是锦上添花：网络失败按「没有」处理，别让它把安装拦下来。
+            logger.debug(`could not probe ${path} in ${formatRepoId(ref)}`, err);
+            return false;
+        }
     }
 
     /**
@@ -372,9 +448,9 @@ export class InstallerService {
      */
     async resolveThemeRepo(
         input: string,
-        defaultHost: HostKind = "github"
+        defaultHost: HostChoice = "github"
     ): Promise<ResolvedThemeRepo> {
-        const ref = parseRepoRef(input, defaultHost);
+        const ref = await this.resolveRef(input, defaultHost);
         const repoLabel = formatRepoId(ref);
         const raw = await getHost(ref.host).readFile(ref, MANIFEST_FILE, {
             token: this.tokenFor(ref.host),
@@ -401,17 +477,7 @@ export class InstallerService {
      * 多读一个文件换取一句能走下去的提示是划算的。
      */
     async looksLikeKind(ref: RepoRef, kind: TrackedKind): Promise<boolean> {
-        const marker = KIND_MARKER_FILE[kind];
-        try {
-            const raw = await getHost(ref.host).readFile(ref, marker, {
-                token: this.tokenFor(ref.host),
-                ref: "HEAD",
-            });
-            return raw !== undefined;
-        } catch (err) {
-            logger.debug(`could not probe ${marker} in ${formatRepoId(ref)}`, err);
-            return false;
-        }
+        return this.hostHasFile(ref, KIND_MARKER_FILE[kind]);
     }
 
     /** 列出可安装的版本，供版本选择弹窗使用。 */
@@ -493,7 +559,7 @@ export class InstallerService {
         requestedVersion: string,
         options: {
             allowMirror?: boolean;
-            defaultHost?: HostKind;
+            defaultHost?: HostChoice;
             origin?: RepoRef;
             acceptMirror?: boolean;
             onProgress?: (file: string) => void;

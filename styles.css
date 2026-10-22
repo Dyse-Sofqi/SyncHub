@@ -199,6 +199,104 @@
     margin: 0.5em 0 0;
 }
 
+/* ── 「添加插件仓库 / 添加主题仓库」弹窗（2026-10-22） ─────────────────────
+ *
+ * 地址输入用等宽字体：地址里最容易看错的是 owner/repo 的边界，等宽下
+ * 「哪一段是 owner」看得出来（同 `.obsync-mirror-line` 的理由）。
+ * `min-width` 用 em 而不是 px —— 手机上弹窗只有那么宽，px 会把它顶出屏幕。
+ */
+.obsync-add-repo .obsync-add-repo-field .obsync-add-repo-input {
+    font-family: var(--font-monospace);
+    min-width: 12em;
+}
+
+/* 地址那一行上下排（说明在上，输入框 + 按钮在下）。
+ *
+ * Setting 默认是「左说明 / 右控件」两栏。地址输入框夹在两个按钮之间时只剩
+ * 一百多像素，粘贴完整链接连开头的 `https://` 都看不见 —— 而这正是用户要
+ * 核对的那一段。撑满一行之后，输入框拿到的是弹窗的整个宽度。
+ */
+.obsync-add-repo .obsync-add-repo-stacked {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.obsync-add-repo .obsync-add-repo-stacked .setting-item-control {
+    justify-content: flex-end;
+    margin-top: 0.4em;
+}
+
+.obsync-add-repo .obsync-add-repo-stacked .obsync-add-repo-input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 「识别平台」那一栏。它只在地址**没写平台**时起作用，所以它比地址那一行
+   低一档：字号不变，但整体跟着缩进一点，视觉上从属于上面的地址。 */
+.obsync-add-repo .obsync-add-repo-platform-slot {
+    margin-top: -0.2em;
+}
+
+.obsync-add-repo .obsync-add-repo-platform .setting-item-name {
+    font-size: var(--font-ui-small, 0.9em);
+    color: var(--text-muted);
+}
+
+/* 识别结果卡片。
+ *
+ * 这张卡片要回答一个问题：「SyncHub 到底在跟谁说话」。所以它是**一块面**，
+ * 把徽标、地址、版本、安装按钮收在一起，与上面的输入区在视觉上分开 ——
+ * 原来这些是一串松散的段落，用户要读两遍才知道识别成了什么。
+ */
+.obsync-add-repo .obsync-add-repo-card {
+    margin-top: 0.9em;
+    padding: 0.2em 0.9em 0.4em;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m, 8px);
+    background: var(--background-secondary);
+}
+
+.obsync-add-repo .obsync-add-repo-card-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    padding: 0.6em 0 0.2em;
+}
+
+/* 平台徽标：只表达「这是哪个平台」，所以做成药丸状、比正文小一号。
+   两个平台共用一套样式 —— 这里不该出现「Gitee 是绿的、GitHub 是黑的」那种
+   品牌色，它在深色主题下会糊成一团，而这两个名字本身就是最清楚的标识。 */
+.obsync-add-repo .obsync-add-repo-host {
+    flex: 0 0 auto;
+    padding: 0.05em 0.55em;
+    border-radius: 1em;
+    background: var(--background-modifier-border);
+    color: var(--text-normal);
+    font-size: var(--font-ui-smaller, 0.8em);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+/* 地址本身。`word-break` 是必需的：长 owner/repo 在窄弹窗里会把卡片撑破。 */
+.obsync-add-repo .obsync-add-repo-id {
+    font-family: var(--font-monospace);
+    word-break: break-all;
+}
+
+/* 「平台这个结论是怎么来的」——比正文弱一档，它是解释而不是内容。 */
+.obsync-add-repo .obsync-add-repo-hint {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller, 0.8em);
+    margin: 0 0 0.4em;
+}
+
+/* 卡片里的主操作那一行：去掉上边框，别让它看起来像又一个字段。 */
+.obsync-add-repo .obsync-add-repo-actions {
+    border-top: none;
+    padding-top: 0.2em;
+}
+
 /* 绑定弹窗里「来源未识别」的只读行 */
 .obsync-muted .setting-item-name,
 .obsync-muted .setting-item-description {

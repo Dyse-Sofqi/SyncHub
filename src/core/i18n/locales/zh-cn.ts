@@ -843,10 +843,27 @@ export const zhCN = {
         switchToPlugin: "改为按插件安装",
         repoLabel: "仓库地址",
         repoDesc: "填写 owner/repo 简写，或粘贴完整的 GitHub / Gitee 仓库链接。",
-        repoPlaceholder: "例如：Dyse-Sofqi/SyncHub 或 https://gitee.com/owner/repo",
+        repoPlaceholder: "例如：Dyse-Sofqi/SyncHub，或粘贴完整链接",
         resolve: "识别",
         resolving: "正在识别…",
-        resolved: (host: string, repo: string) => `已识别为 ${host} 上的 ${repo}`,
+        /**
+         * 「识别平台」一栏（2026-10-22）。
+         *
+         * `owner/repo` 简写本身不含平台。原来一律按 GitHub 处理，填 Gitee 的简写
+         * 只会拿到「GitHub 上找不到仓库」，而界面上没有任何地方能改 —— 用户只能
+         * 去翻文档才知道要粘贴完整链接。现在默认「自动识别」，也允许手动指定。
+         *
+         * `platformDesc` 必须点明「自动识别」是怎么做的（去两边找 manifest.json）：
+         * 它会产生网络请求，而用户有权知道为什么点一下「识别」要等一下。
+         */
+        platformLabel: "识别平台",
+        platformDesc:
+            "地址里没写平台时用这里的设置。自动识别会依次到 GitHub 与 Gitee 上找这个仓库的 manifest.json，先找到的为准。",
+        platformAuto: "自动识别",
+        platformFromUrl: "地址里已写明平台，以地址为准。",
+        /** 卡片里那句「平台这个结论是怎么来的」。自动识别的结论要说明它是猜的。 */
+        platformAutoHint: (host: string) => `地址里没写平台，已按 ${host} 识别；不对的话在上面换一个。`,
+        platformChosenHint: (host: string) => `按你选定的 ${host} 识别。`,
         versionLabel: "安装版本",
         versionLatest: "最新版本",
         versionListFailed: "无法获取版本列表，将按最新版本安装。",

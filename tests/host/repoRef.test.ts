@@ -3,9 +3,11 @@ import { ParseError, UnsupportedHostError } from "../../src/host/errors";
 import {
     formatRemoteUrl,
     formatRepoId,
+    hasExplicitHost,
     isSameRepo,
     parseGitRemoteUrl,
     parseRepoRef,
+    parseRepoRefDetailed,
     repoWebUrl,
     tryParseRepoRef,
 } from "../../src/host/repoRef";
@@ -249,5 +251,40 @@ describe("repoWebUrl", () => {
         expect(repoWebUrl(parseRepoRef("owner/repo", "gitee"))).toBe(
             "https://gitee.com/owner/repo"
         );
+    });
+});
+
+/**
+ * 「平台这个结论是怎么来的」。
+ *
+ * `parseRepoRef` 只回 `RepoRef`，调用方分不出「用户写了 gitee.com」与
+ * 「只写了 owner/repo，我们按默认值猜成了 GitHub」。而这两件事的处置完全相反：
+ * 前者不该再去探测（用户已经说清楚了），后者可以探（见
+ * `InstallerService.resolveRepo` 的 `defaultHost: "auto"`）。
+ */
+describe("parseRepoRefDetailed / hasExplicitHost", () => {
+    it.each([
+        ["owner/repo", false],
+        ["https://gitee.com/owner/repo", true],
+        ["https://github.com/owner/repo.git", true],
+        ["gitee.com/owner/repo", true],
+        ["git@gitee.com:owner/repo.git", true],
+        ["ssh://git@github.com/owner/repo", true],
+    ])("%s 的平台是否写明：%s", (input, explicit) => {
+        const parsed = parseRepoRefDetailed(input);
+        expect(parsed.hostExplicit).toBe(explicit);
+        expect(hasExplicitHost(input)).toBe(explicit);
+    });
+
+    it("简写时平台仍按默认值填（探测只是给调用方的第二个选择，不改变解析结果）", () => {
+        expect(parseRepoRefDetailed("owner/repo", "gitee")).toEqual({
+            ref: { host: "gitee", owner: "owner", repo: "repo" },
+            hostExplicit: false,
+        });
+    });
+
+    it("地址还解析不出 owner/repo 时（用户正在打字）算「没写平台」，不抛错", () => {
+        expect(hasExplicitHost("https://gitee.com/")).toBe(false);
+        expect(hasExplicitHost("")).toBe(false);
     });
 });

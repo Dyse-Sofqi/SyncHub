@@ -27,8 +27,12 @@ import type {
 
 /** 记录被识别过的地址，用于断言按钮点击真的把输入交了出去。 */
 let resolvedInputs: string[] = [];
+/** 记录每次识别时交出去的选项（`defaultHost` 就是「识别平台」那一栏的值）。 */
+let resolvedOptions: Array<{ defaultHost?: string } | undefined> = [];
 /** 记录识别过的**主题**地址（主题那半边走的是另一个服务方法）。 */
 let resolvedThemeInputs: string[] = [];
+/** 记录主题识别时交出去的平台。 */
+let resolvedThemeHosts: string[] = [];
 /** 记录安装请求，用于断言「用的是源仓库还是镜像」。 */
 let installRequests: Array<{ repo: string; origin?: { host: string } }> = [];
 /** 记录主题安装请求。 */
@@ -61,16 +65,18 @@ function makeService(): InstallerService {
         repoRef: { host: "github", owner: "kepano", repo: "obsidian-minimal" },
     };
     return {
-        resolveRepo: async (input: string) => {
+        resolveRepo: async (input: string, options?: { defaultHost?: string }) => {
             resolvedInputs.push(input);
+            resolvedOptions.push(options);
             // 识别到的是源仓库，另外**提出**一个疑似镜像（默认不采用）
             return {
                 ref: { host: "github", owner: "sofqi", repo: "Trefoil" },
                 mirror: { host: "gitee", owner: "sofqi", repo: "Trefoil" },
             };
         },
-        resolveThemeRepo: async (input: string) => {
+        resolveThemeRepo: async (input: string, defaultHost?: string) => {
             resolvedThemeInputs.push(input);
+            resolvedThemeHosts.push(defaultHost ?? "");
             return {
                 ref: { host: "github", owner: "kepano", repo: "obsidian-minimal" },
                 manifest: { name: "Minimal", version: "9.1.0" },
@@ -137,6 +143,7 @@ describe("AddRepoModal 的「识别」按钮", () => {
     beforeEach(() => {
         resetCreatedSettings();
         resolvedInputs = [];
+        resolvedOptions = [];
         installRequests = [];
     });
 
@@ -201,6 +208,7 @@ describe("AddRepoModal 的安装回调", () => {
     beforeEach(() => {
         resetCreatedSettings();
         resolvedInputs = [];
+        resolvedOptions = [];
         installRequests = [];
     });
 
@@ -278,6 +286,7 @@ describe("AddRepoModal 的镜像开关", () => {
     beforeEach(() => {
         resetCreatedSettings();
         resolvedInputs = [];
+        resolvedOptions = [];
         installRequests = [];
     });
 
@@ -325,10 +334,11 @@ describe("AddRepoModal 的镜像开关", () => {
         await resolveRepoTarget();
 
         expect(mirrorToggle().value).toBe(false);
-        // 「已识别为」那行报的是**实际会用**的地址 —— 默认就是源仓库；
+        // 卡片头报的是**实际会用**的地址 —— 默认就是源仓库（平台徽标 + 地址）；
         // 同时必须说明「检测到了镜像但没用」，否则用户分不清「没探测到」与「探测到没用」
         const statuses = modalTexts().join("\n");
-        expect(statuses).toContain(zhCN.installer.resolved("GitHub", "sofqi/Trefoil"));
+        expect(statuses).toContain(zhCN.host.github);
+        expect(statuses).toContain("sofqi/Trefoil");
         expect(statuses).toContain(zhCN.installer.mirrorUnused("Gitee", "sofqi/Trefoil"));
     });
 
@@ -408,7 +418,9 @@ function contentTexts(): string {
 function resetModalState(): void {
     resetCreatedSettings();
     resolvedInputs = [];
+    resolvedOptions = [];
     resolvedThemeInputs = [];
+    resolvedThemeHosts = [];
     installRequests = [];
     themeInstallRequests = [];
     looksLikeAnswer = false;
@@ -440,7 +452,10 @@ describe("AddRepoModal · 主题模式", () => {
 
         expect(resolvedThemeInputs).toEqual(["kepano/obsidian-minimal"]);
         const texts = contentTexts();
-        expect(texts).toContain(zhCN.installer.resolved("GitHub", "kepano/obsidian-minimal"));
+        // 卡片头 = 平台徽标 + 可点开的地址；下面那句说清「平台是怎么来的」
+        expect(texts).toContain(zhCN.host.github);
+        expect(texts).toContain("kepano/obsidian-minimal");
+        expect(texts).toContain(zhCN.installer.platformAutoHint(zhCN.host.github));
         expect(texts).toContain(zhCN.installer.themeResolved("Minimal", "9.1.0"));
         expect(texts).not.toContain(zhCN.installer.versionLabel);
         // 「装好后去哪儿选它」必须在**点安装之前**就说出来（我们不替用户切主题）
@@ -567,5 +582,112 @@ describe("AddRepoModal · 填错了入口", () => {
         // 回到可重试的状态，且不出现换入口的按钮
         await vi.waitFor(() => expect(buttonByText(zhCN.installer.install).disabled).toBe(false));
         expect(hasButton(zhCN.installer.switchToTheme, beforeFailure)).toBe(false);
+    });
+});
+
+/**
+ * 「识别平台」一栏（2026-10-22）。
+ *
+ * 用户报的问题是「只支持 GitHub 的 owner/repo，不支持 Gitee 的」。简写本身确实
+ * 不含平台，所以只有两条路：探测，或者让用户说。这里两条都做 —— 默认「自动」，
+ * 也可以指定；而**地址里写明了平台时以地址为准**，那一刻下拉框会灰掉。
+ *
+ * 灰掉必须同时说清原因：否则用户会以为「选了 Gitee 却没变」是个 bug
+ * （同 `settingsTab` 里那条「灰开关要说明为什么」）。
+ */
+describe("AddRepoModal · 识别平台", () => {
+    beforeEach(resetModalState);
+
+    /** 当前渲染出来的「识别平台」那一行（版本那一行也有下拉框，按名字区分）。 */
+    function platformRow() {
+        const row = [...createdSettings]
+            .reverse()
+            .find(
+                (setting) =>
+                    setting.dropdowns.length > 0 &&
+                    setting.name === zhCN.installer.platformLabel
+            );
+        if (!row) throw new Error("当前内容区里找不到「识别平台」这一行");
+        return row;
+    }
+
+    it("默认「自动识别」，识别时把这个选择原样交给服务（平台由服务去探）", async () => {
+        openModal();
+
+        expect(platformRow().dropdowns[0]!.value).toBe("auto");
+
+        repoInput().type("sofqi/Trefoil");
+        resolveButton().click();
+
+        await vi.waitFor(() => expect(resolvedOptions).toHaveLength(1));
+        expect(resolvedOptions[0]).toEqual({ defaultHost: "auto" });
+    });
+
+    it("指定平台之后按它识别（不再自动探测）", async () => {
+        openModal();
+        repoInput().type("sofqi/Trefoil");
+        platformRow().dropdowns[0]!.select("gitee");
+
+        resolveButton().click();
+
+        await vi.waitFor(() => expect(resolvedOptions).toHaveLength(1));
+        expect(resolvedOptions[0]).toEqual({ defaultHost: "gitee" });
+    });
+
+    it("地址里写明了平台 → 下拉框灰掉并说明以地址为准", () => {
+        openModal();
+        repoInput().type("https://gitee.com/sofqi/Trefoil");
+
+        expect(platformRow().dropdowns[0]!.disabled).toBe(true);
+        expect(platformRow().desc).toBe(zhCN.installer.platformFromUrl);
+    });
+
+    it("从完整链接改回简写 → 下拉框恢复可用（灰掉时没改写用户原来的选择）", () => {
+        openModal();
+        repoInput().type("https://gitee.com/sofqi/Trefoil");
+        expect(platformRow().dropdowns[0]!.disabled).toBe(true);
+
+        repoInput().type("sofqi/Trefoil");
+
+        expect(platformRow().dropdowns[0]!.disabled).toBe(false);
+        expect(platformRow().dropdowns[0]!.value).toBe("auto");
+    });
+
+    it("改平台会作废上一次的识别结论，并立刻按新平台再识别一次", async () => {
+        openModal();
+        repoInput().type("sofqi/Trefoil");
+        resolveButton().click();
+        await vi.waitFor(() => expect(buttonByText(zhCN.installer.install)).toBeDefined());
+
+        // 先勾上镜像，再换平台 —— 旧结论（含这个勾选）必须一起作废，
+        // 否则会拿 GitHub 那边的镜像地址去装一个 Gitee 的仓库。
+        mirrorToggle().toggle(true);
+        platformRow().dropdowns[0]!.select("gitee");
+
+        await vi.waitFor(() => expect(resolvedOptions).toHaveLength(2));
+        expect(resolvedOptions[1]).toEqual({ defaultHost: "gitee" });
+        expect(mirrorToggle().value).toBe(false);
+    });
+
+    /** 镜像开关那一行（只在服务提出候选时才有）。 */
+    function mirrorToggle() {
+        const row = [...createdSettings]
+            .reverse()
+            .find(
+                (setting) =>
+                    setting.toggles.length > 0 &&
+                    setting.name === zhCN.installer.mirrorConfirmCandidate("Gitee", "sofqi/Trefoil")
+            );
+        if (!row) throw new Error("找不到镜像开关");
+        return row.toggles[0]!;
+    }
+
+    it("主题模式同样把平台交出去（主题没有镜像发现，只有这一个入口）", async () => {
+        openModal(undefined, makeService(), "theme");
+        repoInput().type("kepano/obsidian-minimal");
+        resolveButton().click();
+
+        await vi.waitFor(() => expect(resolvedThemeHosts).toHaveLength(1));
+        expect(resolvedThemeHosts[0]).toBe("auto");
     });
 });

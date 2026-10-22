@@ -40,9 +40,11 @@ export {
     fileWebUrl,
     formatRemoteUrl,
     formatRepoId,
+    hasExplicitHost,
     isSameRepo,
     parseGitRemoteUrl,
     parseRepoRef,
+    parseRepoRefDetailed,
     repoWebUrl,
     tryParseRepoRef,
 } from "./repoRef";

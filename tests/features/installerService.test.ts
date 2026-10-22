@@ -529,3 +529,95 @@ describe("unbind（取消绑定）", () => {
         expect(settings.installer.tracked.map((item) => item.kind)).toEqual(["theme"]);
     });
 });
+
+/**
+ * `owner/repo` 简写的平台探测（2026-10-22）。
+ *
+ * 用户报的问题是「只支持 GitHub 的 owner/repo，不支持 Gitee 的」。简写本身确实
+ * 不含平台，所以只能去探。判据是**根目录有没有 manifest.json**（插件与主题都有），
+ * 顺序按 `SUPPORTED_HOSTS`，命中即止 —— 常见情况（GitHub）只花一次请求。
+ */
+describe("resolveRepo —— 简写地址的平台识别", () => {
+    const GITHUB_MANIFEST = /raw\.githubusercontent\.com\/owner\/demo\/HEAD\/manifest\.json$/;
+    const GITEE_MANIFEST = /^https:////gitee/.com//owner//demo//raw//HEAD//manifest/.json$/;
+
+    /** 只数探测用的那几次请求（镜像发现是另一回事，默认关着）。 */
+    function probeCalls(): string[] {
+        return calls.filter((url) => url.endsWith("/manifest.json"));
+    }
+
+    it("GitHub 上有这个仓库 → 认成 GitHub，并且**只探一次**（命中即止）", async () => {
+        route(GITHUB_MANIFEST, () => ({ status: 200, text: MANIFEST }));
+        route(GITEE_MANIFEST, () => ({ status: 200, text: MANIFEST }));
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveRepo("owner/demo", { defaultHost: "auto" });
+
+        expect(resolved.ref).toEqual({ host: "github", owner: "owner", repo: "demo" });
+        expect(probeCalls()).toHaveLength(1);
+    });
+
+    it("GitHub 上没有、Gitee 上有 → 认成 Gitee", async () => {
+        route(GITHUB_MANIFEST, () => ({ status: 404, text: "not found" }));
+        route(GITEE_MANIFEST, () => ({ status: 200, text: MANIFEST }));
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveRepo("owner/demo", { defaultHost: "auto" });
+
+        expect(resolved.ref).toEqual({ host: "gitee", owner: "owner", repo: "demo" });
+        expect(probeCalls()).toHaveLength(2);
+    });
+
+    it("两边都探不到 → 退回默认平台（后面的「找不到仓库」才说得清是哪一个）", async () => {
+        route(GITHUB_MANIFEST, () => ({ status: 404, text: "" }));
+        route(GITEE_MANIFEST, () => ({ status: 404, text: "" }));
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveRepo("owner/demo", { defaultHost: "auto" });
+
+        expect(resolved.ref.host).toBe("github");
+    });
+
+    it("地址里写明了平台 → 一次都不探（用户已经说清楚了）", async () => {
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveRepo("https://gitee.com/owner/demo", {
+            defaultHost: "auto",
+        });
+
+        expect(resolved.ref.host).toBe("gitee");
+        expect(calls).toEqual([]);
+    });
+
+    it("指定了平台 → 不探（探测会把用户的选择覆盖掉）", async () => {
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveRepo("owner/demo", { defaultHost: "gitee" });
+
+        expect(resolved.ref.host).toBe("gitee");
+        expect(calls).toEqual([]);
+    });
+
+    it("探测失败（网络错误）不拦路：按默认平台继续走", async () => {
+        // 没有路由 → 请求抛错。探测把「抛错」当「没有」，不该把安装拦下来。
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveRepo("owner/demo", { defaultHost: "auto" });
+
+        expect(resolved.ref.host).toBe("github");
+    });
+
+    it("主题识别走同一条探测路径（简写 + auto）", async () => {
+        route(GITHUB_MANIFEST, () => ({ status: 404, text: "not found" }));
+        route(GITEE_MANIFEST, () => ({
+            status: 200,
+            text: JSON.stringify({ name: "Demo", version: "1.0.0" }),
+        }));
+        const { service } = createService(createFakeApp());
+
+        const resolved = await service.resolveThemeRepo("owner/demo", "auto");
+
+        expect(resolved.ref.host).toBe("gitee");
+        expect(resolved.manifest.name).toBe("Demo");
+    });
+});

@@ -1,12 +1,13 @@
 import { Modal, Setting, type App, type ButtonComponent } from "obsidian";
 import type { LocaleStrings } from "../../../core/i18n";
 import { logger } from "../../../core/logger";
-import { formatRepoId } from "../../../host/repoRef";
+import { formatRepoId, hasExplicitHost } from "../../../host/repoRef";
 import type { RepoRef } from "../../../host/types";
 import type { CommunityPluginIndex } from "../communityPlugins";
 import { downloadSourceLabel, hostLabel } from "../downloadSource";
 import { InstallerError } from "../errors";
 import type {
+    HostChoice,
     InstallerService,
     ResolvedRepo,
     ResolvedThemeRepo,
@@ -14,6 +15,7 @@ import type {
 } from "../installerService";
 import type { InstallResult, ThemeInstallResult, TrackedKind } from "../types";
 import { CommunityPluginModal } from "./CommunityPluginModal";
+import { appendRepoLink } from "./repoLink";
 import { VersionSuggestModal } from "./VersionSuggestModal";
 
 /**
@@ -40,6 +42,18 @@ import { VersionSuggestModal } from "./VersionSuggestModal";
  * BRAT 是在输入框失焦时自动去拉版本列表，用户看不到"正在识别什么、
  * 识别成了哪个平台"。多平台之后这个反馈变得必要 ——
  * 用户需要知道 `owner/repo` 被认成了 GitHub 还是 Gitee。
+ *
+ * ## 平台是「可选的」，不是「猜死的」（2026-10-22）
+ *
+ * `owner/repo` 简写本身不含平台，而 Gitee 上同名同 owner 的仓库并不罕见。
+ * 原来简写一律按 GitHub 处理，填 Gitee 的简写会拿到「GitHub 上找不到仓库」，
+ * 而界面没有任何地方能改 —— 用户只能去翻文档才知道要粘贴完整链接。
+ * 现在多了「识别平台」一栏：自动（依次探测）/ GitHub / Gitee，并且
+ * **地址里写明平台时以地址为准**（那时下拉框会灰掉并说明原因 —— 让它看起来
+ * 能改但改了没用，比灰掉更糟）。
+ *
+ * 结果区也从一串散落的文字改成一张卡片：平台徽标 + 等宽仓库地址 + 可点开的链接，
+ * 用户核对「SyncHub 到底在跟谁说话」时只需要看这一行。
  */
 export class AddRepoModal extends Modal {
     private repoInput = "";
@@ -52,15 +66,20 @@ export class AddRepoModal extends Modal {
      */
     private useMirror = false;
 
-    /** 这次要装哪一类对象。可以在弹窗里被「改为按…安装」那个按钮改掉。 */
+    /**
+     * 这次要装哪一类对象。可以在弹窗里被「改为按…安装」那个按钮改掉。
+     */
     private kind: TrackedKind;
+
+    /** `owner/repo` 简写时平台从哪来。默认「自动」（见文件头最后一节）。 */
+    private hostChoice: HostChoice = "auto";
 
     private resolved: ResolvedRepo | undefined;
     /** 主题那一侧的识别结果（两条路互斥，见 `resolve`）。 */
     private resolvedTheme: ResolvedThemeRepo | undefined;
     /**
      * 「这个仓库其实是另一类对象」——安装失败后探出来的结论。
-     * 非空时那一段改成提示 + 一个换入口的按钮（见 `renderResolved`）。
+     * 非空时那一段改成提示 + 一个换入口的按钮（见 `renderSuggestion`）。
      */
     private suggestion: TrackedKind | undefined;
 
@@ -80,6 +99,16 @@ export class AddRepoModal extends Modal {
      * 焦点与光标。所以留住实例，在 onChange 里就地改禁用态。
      */
     private resolveButton: ButtonComponent | undefined;
+
+    /**
+     * 「识别平台」那一栏的容器，以及它上一次渲染时的「地址里写没写平台」。
+     *
+     * 打字时要跟着变的是**这一栏**（粘贴完整链接之后下拉框就该灰掉），
+     * 但它不是输入框 —— 单独重建它不会动到用户正在打字的那个 input，
+     * 所以这里可以放心 `empty()` 重画，而整页重建不行。
+     */
+    private platformEl: HTMLElement | undefined;
+    private platformExplicit = false;
 
     constructor(
         app: App,
@@ -117,8 +146,10 @@ export class AddRepoModal extends Modal {
         const t = this.t;
         const { contentEl } = this;
         contentEl.empty();
+        contentEl.addClass("obsync-add-repo");
         // 内容区已重建，旧按钮实例作废 —— 否则 onChange 会改到已脱离文档的元素上
         this.resolveButton = undefined;
+        this.platformEl = undefined;
         // 标题也在这里设：换入口那个按钮会就地改 `kind`（见 `switchKind`），
         // 只在 onOpen 里设一次的话标题会停在旧的那一类上。
         this.titleEl.setText(this.titleText());
@@ -130,9 +161,11 @@ export class AddRepoModal extends Modal {
                 text.setPlaceholder(t.installer.repoPlaceholder)
                     .setValue(this.repoInput)
                     .setDisabled(this.busy !== undefined);
+                text.inputEl.addClass("obsync-add-repo-input");
                 text.onChange((value) => {
                     this.repoInput = value;
                     this.syncResolveButton();
+                    this.syncPlatformRow();
                 });
                 text.inputEl.addEventListener("keydown", (event) => {
                     if (event.key === "Enter") {
@@ -150,6 +183,12 @@ export class AddRepoModal extends Modal {
                     .setDisabled(this.resolveDisabled())
                     .onClick(() => void this.resolve());
             });
+        repoRow.setClass("obsync-add-repo-field");
+        // 地址那一行**上下排**（说明在上、输入框与按钮在下）：Setting 默认是
+        // 「左边说明、右边控件」两栏，而地址输入框在 560px 宽的弹窗里会被挤到
+        // 只剩一百多像素 —— 粘贴完整链接时连开头的 `https://` 都看不见。
+        // 这个类只给地址这一行，下面「识别平台」仍是正常的两栏（见 styles.css）。
+        repoRow.setClass("obsync-add-repo-stacked");
 
         // 「浏览社区插件」只对插件成立：它走的是官方**插件**索引（主题索引里只有
         // name + repo，没有可浏览的条目结构）。主题模式下干脆不画这个按钮 ——
@@ -163,6 +202,10 @@ export class AddRepoModal extends Modal {
             );
         }
 
+        const platformEl = contentEl.createDiv({ cls: "obsync-add-repo-platform-slot" });
+        this.platformEl = platformEl;
+        this.renderPlatformRow(platformEl);
+
         if (this.busy) {
             contentEl.createEl("p", {
                 text: this.busy === "resolving" ? t.installer.resolving : t.installer.installing,
@@ -174,6 +217,61 @@ export class AddRepoModal extends Modal {
         if (this.resolved || this.resolvedTheme) this.renderResolved(contentEl);
     }
 
+    /**
+     * 「识别平台」那一栏。
+     *
+     * 地址里写明了平台时**灰掉**并说明原因：那一刻下拉框确实不起作用
+     * （`resolveRef` 让地址优先），不灰掉的话用户会以为「选了 Gitee 却没变」
+     * 是 bug。灰掉时**不改写它的值** —— 用户切回简写地址之后，原来那个选择
+     * 还得原样回来（同 `settingsTab` 里那条「灰开关不要改值」）。
+     */
+    private renderPlatformRow(parent: HTMLElement): void {
+        const t = this.t;
+        const explicit = hasExplicitHost(this.repoInput);
+        this.platformExplicit = explicit;
+
+        const row = new Setting(parent)
+            .setName(t.installer.platformLabel)
+            .setDesc(explicit ? t.installer.platformFromUrl : t.installer.platformDesc)
+            .addDropdown((dropdown) =>
+                dropdown
+                    .addOption("auto", t.installer.platformAuto)
+                    .addOption("github", t.host.github)
+                    .addOption("gitee", t.host.gitee)
+                    .setValue(this.hostChoice)
+                    .setDisabled(explicit || this.busy !== undefined)
+                    .onChange((value) => {
+                        this.hostChoice = value as HostChoice;
+                        // 换平台 = 换一个仓库：上一次的识别结论、版本列表、
+                        // 镜像勾选全部作废，否则界面会拿着 GitHub 的版本列表
+                        // 去装 Gitee 的仓库。
+                        const hadResult = this.resolved !== undefined || this.resolvedTheme !== undefined;
+                        this.clearResolved();
+                        // 已经识别过就立刻按新平台再识别一次 —— 用户换平台就是想看
+                        // 另一个结果，让他再点一次「识别」是多余的一步。
+                        if (hadResult) void this.resolve();
+                        else this.render();
+                    })
+            );
+        row.setClass("obsync-add-repo-platform");
+    }
+
+    /**
+     * 输入变化后就地刷新「识别平台」那一栏 —— 只在「写没写平台」真的变了时重建。
+     *
+     * 每次输入都重建的话，`createdSettings` 会疯长（测试里要按顺序找控件），
+     * 真机上也会让下拉框在用户打字时反复闪。
+     */
+    private syncPlatformRow(): void {
+        const explicit = hasExplicitHost(this.repoInput);
+        if (explicit === this.platformExplicit) return;
+        const holder = this.platformEl;
+        if (!holder) return;
+
+        holder.empty();
+        this.renderPlatformRow(holder);
+    }
+
     /** 这次安装实际会用的地址：勾了镜像才是镜像。 */
     private targetRef(): RepoRef {
         const resolved = this.resolved!;
@@ -181,34 +279,61 @@ export class AddRepoModal extends Modal {
     }
 
     private renderResolved(contentEl: HTMLElement): void {
-        const t = this.t;
+        const card = contentEl.createDiv({ cls: "obsync-add-repo-card" });
+        this.renderCardHead(card, this.isTheme ? this.resolvedTheme!.ref : this.targetRef());
 
         if (this.isTheme) {
-            this.renderResolvedTheme(contentEl);
+            this.renderThemeBody(card);
             return;
         }
-
-        const resolved = this.resolved!;
-        const target = this.targetRef();
-
-        contentEl.createEl("p", {
-            text: t.installer.resolved(hostLabel(t, target.host), formatRepoId(target)),
-            cls: "obsync-modal-status",
-        });
 
         // 装错入口：这个仓库里其实是主题。给出能走下去的下一步，
         // 而不是让用户对着「缺少必需文件：main.js」自己猜。
         if (this.suggestion) {
-            this.renderSuggestion(contentEl);
+            this.renderSuggestion(card);
             return;
         }
+
+        this.renderPluginBody(card);
+    }
+
+    /**
+     * 结果卡片的头：平台徽标 + 可点开的仓库地址。
+     *
+     * 地址做成**链接**而不是纯文本：用户核对「SyncHub 在跟谁说话」时，
+     * 下一步一定是去浏览器里看那个仓库，纯文本等于让他手抄一遍
+     * （理由与 `appendRepoLink` 的注释相同）。
+     */
+    private renderCardHead(parent: HTMLElement, ref: RepoRef): void {
+        const t = this.t;
+        const head = parent.createDiv({ cls: "obsync-add-repo-card-head" });
+        head.createSpan({ cls: "obsync-add-repo-host", text: hostLabel(t, ref.host) });
+        appendRepoLink(head, ref, formatRepoId(ref), t, "obsync-add-repo-id");
+
+        // 平台这个结论是怎么来的。地址里写了平台就不必说（徽标已经说明了）；
+        // 简写时要说 —— 自动识别出来的结论用户有权知道它是「猜的」。
+        if (!hasExplicitHost(this.repoInput)) {
+            parent.createDiv({
+                cls: "obsync-add-repo-hint",
+                text:
+                    this.hostChoice === "auto"
+                        ? t.installer.platformAutoHint(hostLabel(t, ref.host))
+                        : t.installer.platformChosenHint(hostLabel(t, ref.host)),
+            });
+        }
+    }
+
+    /** 插件那一侧的结果区：镜像开关、版本、启用、安装。 */
+    private renderPluginBody(card: HTMLElement): void {
+        const t = this.t;
+        const resolved = this.resolved!;
 
         // 探测到镜像时**只提出候选**：勾选之前一直用源仓库。开关放这里而不是
         // 自动采用，是因为判据（两边 manifest 的 id 相同）证明不了「同一份代码」——
         // 详见 `ConfirmMirrorModal` 里那段警告。
         if (resolved.mirror) {
             const mirror = resolved.mirror;
-            new Setting(contentEl)
+            new Setting(card)
                 .setName(
                     t.installer.mirrorConfirmCandidate(
                         hostLabel(t, mirror.host),
@@ -227,7 +352,7 @@ export class AddRepoModal extends Modal {
             // 检测到但**不采用**时，也必须把「检测到了什么」说出来，
             // 否则用户以为没探测到（这正是这一整块要修的那个体验问题）。
             if (!this.useMirror) {
-                contentEl.createEl("p", {
+                card.createEl("p", {
                     text: t.installer.mirrorUnused(
                         hostLabel(t, mirror.host),
                         formatRepoId(mirror)
@@ -237,7 +362,7 @@ export class AddRepoModal extends Modal {
             }
         }
 
-        new Setting(contentEl)
+        new Setting(card)
             .setName(t.installer.versionLabel)
             .addDropdown((dropdown) => {
                 for (const option of this.versions) {
@@ -262,24 +387,26 @@ export class AddRepoModal extends Modal {
             );
 
         if (this.versionError) {
-            contentEl.createEl("p", {
+            card.createEl("p", {
                 text: this.versionError,
                 cls: "obsync-modal-warning",
             });
         }
 
-        new Setting(contentEl).setName(t.installer.enableAfterInstall).addToggle((toggle) =>
+        new Setting(card).setName(t.installer.enableAfterInstall).addToggle((toggle) =>
             toggle.setValue(this.enableAfterInstall).onChange((value) => {
                 this.enableAfterInstall = value;
             })
         );
 
-        new Setting(contentEl).addButton((button) =>
-            button
-                .setButtonText(t.installer.install)
-                .setCta()
-                .onClick(() => void this.install())
-        );
+        new Setting(card)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.installer.install)
+                    .setCta()
+                    .onClick(() => void this.install())
+            )
+            .setClass("obsync-add-repo-actions");
     }
 
     /**
@@ -292,24 +419,16 @@ export class AddRepoModal extends Modal {
      * - 「装好后到 外观 → 主题 里选它」—— 我们不替用户切换主题（见 `installTheme`
      *   的第 4 条），不说这句的话用户会以为装完没生效。
      */
-    private renderResolvedTheme(contentEl: HTMLElement): void {
+    private renderThemeBody(card: HTMLElement): void {
         const t = this.t;
         const resolved = this.resolvedTheme!;
 
-        contentEl.createEl("p", {
-            text: t.installer.resolved(
-                hostLabel(t, resolved.ref.host),
-                formatRepoId(resolved.ref)
-            ),
-            cls: "obsync-modal-status",
-        });
-
         if (this.suggestion) {
-            this.renderSuggestion(contentEl);
+            this.renderSuggestion(card);
             return;
         }
 
-        contentEl.createEl("p", {
+        card.createEl("p", {
             text: t.installer.themeResolved(
                 resolved.manifest.name,
                 resolved.manifest.version
@@ -317,14 +436,16 @@ export class AddRepoModal extends Modal {
             cls: "obsync-modal-status",
         });
 
-        new Setting(contentEl).addButton((button) =>
-            button
-                .setButtonText(t.installer.themeInstall)
-                .setCta()
-                .onClick(() => void this.installTheme())
-        );
+        new Setting(card)
+            .addButton((button) =>
+                button
+                    .setButtonText(t.installer.themeInstall)
+                    .setCta()
+                    .onClick(() => void this.installTheme())
+            )
+            .setClass("obsync-add-repo-actions");
 
-        contentEl.createEl("p", {
+        card.createEl("p", {
             text: t.installer.themeAfterInstallHint,
             cls: "obsync-modal-hint",
         });
@@ -337,36 +458,49 @@ export class AddRepoModal extends Modal {
      * 就是另一件事，识别结论、版本列表、镜像勾选全都作废（主题那边连识别用的
      * 接口都不一样）。
      */
-    private renderSuggestion(contentEl: HTMLElement): void {
+    private renderSuggestion(card: HTMLElement): void {
         const t = this.t;
         const other = this.suggestion!;
 
-        contentEl.createEl("p", {
+        card.createEl("p", {
             cls: "obsync-modal-warning",
             text: other === "theme" ? t.installer.looksLikeTheme : t.installer.looksLikePlugin,
         });
 
-        new Setting(contentEl).addButton((button) =>
-            button
-                .setButtonText(
-                    other === "theme" ? t.installer.switchToTheme : t.installer.switchToPlugin
-                )
-                .setCta()
-                .onClick(() => this.switchKind(other))
-        );
+        new Setting(card)
+            .addButton((button) =>
+                button
+                    .setButtonText(
+                        other === "theme" ? t.installer.switchToTheme : t.installer.switchToPlugin
+                    )
+                    .setCta()
+                    .onClick(() => this.switchKind(other))
+            )
+            .setClass("obsync-add-repo-actions");
     }
 
-    /** 换成另一类对象并重新识别。 */
+    /** 换一类对象并重新识别。 */
     private switchKind(kind: TrackedKind): void {
         this.kind = kind;
-        this.suggestion = undefined;
+        this.clearResolved();
+        void this.resolve();
+    }
+
+    /**
+     * 上一次识别的结论全部作废。
+     *
+     * 三处都要清：换了地址、换了平台、换了对象类型 —— 三者都是「这是另一个
+     * 仓库」的意思。留着旧结论的后果不是显示错，而是**装错**（用 A 的版本列表
+     * 去装 B）。
+     */
+    private clearResolved(): void {
         this.resolved = undefined;
         this.resolvedTheme = undefined;
+        this.suggestion = undefined;
         this.versions = [];
         this.version = "latest";
         this.versionError = undefined;
         this.useMirror = false;
-        void this.resolve();
     }
 
     /** 空地址没有可识别的东西；识别中也不该重复触发。 */
@@ -385,19 +519,20 @@ export class AddRepoModal extends Modal {
         if (!this.repoInput.trim()) return;
 
         this.busy = "resolving";
-        this.versionError = undefined;
-        // 换了地址就是另一件事了，上一次的镜像勾选与「装错入口」的结论都作废。
-        this.useMirror = false;
-        this.suggestion = undefined;
+        // 换了地址 / 换了平台就是另一件事了，上一次的镜像勾选与「装错入口」的结论都作废。
+        this.clearResolved();
         this.render();
 
         try {
             if (this.isTheme) {
-                this.resolvedTheme = await this.service.resolveThemeRepo(this.repoInput);
-                this.resolved = undefined;
+                this.resolvedTheme = await this.service.resolveThemeRepo(
+                    this.repoInput,
+                    this.hostChoice
+                );
             } else {
-                this.resolved = await this.service.resolveRepo(this.repoInput);
-                this.resolvedTheme = undefined;
+                this.resolved = await this.service.resolveRepo(this.repoInput, {
+                    defaultHost: this.hostChoice,
+                });
                 this.versions = [
                     { value: "latest", label: t.installer.versionLatest, prerelease: false },
                 ];

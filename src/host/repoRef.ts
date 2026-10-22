@@ -82,10 +82,21 @@ function cleanInput(raw: string): string {
     return s;
 }
 
-function splitHostAndPath(
-    input: string,
-    defaultHost: HostKind
-): { host: HostKind; path: string } {
+interface HostAndPath {
+    host: HostKind;
+    path: string;
+    /**
+     * 平台是不是**地址里写明的**。
+     *
+     * `owner/repo` 简写为 `false` —— 这时平台是猜的（调用方给的默认值），
+     * 而猜错了的后果是「悄悄指向另一个平台的同名仓库」，所以调用方需要
+     * 知道「这个结论有多少依据」，才能决定要不要再去探测一次
+     * （见 `InstallerService.resolveRepo` 的 `defaultHost: "auto"`）。
+     */
+    hostExplicit: boolean;
+}
+
+function splitHostAndPath(input: string, defaultHost: HostKind): HostAndPath {
     // 1) 带 scheme：https:// / http:// / ssh:// / git://
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) {
         let url: URL;
@@ -97,13 +108,13 @@ function splitHostAndPath(
                 { cause }
             );
         }
-        return { host: resolveHost(url.hostname, input), path: url.pathname };
+        return { host: resolveHost(url.hostname, input), path: url.pathname, hostExplicit: true };
     }
 
     // 2) scp 形式：git@github.com:owner/repo
     const scp = /^(?:[^@/\s]+@)?([^:/\s]+\.[^:/\s]+):(.+)$/.exec(input);
     if (scp) {
-        return { host: resolveHost(scp[1]!, input), path: scp[2]! };
+        return { host: resolveHost(scp[1]!, input), path: scp[2]!, hostExplicit: true };
     }
 
     // 3) 无 scheme 的域名开头：github.com/owner/repo
@@ -111,12 +122,16 @@ function splitHostAndPath(
     if (slash > 0) {
         const first = input.slice(0, slash);
         if (looksLikeDomain(first)) {
-            return { host: resolveHost(first, input), path: input.slice(slash + 1) };
+            return {
+                host: resolveHost(first, input),
+                path: input.slice(slash + 1),
+                hostExplicit: true,
+            };
         }
     }
 
     // 4) owner/repo 简写 —— 平台未知，交给调用方给默认值
-    return { host: defaultHost, path: input };
+    return { host: defaultHost, path: input, hostExplicit: false };
 }
 
 function splitOwnerRepo(path: string, original: string): [string, string] {
@@ -137,6 +152,40 @@ function splitOwnerRepo(path: string, original: string): [string, string] {
 }
 
 /**
+ * 解析结果 + 「平台这个结论是怎么来的」。
+ *
+ * `parseRepoRef` 只回 `RepoRef`，调用方分不出「用户写了 gitee.com」与
+ * 「用户只写了 owner/repo，我们按默认值猜成了 GitHub」—— 而这两件事的
+ * 处置完全不同：前者不该再探测（地址是用户自己写的），后者可以探测。
+ */
+export interface ParsedRepoRef {
+    ref: RepoRef;
+    /** 见 `HostAndPath.hostExplicit`。 */
+    hostExplicit: boolean;
+}
+
+/**
+ * 解析仓库标识，并说明平台是地址里写明的还是按默认值猜的。
+ *
+ * @param defaultHost `owner/repo` 简写无法判断平台时使用的默认值。
+ * @throws {ParseError} 地址格式不对
+ * @throws {UnsupportedHostError} 平台不受支持
+ */
+export function parseRepoRefDetailed(
+    input: string,
+    defaultHost: HostKind = "github"
+): ParsedRepoRef {
+    const raw = (input ?? "").trim();
+    if (!raw) throw new ParseError("Repository identifier is empty.");
+
+    const cleaned = cleanInput(raw);
+    const { host, path, hostExplicit } = splitHostAndPath(cleaned, defaultHost);
+    const [owner, repo] = splitOwnerRepo(path, cleaned);
+
+    return { ref: { host, owner, repo }, hostExplicit };
+}
+
+/**
  * 解析仓库标识。
  *
  * 支持以下全部形态：
@@ -151,14 +200,22 @@ function splitOwnerRepo(path: string, original: string): [string, string] {
  * @throws {UnsupportedHostError} 平台不受支持
  */
 export function parseRepoRef(input: string, defaultHost: HostKind = "github"): RepoRef {
-    const raw = (input ?? "").trim();
-    if (!raw) throw new ParseError("Repository identifier is empty.");
+    return parseRepoRefDetailed(input, defaultHost).ref;
+}
 
-    const cleaned = cleanInput(raw);
-    const { host, path } = splitHostAndPath(cleaned, defaultHost);
-    const [owner, repo] = splitOwnerRepo(path, cleaned);
-
-    return { host, owner, repo };
+/**
+ * 地址里是否写明了平台。
+ *
+ * 界面用它决定「平台选择器要不要灰掉」：地址里写了 `gitee.com` 之后，
+ * 用户再选「GitHub」也不会有任何效果 —— 灰掉并说明原因，比让它看起来能改要好。
+ * 地址还解析不出 owner/repo 时（用户正在打字）一律算 `false`，选择器保持可用。
+ */
+export function hasExplicitHost(input: string): boolean {
+    try {
+        return parseRepoRefDetailed(input).hostExplicit;
+    } catch {
+        return false;
+    }
 }
 
 /** 不抛异常的版本，用于「猜一下这是不是仓库地址」的场景。 */
