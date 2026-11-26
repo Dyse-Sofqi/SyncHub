@@ -439,9 +439,12 @@ describe("桌面端启动", () => {
             try {
                 await plugin.onload();
                 fake.runLayoutReady();
-                // 网络那一段是异步的：多让两个微任务跑完。
-                await Promise.resolve();
-                await Promise.resolve();
+                // 读本地副本 → 校验 → 下载 → 写盘 → 找功能区挂上去，整条都是
+                // 异步的。要等它真的走到 `querySelector` 再断言，也要等它跑完
+                // 才还原替身（否则渲染会在用例结束后抛 unhandled rejection）。
+                for (let index = 0; index < 20; index += 1) {
+                    await Promise.resolve();
+                }
 
                 expect(spy.calls).toBeGreaterThan(0);
             } finally {

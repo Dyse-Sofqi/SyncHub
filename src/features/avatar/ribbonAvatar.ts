@@ -1,3 +1,11 @@
+import {
+    avatarDataUrl,
+    bytesToBase64,
+    imageDataUrl,
+    tokenFingerprint,
+    type AvatarStore,
+    type StoredAvatar,
+} from "./avatarCache";
 import { logger } from "../../core/logger";
 import type { HostKind, TokenInfo } from "../../host/types";
 
@@ -10,6 +18,22 @@ import type { HostKind, TokenInfo } from "../../host/types";
  * 于是这个模块不再写死 Gitee，而是每次 `apply()` 问一次 `deps.avatarHost()`。
  * 2026-10-09 再要求把它做成**可点的**：点开设置窗口并停靠「通用」页
  * （见下面「点击它打开设置」）。
+ *
+ * ## 本地副本与更新校验（2026-11-26）
+ *
+ * 用户要求：「头像保存在本地，这样就算离线也能显示；每次加载插件时只对头像
+ * 作更新校验，没有新的头像则沿用旧的」。于是加载时不再是「发请求 → 成功才
+ * 画图」，而是两段：
+ *
+ * 1. **先读本地缓存并立刻画**（`store.read`）—— 离线、接口超时、插件刚启动
+ *    而网络还没通，屏幕上的那张脸都在；
+ * 2. 再做**一次**更新校验（`lookup`）：接口返回的头像地址与缓存里的一致
+ *    → 沿用旧图，不下载、不写盘；地址变了 → 下载新图、落盘、重画。
+ *    校验失败（离线 / 令牌暂时失效）→ **保留旧图**，当作这次没有新头像。
+ *
+ * `checked` 记的是「本次插件会话里已经校验过的身份」：布局变化、`applyDerivedSettings`
+ * 等都会反复调 `apply()`，但不能每次都去问接口 —— 那在离线时会变成一条不停
+ * 重试的请求队列。换令牌 / 换平台是新身份，会重新校验；插件重载则是新会话。
  *
  * ## 为什么不用 `addRibbonIcon`
  *
@@ -54,14 +78,14 @@ import type { HostKind, TokenInfo } from "../../host/types";
  * **幂等**的，装配层可以在「启动完成」「设置变更」「令牌变更」「布局变化」时
  * 都调它一次：
  *
- * - 开关关着 / 那个平台没令牌 → 摘掉（连网络请求都不发）；
- * - 都有 → 有缓存就直接画，没有就去问一次那个平台的 `validateToken()`。
+ * - 开关关着 / 那个平台没令牌 → 摘掉（连本地缓存都不读，更不发请求）；
+ * - 都有 → 先画本地缓存（若有），再在本次会话里校验一次。
  *
  * ## 换平台 = 换一份缓存
  *
- * 缓存与「正在请求」都按 **`平台 + 令牌`** 认身份（见 `ResolvedAvatar` / `inFlight`）：
- * 只按令牌认的话，两个平台恰好存了同一串令牌时会把上一张头像画到新平台上 ——
- * 而那种错没有任何报错，只是「头像不对」。
+ * 缓存与「正在校验」都按 **`平台 + 令牌`** 认身份（见 `avatarIdentity` /
+ * `tokenFingerprint`）：只按令牌认的话，两个平台恰好存了同一串令牌时会把上一张
+ * 头像画到新平台上 —— 而那种错没有任何报错，只是「头像不对」。
  *
  * ## 拿不到令牌时为什么不显示
  *
@@ -91,6 +115,12 @@ export interface RibbonAvatarDeps {
      */
     lookup(host: HostKind, token: string): Promise<TokenInfo>;
     /**
+     * 本地副本的读写（实现见 `avatarCache.ts`）。先读它再校验，离线才有图。
+     */
+    store: AvatarStore;
+    /** 按头像地址取回图片字节。装配层走 Obsidian 的 `requestUrl`。 */
+    download(url: string): Promise<AvatarImage>;
+    /**
      * 头像的 alt / 悬停文案。入参是平台与账号名（账号名**可能为空串** ——
      * 接口没给 `login` 时那种残句由文案自己兜，见 locale 里那条注释）。
      *
@@ -109,6 +139,12 @@ export interface RibbonAvatarDeps {
     onClick?: () => void;
     /** 挂载点。省掉时走 `findRibbonContainer()`；测试注入一个假节点。 */
     getContainer?(): HTMLElement | null;
+}
+
+/** 下载一张头像得到的字节及其 MIME。 */
+export interface AvatarImage {
+    bytes: Uint8Array;
+    mime: string;
 }
 
 /** 头像元素的类名（样式见 `styles.css` 的 `.obsync-ribbon-avatar`）。 */
@@ -171,8 +207,11 @@ export function findRibbonContainer(root: ParentNode = document): HTMLElement | 
 interface ResolvedAvatar {
     host: HostKind;
     token: string;
+    /** 远端头像地址（缓存命中时来自本地文件）。用于比对是否有新头像。 */
     avatarUrl: string;
     account?: string;
+    /** 真正给 `<img src>` 的值：本地副本与新下载的都是 data URL。 */
+    src: string;
 }
 
 /** 缓存/在途的身份：平台 + 令牌。 */
@@ -185,28 +224,37 @@ export class RibbonAvatar {
     private element?: HTMLImageElement;
 
     /**
-     * 已解析的头像。**只在成功时写入** —— 与 `installerService.giteeAccountName`
-     * 同一条理由：失败不缓存，用户中途补上令牌/改对令牌之后下一次 `apply()`
-     * 就会重新去问，不必重启 Obsidian。
+     * 当前画着的头像。**只在拿到一张图时写入** —— 本地缓存命中会写，新下载
+     * 成功也会写；校验失败不写，屏幕上那张旧图就留在那儿。
      */
     private resolved?: ResolvedAvatar;
 
     /**
-     * 正在请求的身份（`avatarIdentity()`）。
-     *
-     * 两个作用：一是同一身份不重复发请求（`apply()` 会被反复调用），
-     * 二是**丢弃过期结果** —— 用户换了令牌或换了平台之后，先前那次响应回来时
-     * 不能再画上去。
+     * 正在处理的身份（`avatarIdentity()`）。覆盖「读缓存 → 校验 → 下载 → 落盘」
+     * 整条链，两个作用：同一身份不重复开工（`apply()` 会被布局事件反复调用），
+     * 以及**丢弃过期结果**（用户换了令牌或平台之后，先前那次响应回来时不能
+     * 再画上去）。
      */
     private inFlight?: string;
+
+    /**
+     * 本次插件会话里已经做过更新校验的身份。
+     *
+     * 失败也算校验过 —— 否则离线时每一次布局变化都会再发一次请求。想再试
+     * 就换令牌 / 换平台（新身份），或者重载插件（新会话）。
+     */
+    private checked?: string;
+
+    /** 插件已卸载。卸载后回到来的异步结果不能再往功能区挂节点。 */
+    private destroyed = false;
 
     constructor(private readonly deps: RibbonAvatarDeps) {}
 
     /**
      * 按当前设置、平台与令牌把头像画出来（或摘掉）。幂等，可反复调用。
      *
-     * 同步返回：网络那一段在内部自己跑完再把图挂上 —— 调用方（装配层）是在
-     * `applyDerivedSettings()` 这种同步路径里调它的，不该为了一个装饰去 await。
+     * 同步返回：读盘与网络那几段在内部自己跑完再把图挂上 —— 调用方（装配层）
+     * 是在 `applyDerivedSettings()` 这种同步路径里调它的，不该为了一个装饰去 await。
      */
     apply(): void {
         // 平台**每次都问**（用户可能刚拨了那个开关）—— 关着时问都不必问。
@@ -222,14 +270,23 @@ export class RibbonAvatar {
             return;
         }
 
-        void this.resolve(host, token);
+        const identity = avatarIdentity(host, token);
+        // 正在进行中，或者这次会话已经校验过（但没图）—— 都不再开工。
+        if (this.inFlight === identity || this.checked === identity) return;
+
+        void this.activate(host, token, identity);
     }
 
-    /** 卸载时调：摘掉节点并清掉缓存（令牌不该在插件禁用后留在内存里）。 */
+    /**
+     * 卸载时调：摘掉节点并清掉内存缓存（令牌不该在插件禁用后留在内存里）。
+     * **磁盘上的头像副本不动** —— 下次加载还要靠它离线显示。
+     */
     destroy(): void {
+        this.destroyed = true;
         this.remove();
         this.resolved = undefined;
         this.inFlight = undefined;
+        this.checked = undefined;
     }
 
     /** 当前令牌（去掉空白，空串算没配 —— 与 `SecretStore` 的口径一致）。 */
@@ -238,44 +295,125 @@ export class RibbonAvatar {
         return token ? token : undefined;
     }
 
-    private async resolve(host: HostKind, token: string): Promise<void> {
-        const identity = avatarIdentity(host, token);
-        if (this.inFlight === identity) return;
+    /** 请求期间设置可能变了；变了的结果不能画上去。 */
+    private isCurrent(host: HostKind, token: string): boolean {
+        return (
+            !this.destroyed &&
+            this.deps.isEnabled() &&
+            this.deps.avatarHost() === host &&
+            this.currentToken(host) === token
+        );
+    }
+
+    private async activate(host: HostKind, token: string, identity: string): Promise<void> {
         this.inFlight = identity;
+        const fingerprint = tokenFingerprint(host, token);
 
+        // ① 本地副本先画。**离线时能不能看到头像，全靠这一步。**
+        let cached: StoredAvatar | null = null;
         try {
-            const info = await this.deps.lookup(host, token);
-
-            // 请求期间令牌/平台又被换过一次 —— 这次的结果已经过期，丢掉。
-            // （`inFlight` 已经被新那次覆盖，所以不能在这里清空它。）
-            if (this.inFlight !== identity) return;
-            this.inFlight = undefined;
-
-            if (!info.valid || !info.avatarUrl) {
-                logger.debug("no avatar to show", {
-                    host,
-                    valid: info.valid,
-                    hasAvatar: Boolean(info.avatarUrl),
-                });
-                // 令牌无效 / 响应里没有头像地址：屏幕上不该留一张过期的图。
-                this.remove();
-                return;
-            }
-
-            this.resolved = { host, token, avatarUrl: info.avatarUrl, account: info.account };
-
-            // 拿到结果之后**再确认一次**当前的输入：请求期间开关可能被关掉、
-            // 令牌可能被清掉、平台可能被换掉（`apply()` 是在用户拨开关的那一刻
-            // 同步调用的）。
-            if (!this.deps.isEnabled()) return;
-            if (this.deps.avatarHost() !== host) return;
-            if (this.currentToken(host) !== token) return;
-            this.render(this.resolved);
+            cached = await this.deps.store.read(host);
+            // 令牌换了：这份缓存属于上一个账号，不能用。
+            if (cached && cached.tokenFingerprint !== fingerprint) cached = null;
         } catch (err) {
-            if (this.inFlight === identity) this.inFlight = undefined;
-            // 网络问题不该弹提示：这是一个装饰，失败就当作没有。
-            logger.debug("could not load the ribbon avatar", err);
+            logger.debug("could not load the cached ribbon avatar", err);
         }
+        if (this.inFlight !== identity) return;
+        if (!this.isCurrent(host, token)) {
+            // 读盘期间开关被关掉 / 令牌被清掉：这次作废，且必须把 inFlight
+            // 交还，否则用户再打开时会被当成「正在进行中」永远卡住。
+            this.inFlight = undefined;
+            return;
+        }
+
+        if (cached) {
+            this.resolved = {
+                host,
+                token,
+                avatarUrl: cached.avatarUrl,
+                account: cached.account,
+                src: avatarDataUrl(cached),
+            };
+            this.render(this.resolved);
+        }
+
+        // ② 更新校验：每个身份每次会话只问一次。失败就沿用上面的旧图。
+        let info: TokenInfo;
+        try {
+            info = await this.deps.lookup(host, token);
+        } catch (err) {
+            if (this.inFlight === identity) {
+                this.inFlight = undefined;
+                this.checked = identity;
+            }
+            logger.debug("could not check the ribbon avatar for updates", err);
+            return;
+        }
+
+        // 请求期间令牌/平台又被换过一次 —— 这次的结果已经过期，丢掉。
+        // （`inFlight` 已经被新那次覆盖，所以不能在这里清空它。）
+        if (this.inFlight !== identity) return;
+        this.inFlight = undefined;
+        this.checked = identity;
+
+        if (!this.isCurrent(host, token)) return;
+
+        if (!info.valid || !info.avatarUrl) {
+            // 令牌暂时失效 / 接口没给地址：有本地副本就继续用它（没有人脸变了），
+            // 没有则屏幕上不该留一张别处的图。
+            if (!cached) this.remove();
+            return;
+        }
+
+        if (cached && cached.avatarUrl === info.avatarUrl) {
+            // **没有新头像**：旧图已经画上了，不下载、不写盘。账号名以这次
+            // 接口给的为准（缓存里可能没有）。
+            this.resolved = {
+                host,
+                token,
+                avatarUrl: cached.avatarUrl,
+                account: info.account ?? cached.account,
+                src: avatarDataUrl(cached),
+            };
+            this.render(this.resolved);
+            return;
+        }
+
+        // ③ 地址变了（或第一次）→ 取回图片并落盘。
+        let image: AvatarImage;
+        try {
+            image = await this.deps.download(info.avatarUrl);
+        } catch (err) {
+            // 拿不到新图就留着旧图 —— 这正是「没有新的头像则沿用旧的」。
+            logger.debug("could not download the ribbon avatar", err);
+            return;
+        }
+        if (!this.isCurrent(host, token)) return;
+
+        const base64 = bytesToBase64(image.bytes);
+        const entry: StoredAvatar = {
+            tokenFingerprint: fingerprint,
+            avatarUrl: info.avatarUrl,
+            account: info.account,
+            mime: image.mime,
+            base64,
+        };
+        try {
+            await this.deps.store.write(host, entry);
+        } catch (err) {
+            // 写盘失败不该挡住显示：这一会话里图还是在的，下次再试。
+            logger.debug("could not save the ribbon avatar locally", err);
+        }
+        if (!this.isCurrent(host, token)) return;
+
+        this.resolved = {
+            host,
+            token,
+            avatarUrl: info.avatarUrl,
+            account: info.account,
+            src: imageDataUrl(image.mime, base64),
+        };
+        this.render(this.resolved);
     }
 
     private render(entry: ResolvedAvatar): void {
@@ -302,7 +440,8 @@ export class RibbonAvatar {
         }
 
         const label = this.deps.getLabel(entry.host, entry.account ?? "");
-        this.element.setAttribute("src", entry.avatarUrl);
+        // data URL 不发起网络请求：离线时这张图就在节点自己的属性里。
+        this.element.setAttribute("src", entry.src);
         this.element.setAttribute("alt", label);
         this.element.setAttribute("title", label);
     }

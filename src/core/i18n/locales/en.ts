@@ -112,7 +112,7 @@ export const en = {
                 "On: the sync item is ordered first in the status bar (only its own visual order changes; no other item moves). Off: no special treatment — the item falls back to the default order, after the other items. The status bar itself is untouched either way.",
             ribbonAvatar: "Show your avatar in the ribbon",
             ribbonAvatarDesc:
-                "Show a round avatar (of the account your token belongs to) at the bottom of the left ribbon. Which platform's avatar to use is decided by the next item.",
+                "Show a round avatar (of the account your token belongs to) at the bottom of the left ribbon. Which platform's avatar to use is decided by the next item. The image is kept locally so it stays visible offline; each launch checks once for a newer one and keeps the old image if there is none.",
             /** Which platform's avatar (2026-10-06, split out of the row above). */
             ribbonAvatarSource: "Use your Gitee avatar",
             ribbonAvatarSourceDesc:

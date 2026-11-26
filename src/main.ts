@@ -8,6 +8,7 @@ import {
     normalizeSettings,
     type ObsyncSettings,
 } from "./core/settings";
+import { createAvatarStore } from "./features/avatar/avatarCache";
 import { RibbonAvatar } from "./features/avatar/ribbonAvatar";
 import { createImageSyncModule, type ImageSyncModule } from "./features/images";
 import { isEditableImage, isImagePath, isInsideFolders, normalizeFolders } from "./features/images/imageScan";
@@ -30,7 +31,7 @@ import { EditRemoteModal } from "./features/sync/ui/EditRemoteModal";
 import { DIFF_VIEW_TYPE, DiffView, type DiffRequest } from "./features/sync/ui/DiffView";
 import { SourceControlView, SYNC_VIEW_TYPE } from "./features/sync/ui/SourceControlView";
 import { runWithLargeFileGuard, type LargeFileGuardDeps } from "./features/sync/ui/largeFileGuard";
-import { setHttpDebugLogger } from "./host/http";
+import { getHeader, httpRequest, setHttpDebugLogger } from "./host/http";
 import { getHost } from "./host/hostRegistry";
 import { redactUrl } from "./host/redact";
 import { ObsyncSettingsTab } from "./settingsTab";
@@ -121,6 +122,8 @@ export default class ObsyncPlugin extends Plugin {
      *
      * 与 `sync` 不同，**移动端也装**：它只是一次 `requestUrl` 加一个 `<img>`，
      * 手机上的抽屉功能区同样挂得上（见 `findRibbonContainer` 的选择器清单）。
+     * 头像副本写在插件自己的目录里（`avatarCache.ts`），两端都用 `DataAdapter`
+     * 的 read/write，离线时靠它显示。
      */
     ribbonAvatar?: RibbonAvatar;
 
@@ -173,6 +176,19 @@ export default class ObsyncPlugin extends Plugin {
             getToken: (host) => this.secretStore.getToken(host),
             // 头像地址与账号名来自**同一次** `validateToken()`（见 `TokenInfo.avatarUrl`）。
             lookup: (host, token) => getHost(host).validateToken(token),
+            // 本地副本：先画旧图，再做一次更新校验。离线时靠它显示。
+            store: createAvatarStore(this.app, this.manifest.id),
+            // 图片字节走 Obsidian 的 requestUrl（移动端也可用），带短超时：
+            // 这只是个装饰，拉不到就沿用旧图，不该拖住启动或耗光重试配额。
+            download: async (url) => {
+                const response = await httpRequest({ url, retries: 0, timeoutMs: 10_000 });
+                if (response.status < 200 || response.status >= 300) {
+                    throw new Error(`avatar download failed: HTTP ${response.status}`);
+                }
+                const rawMime = getHeader(response.headers, "content-type")?.split(";")[0]?.trim();
+                const mime = rawMime?.startsWith("image/") ? rawMime : "image/png";
+                return { bytes: new Uint8Array(response.arrayBuffer), mime };
+            },
             // `() => this.t` 而不是快照：这个模块是常驻的，界面语言可能在它活着
             // 的时候变（与设置页/视图的 `getT` 同一条理由）。
             // 平台名走 `displayName`（「Gitee」/「GitHub」）—— 与设置页令牌那一行同源。
